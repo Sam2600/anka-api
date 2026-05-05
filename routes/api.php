@@ -20,6 +20,8 @@ Route::post('/auth/login', [AuthController::class, 'login'])->middleware('thrott
 Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     Route::delete('/auth/logout', [AuthController::class, 'logout']);
     Route::get('/auth/me', [AuthController::class, 'me']);
+    Route::put('/auth/profile', [AuthController::class, 'updateProfile']);
+    Route::post('/auth/password', [AuthController::class, 'changePassword']);
     Route::post('/auth/refresh', [AuthController::class, 'refresh']);
 });
 
@@ -32,6 +34,8 @@ Route::middleware(['auth:sanctum', 'super_admin', 'throttle:60,1'])->prefix('adm
     Route::delete('/tenants/{id}',                      [TenantController::class, 'destroy']);
     Route::get('/tenants/{tenantId}/users',             [TenantController::class, 'listUsers']);
     Route::post('/tenants/{tenantId}/users',            [TenantController::class, 'createUser']);
+    Route::put('/tenants/{tenantId}/users/{userId}',    [TenantController::class, 'updateUser']);
+    Route::delete('/tenants/{tenantId}/users/{userId}', [TenantController::class, 'deleteUser']);
 });
 
 // Business data routes — require tenant scope.

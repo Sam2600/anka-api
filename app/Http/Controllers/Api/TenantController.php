@@ -10,6 +10,7 @@ use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
 
 class TenantController extends Controller
 {
@@ -39,10 +40,15 @@ class TenantController extends Controller
 
     public function index()
     {
-        $tenants = Tenant::orderBy('created_at', 'desc')->paginate(50);
+        $tenants = Tenant::withCount(['users' => function ($q) {
+            $q->whereNull('deleted_at');
+        }])->orderBy('created_at', 'desc')->paginate(50);
 
         return response()->json([
-            'data' => $tenants->map(fn ($t) => $this->tenantData($t)),
+            'data' => $tenants->map(fn ($t) => [
+                ...$this->tenantData($t),
+                'users_count' => $t->users_count,
+            ]),
             'meta' => [
                 'total' => $tenants->total(),
                 'per_page' => $tenants->perPage(),
@@ -126,9 +132,11 @@ class TenantController extends Controller
             'first_name' => 'required|string|max:255',
             'last_name' => 'required|string|max:255',
             'email' => 'required|email|unique:users,email',
-            'password' => 'required|string|min:8',
             'app_role' => 'required|in:Admin,Executive,Sales,Delivery,HR',
         ]);
+
+        // Generate a secure random 8-character password.
+        $plainPassword = Str::random(8);
 
         // 1. Create auth user
         $user = User::create([
@@ -136,7 +144,7 @@ class TenantController extends Controller
             'first_name' => $validated['first_name'],
             'last_name' => $validated['last_name'],
             'email' => $validated['email'],
-            'password' => Hash::make($validated['password']),
+            'password' => Hash::make($plainPassword),
             'app_role' => $validated['app_role'],
             'system_role' => 'member',
             'is_super_admin' => false,
@@ -148,10 +156,66 @@ class TenantController extends Controller
         // 3. Link user → employee
         $user->update(['employee_id' => $employee->id]);
 
-        // 4. Send welcome email (queued — respects Mailgun 100/day limit)
-        Mail::to($user->email)->queue(new WelcomeUser($user, $validated['password']));
+        // 4. Send welcome email to the user's email address
+        Mail::to($user->email)->queue(new WelcomeUser($user, $plainPassword));
 
-        return response()->json(['data' => $this->userData($user->fresh())], 201);
+        return response()->json([
+            'data' => $this->userData($user->fresh()),
+            'generated_password' => $plainPassword,
+        ], 201);
+    }
+
+    public function updateUser(Request $request, string $tenantId, string $userId)
+    {
+        $tenant = Tenant::findOrFail($tenantId);
+
+        $user = User::where('tenant_id', $tenant->id)
+            ->where('id', $userId)
+            ->whereNull('deleted_at')
+            ->firstOrFail();
+
+        $validated = $request->validate([
+            'first_name' => 'sometimes|required|string|max:255',
+            'last_name' => 'sometimes|required|string|max:255',
+            'email' => 'sometimes|required|email|unique:users,email,'.$user->id,
+            'app_role' => 'sometimes|required|in:Admin,Executive,Sales,Delivery,HR',
+        ]);
+
+        $user->update($validated);
+
+        // If role changed, update the linked employee's role_name too.
+        if (isset($validated['app_role']) && $user->employee_id) {
+            $roleName = match ($validated['app_role']) {
+                'Admin', 'Executive' => 'Head of Organization',
+                'HR' => 'HR Manager',
+                'Sales' => 'Sales Manager',
+                'Delivery' => 'Delivery Lead',
+                default => $validated['app_role'],
+            };
+            Employee::where('id', $user->employee_id)->update(['role_name' => $roleName]);
+        }
+
+        return response()->json(['data' => $this->userData($user->fresh())]);
+    }
+
+    public function deleteUser(string $tenantId, string $userId)
+    {
+        $tenant = Tenant::findOrFail($tenantId);
+
+        $user = User::where('tenant_id', $tenant->id)
+            ->where('id', $userId)
+            ->whereNull('deleted_at')
+            ->firstOrFail();
+
+        // Soft delete the user.
+        $user->delete();
+
+        // Soft delete the linked employee record.
+        if ($user->employee_id) {
+            Employee::where('id', $user->employee_id)->delete();
+        }
+
+        return response()->json(['message' => 'User deleted']);
     }
 
     /**
