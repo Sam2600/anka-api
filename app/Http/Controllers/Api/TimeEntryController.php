@@ -11,10 +11,28 @@ use Exception;
 
 class TimeEntryController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        $entries = TimeEntry::all();
-        return TimeEntryResource::collection($entries);
+        $query = TimeEntry::query();
+
+        if ($request->filled('project_id')) {
+            $query->where('project_id', $request->project_id);
+        }
+        if ($request->filled('employee_id')) {
+            $query->where('employee_id', $request->employee_id);
+        }
+        if ($request->filled('status')) {
+            $query->where('status', $request->status);
+        }
+        if ($request->filled('date_from')) {
+            $query->whereDate('date', '>=', $request->date_from);
+        }
+        if ($request->filled('date_to')) {
+            $query->whereDate('date', '<=', $request->date_to);
+        }
+
+        $perPage = min((int) ($request->per_page ?? 50), 200);
+        return TimeEntryResource::collection($query->orderBy('date', 'desc')->paginate($perPage));
     }
 
     public function show(TimeEntry $timeEntry)
@@ -24,9 +42,18 @@ class TimeEntryController extends Controller
 
     public function store(Request $request)
     {
-        $data           = $request->all();
-        $data['status'] = 'Draft';
-        $entry          = TimeEntry::create($data);
+        $validated = $request->validate([
+            'project_id'  => 'required|uuid|exists:projects,id',
+            'employee_id' => 'required|uuid|exists:employees,id',
+            'task'        => 'required|string|max:500',
+            'date'        => 'required|date',
+            'hours'       => 'required|numeric|min:0.5|max:24',
+            'billable'    => 'sometimes|boolean',
+            'notes'       => 'nullable|string|max:2000',
+        ]);
+
+        $validated['status'] = 'Draft';
+        $entry = TimeEntry::create($validated);
         return new TimeEntryResource($entry);
     }
 

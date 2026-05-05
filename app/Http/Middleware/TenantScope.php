@@ -12,6 +12,12 @@ class TenantScope
 {
     public function handle(Request $request, Closure $next): Response
     {
+        // Super admins operate globally — no tenant scope needed.
+        $user = $request->user();
+        if ($user && $user->isSuperAdmin()) {
+            return $next($request);
+        }
+
         $tenantId = $request->header('X-Tenant-ID');
 
         if (!$tenantId) {

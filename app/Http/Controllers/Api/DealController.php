@@ -12,14 +12,39 @@ use Illuminate\Support\Facades\DB;
 
 class DealController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        $deals = Deal::with(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads'])->get();
-        return DealResource::collection($deals);
+        $query = Deal::with(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads']);
+
+        if ($request->filled('status')) {
+            $query->where('status', $request->status);
+        }
+        if ($request->filled('search')) {
+            $search = '%' . $request->search . '%';
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'ilike', $search)
+                  ->orWhere('client', 'ilike', $search);
+            });
+        }
+
+        $perPage = min((int) ($request->per_page ?? 100), 500);
+        return DealResource::collection($query->orderBy('created_at', 'desc')->paginate($perPage));
     }
 
     public function store(Request $request)
     {
+        $request->validate([
+            'name'   => 'required|string|max:255',
+            'client' => 'nullable|string|max:255',
+            'status' => 'nullable|in:lead,opportunity,inquiry,proposal,contract,won,lost',
+            'estimated_value'    => 'nullable|numeric|min:0',
+            'win_probability'    => 'nullable|integer|min:0|max:100',
+            'client_budget'      => 'nullable|numeric|min:0',
+            'timeline_months'    => 'nullable|integer|min:1',
+            'workload_hours'     => 'nullable|numeric|min:0',
+            'target_margin'      => 'nullable|numeric|min:0|max:100',
+        ]);
+
         $deal = DB::transaction(function () use ($request) {
             $deal = Deal::create($request->except([
                 'ghost_roles',
@@ -43,6 +68,18 @@ class DealController extends Controller
 
     public function update(Request $request, Deal $deal)
     {
+        $request->validate([
+            'name'   => 'sometimes|required|string|max:255',
+            'client' => 'sometimes|nullable|string|max:255',
+            'status' => 'sometimes|in:lead,opportunity,inquiry,proposal,contract,won,lost',
+            'estimated_value'    => 'sometimes|nullable|numeric|min:0',
+            'win_probability'    => 'sometimes|nullable|integer|min:0|max:100',
+            'client_budget'      => 'sometimes|nullable|numeric|min:0',
+            'timeline_months'    => 'sometimes|nullable|integer|min:1',
+            'workload_hours'     => 'sometimes|nullable|numeric|min:0',
+            'target_margin'      => 'sometimes|nullable|numeric|min:0|max:100',
+        ]);
+
         DB::transaction(function () use ($request, $deal) {
             $deal->update($request->except([
                 'ghost_roles',

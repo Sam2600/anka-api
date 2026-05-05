@@ -9,10 +9,19 @@ use Illuminate\Http\Request;
 
 class ProjectController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        $projects = Project::all();
-        return ProjectResource::collection($projects);
+        $query = Project::query();
+
+        if ($request->filled('contract_id')) {
+            $query->where('contract_id', $request->contract_id);
+        }
+        if ($request->filled('status')) {
+            $query->where('status', $request->status);
+        }
+
+        $perPage = min((int) ($request->per_page ?? 50), 200);
+        return ProjectResource::collection($query->orderBy('created_at', 'desc')->paginate($perPage));
     }
 
     public function show(Project $project)
@@ -22,6 +31,14 @@ class ProjectController extends Controller
 
     public function update(Request $request, Project $project)
     {
+        $request->validate([
+            'status'         => 'sometimes|in:Not Started,On Track,At Risk,Over Budget,Completed',
+            'name'           => 'sometimes|required|string|max:255',
+            'budget_hours'   => 'sometimes|numeric|min:0',
+            'end_date'       => 'sometimes|nullable|date',
+            'consumed_hours' => 'sometimes|numeric|min:0',
+        ]);
+
         $project->update($request->only(['status', 'name', 'budget_hours', 'end_date', 'consumed_hours']));
         return new ProjectResource($project->fresh());
     }

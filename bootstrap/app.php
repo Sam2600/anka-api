@@ -13,7 +13,8 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware) {
         $middleware->alias([
-            'tenant' => \App\Http\Middleware\TenantScope::class,
+            'tenant'      => \App\Http\Middleware\TenantScope::class,
+            'super_admin' => \App\Http\Middleware\SuperAdmin::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {

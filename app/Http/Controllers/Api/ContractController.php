@@ -9,10 +9,19 @@ use Illuminate\Http\Request;
 
 class ContractController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        $contracts = Contract::all();
-        return ContractResource::collection($contracts);
+        $query = Contract::query();
+
+        if ($request->filled('deal_id')) {
+            $query->where('deal_id', $request->deal_id);
+        }
+        if ($request->filled('status')) {
+            $query->where('status', $request->status);
+        }
+
+        $perPage = min((int) ($request->per_page ?? 50), 200);
+        return ContractResource::collection($query->orderBy('created_at', 'desc')->paginate($perPage));
     }
 
     public function show(Contract $contract)
@@ -22,6 +31,13 @@ class ContractController extends Controller
 
     public function update(Request $request, Contract $contract)
     {
+        $request->validate([
+            'status'      => 'sometimes|in:Active,Completed,Draft,Cancelled',
+            'notes'       => 'sometimes|nullable|string|max:2000',
+            'end_date'    => 'sometimes|nullable|date',
+            'total_value' => 'sometimes|numeric|min:0',
+        ]);
+
         $contract->update($request->only(['status', 'notes', 'end_date', 'total_value']));
         return new ContractResource($contract->fresh());
     }

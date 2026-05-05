@@ -23,6 +23,7 @@ class User extends Authenticatable
         'password',
         'system_role',
         'app_role',
+        'is_super_admin',
     ];
 
     protected $hidden = [
@@ -37,7 +38,13 @@ class User extends Authenticatable
             'email_verified_at' => 'datetime',
             'password'          => 'hashed',
             'deleted_at'        => 'datetime',
+            'is_super_admin'    => 'boolean',
         ];
+    }
+
+    public function isSuperAdmin(): bool
+    {
+        return (bool) $this->is_super_admin;
     }
 
     public function tenant()

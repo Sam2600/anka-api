@@ -1,0 +1,206 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Mail\WelcomeUser;
+use App\Models\Employee;
+use App\Models\Tenant;
+use App\Models\User;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Mail;
+
+class TenantController extends Controller
+{
+    // ── Org-user routes (behind tenant middleware) ───────────────────────────
+
+    public function show()
+    {
+        $tenant = Tenant::findOrFail(app('tenant_id'));
+
+        return response()->json(['data' => $this->tenantData($tenant)]);
+    }
+
+    public function update(Request $request)
+    {
+        $validated = $request->validate([
+            'name' => 'sometimes|required|string|max:255',
+            'slug' => 'sometimes|required|string|max:100|alpha_dash|unique:tenants,slug,'.app('tenant_id'),
+        ]);
+
+        $tenant = Tenant::findOrFail(app('tenant_id'));
+        $tenant->update($validated);
+
+        return response()->json(['data' => $this->tenantData($tenant)]);
+    }
+
+    // ── Super-admin routes (behind super_admin middleware) ───────────────────
+
+    public function index()
+    {
+        $tenants = Tenant::orderBy('created_at', 'desc')->paginate(50);
+
+        return response()->json([
+            'data' => $tenants->map(fn ($t) => $this->tenantData($t)),
+            'meta' => [
+                'total' => $tenants->total(),
+                'per_page' => $tenants->perPage(),
+                'current_page' => $tenants->currentPage(),
+                'last_page' => $tenants->lastPage(),
+            ],
+        ]);
+    }
+
+    public function store(Request $request)
+    {
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'slug' => 'required|string|max:100|alpha_dash|unique:tenants,slug',
+            'plan' => 'nullable|string|max:50',
+            'is_active' => 'boolean',
+        ]);
+
+        $tenant = Tenant::create([
+            'name' => $validated['name'],
+            'slug' => $validated['slug'],
+            'plan' => $validated['plan'] ?? null,
+            'is_active' => $validated['is_active'] ?? true,
+        ]);
+
+        return response()->json(['data' => $this->tenantData($tenant)], 201);
+    }
+
+    public function showAdmin(string $id)
+    {
+        $tenant = Tenant::findOrFail($id);
+
+        return response()->json(['data' => $this->tenantData($tenant)]);
+    }
+
+    public function updateAdmin(Request $request, string $id)
+    {
+        $tenant = Tenant::findOrFail($id);
+
+        $validated = $request->validate([
+            'name' => 'sometimes|required|string|max:255',
+            'slug' => 'sometimes|required|string|max:100|alpha_dash|unique:tenants,slug,'.$id,
+            'plan' => 'nullable|string|max:50',
+            'is_active' => 'boolean',
+        ]);
+
+        $tenant->update($validated);
+
+        return response()->json(['data' => $this->tenantData($tenant)]);
+    }
+
+    public function destroy(string $id)
+    {
+        $tenant = Tenant::findOrFail($id);
+        $tenant->update(['is_active' => false]);
+
+        return response()->json(['message' => 'Tenant deactivated']);
+    }
+
+    // ── User management within a tenant ──────────────────────────────────────
+
+    public function listUsers(string $tenantId)
+    {
+        $tenant = Tenant::findOrFail($tenantId);
+
+        $users = User::where('tenant_id', $tenant->id)
+            ->whereNull('deleted_at')
+            ->orderBy('first_name')
+            ->get();
+
+        return response()->json([
+            'data' => $users->map(fn ($u) => $this->userData($u)),
+        ]);
+    }
+
+    public function createUser(Request $request, string $tenantId)
+    {
+        $tenant = Tenant::findOrFail($tenantId);
+
+        $validated = $request->validate([
+            'first_name' => 'required|string|max:255',
+            'last_name' => 'required|string|max:255',
+            'email' => 'required|email|unique:users,email',
+            'password' => 'required|string|min:8',
+            'app_role' => 'required|in:Admin,Executive,Sales,Delivery,HR',
+        ]);
+
+        // 1. Create auth user
+        $user = User::create([
+            'tenant_id' => $tenant->id,
+            'first_name' => $validated['first_name'],
+            'last_name' => $validated['last_name'],
+            'email' => $validated['email'],
+            'password' => Hash::make($validated['password']),
+            'app_role' => $validated['app_role'],
+            'system_role' => 'member',
+            'is_super_admin' => false,
+        ]);
+
+        // 2. Auto-create employee record so the user appears in Organization / capacity pool
+        $employee = $this->createEmployeeForUser($user, $tenant->id, $validated['app_role']);
+
+        // 3. Link user → employee
+        $user->update(['employee_id' => $employee->id]);
+
+        // 4. Send welcome email (queued — respects Mailgun 100/day limit)
+        Mail::to($user->email)->queue(new WelcomeUser($user, $validated['password']));
+
+        return response()->json(['data' => $this->userData($user->fresh())], 201);
+    }
+
+    /**
+     * Auto-create an employee record for a newly created tenant user.
+     * Maps the user's app_role to a sensible employee role_name.
+     */
+    private function createEmployeeForUser(User $user, string $tenantId, string $appRole): Employee
+    {
+        $roleName = match ($appRole) {
+            'Admin', 'Executive' => 'Head of Organization',
+            'HR' => 'HR Manager',
+            'Sales' => 'Sales Manager',
+            'Delivery' => 'Delivery Lead',
+            default => $appRole,
+        };
+
+        return Employee::create([
+            'tenant_id' => $tenantId,
+            'name' => "{$user->first_name} {$user->last_name}",
+            'role_name' => $roleName,
+            'status' => 'Active',
+            'monthly_salary' => 0,
+            'workable_hours' => 160,
+        ]);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private function tenantData(Tenant $tenant): array
+    {
+        return [
+            'id' => $tenant->id,
+            'name' => $tenant->name,
+            'slug' => $tenant->slug,
+            'plan' => $tenant->plan,
+            'is_active' => $tenant->is_active,
+            'created_at' => $tenant->created_at,
+        ];
+    }
+
+    private function userData(User $user): array
+    {
+        return [
+            'id' => $user->id,
+            'first_name' => $user->first_name,
+            'last_name' => $user->last_name,
+            'email' => $user->email,
+            'app_role' => $user->app_role,
+            'employee_id' => $user->employee_id,
+        ];
+    }
+}

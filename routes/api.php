@@ -8,6 +8,8 @@ use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\OrganizationController;
 use App\Http\Controllers\Api\ProjectController;
 use App\Http\Controllers\Api\TimeEntryController;
+use App\Http\Controllers\Api\TenantController;
+use App\Http\Controllers\Api\MilestoneController;
 
 // throttle:5,1 = max 5 attempts per minute per IP — brute-force protection.
 Route::post('/auth/login', [AuthController::class, 'login'])->middleware('throttle:5,1');
@@ -19,6 +21,17 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     Route::delete('/auth/logout', [AuthController::class, 'logout']);
     Route::get('/auth/me', [AuthController::class, 'me']);
     Route::post('/auth/refresh', [AuthController::class, 'refresh']);
+});
+
+// Super admin routes — no tenant scope, requires is_super_admin = true.
+Route::middleware(['auth:sanctum', 'super_admin', 'throttle:60,1'])->prefix('admin')->group(function () {
+    Route::get('/tenants',                              [TenantController::class, 'index']);
+    Route::post('/tenants',                             [TenantController::class, 'store']);
+    Route::get('/tenants/{id}',                         [TenantController::class, 'showAdmin']);
+    Route::put('/tenants/{id}',                         [TenantController::class, 'updateAdmin']);
+    Route::delete('/tenants/{id}',                      [TenantController::class, 'destroy']);
+    Route::get('/tenants/{tenantId}/users',             [TenantController::class, 'listUsers']);
+    Route::post('/tenants/{tenantId}/users',            [TenantController::class, 'createUser']);
 });
 
 // Business data routes — require tenant scope.
@@ -43,26 +56,33 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::patch('/time-entries/{time_entry}/approve', [TimeEntryController::class, 'approve']);
 
     // Organization
-    Route::get('/departments',              [OrganizationController::class, 'indexDepartments']);
-    Route::post('/departments',             [OrganizationController::class, 'storeDepartment']);
-    Route::put('/departments/{department}', [OrganizationController::class, 'updateDepartment']);
-    Route::delete('/departments/{department}', [OrganizationController::class, 'destroyDepartment']);
+    Route::get('/departments',                   [OrganizationController::class, 'indexDepartments']);
+    Route::post('/departments',                  [OrganizationController::class, 'storeDepartment']);
+    Route::put('/departments/{department}',      [OrganizationController::class, 'updateDepartment']);
+    Route::delete('/departments/{department}',   [OrganizationController::class, 'destroyDepartment']);
 
-    Route::get('/roles',         [OrganizationController::class, 'indexRoles']);
-    Route::post('/roles',        [OrganizationController::class, 'storeRole']);
-    Route::put('/roles/{role}',  [OrganizationController::class, 'updateRole']);
-    Route::delete('/roles/{role}', [OrganizationController::class, 'destroyRole']);
+    Route::get('/roles',                         [OrganizationController::class, 'indexRoles']);
+    Route::post('/roles',                        [OrganizationController::class, 'storeRole']);
+    Route::put('/roles/{role}',                  [OrganizationController::class, 'updateRole']);
+    Route::delete('/roles/{role}',               [OrganizationController::class, 'destroyRole']);
 
-    Route::get('/employees',              [OrganizationController::class, 'indexEmployees']);
-    Route::post('/employees',             [OrganizationController::class, 'storeEmployee']);
-    Route::put('/employees/{employee}',   [OrganizationController::class, 'updateEmployee']);
-    Route::delete('/employees/{employee}', [OrganizationController::class, 'destroyEmployee']);
+    Route::get('/employees',                     [OrganizationController::class, 'indexEmployees']);
+    Route::post('/employees',                    [OrganizationController::class, 'storeEmployee']);
+    Route::put('/employees/{employee}',          [OrganizationController::class, 'updateEmployee']);
+    Route::delete('/employees/{employee}',       [OrganizationController::class, 'destroyEmployee']);
 
-    Route::get('/global-overheads',                          [OrganizationController::class, 'indexOverheads']);
-    Route::post('/global-overheads',                         [OrganizationController::class, 'storeOverhead']);
-    Route::put('/global-overheads/{globalOverhead}',         [OrganizationController::class, 'updateOverhead']);
-    Route::delete('/global-overheads/{globalOverhead}',      [OrganizationController::class, 'destroyOverhead']);
+    Route::get('/global-overheads',              [OrganizationController::class, 'indexOverheads']);
+    Route::post('/global-overheads',             [OrganizationController::class, 'storeOverhead']);
+    Route::put('/global-overheads/{globalOverhead}',    [OrganizationController::class, 'updateOverhead']);
+    Route::delete('/global-overheads/{globalOverhead}', [OrganizationController::class, 'destroyOverhead']);
 
-    Route::get('/company-settings', [OrganizationController::class, 'getSettings']);
-    Route::put('/company-settings', [OrganizationController::class, 'upsertSettings']);
+    Route::get('/company-settings',              [OrganizationController::class, 'getSettings']);
+    Route::put('/company-settings',              [OrganizationController::class, 'upsertSettings']);
+
+    // Tenant settings (own tenant only)
+    Route::get('/tenant',  [TenantController::class, 'show']);
+    Route::put('/tenant',  [TenantController::class, 'update']);
+
+    // Milestones
+    Route::apiResource('milestones', MilestoneController::class);
 });
