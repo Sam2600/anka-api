@@ -16,11 +16,13 @@ class Department extends Model
         'tenant_id',
         'name',
         'manager',
+        'manager_id',
         'headcount',
     ];
 
     protected $casts = [
         'id'        => 'string',
+        'manager_id' => 'string',
         'headcount' => 'integer',
     ];
 
@@ -37,5 +39,10 @@ class Department extends Model
     public function roles()
     {
         return $this->hasMany(Role::class);
+    }
+
+    public function managerEmployee()
+    {
+        return $this->belongsTo(Employee::class, 'manager_id');
     }
 }
