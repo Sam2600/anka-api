@@ -33,7 +33,7 @@ on:
 env:
   AWS_REGION: ap-southeast-1
   ECR_REPOSITORY: anka
-  ECS_SERVICE: anka-task-def-service-pwhxt0op
+  ECS_SERVICE: anka-task-def-service-h62gr0uq
   ECS_CLUSTER: anka-cluster
   ECS_TASK_DEFINITION: .aws/task-definition.json
   CONTAINER_NAME: anka
