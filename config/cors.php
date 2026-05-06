@@ -9,8 +9,7 @@ $allowedOrigins = $frontendUrl
 
 return [
     'paths' => ['api/*', 'sanctum/csrf-cookie'],
-    // PUT is not used by any route — omitting it shrinks the allowed surface.
-    'allowed_methods' => ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    'allowed_methods' => ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     'allowed_origins' => $allowedOrigins,
     'allowed_origins_patterns' => [],
     'allowed_headers' => ['X-Tenant-ID', 'Authorization', 'Content-Type', 'Accept', 'X-XSRF-TOKEN'],

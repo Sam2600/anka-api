@@ -10,10 +10,12 @@ class DepartmentResource extends JsonResource
     public function toArray(Request $request): array
     {
         return [
-            'id'        => $this->id,
-            'name'      => $this->name,
-            'manager'   => $this->manager,
-            'headcount' => $this->headcount,
+            'id'           => $this->id,
+            'name'         => $this->name,
+            'manager_id'   => $this->manager_id,
+            'manager_name' => optional($this->managerEmployee)->name,
+            // employees_count is populated when the controller calls withCount('employees')
+            'headcount'    => $this->employees_count ?? $this->headcount,
         ];
     }
 }

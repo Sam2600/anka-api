@@ -22,38 +22,42 @@ class OrganizationController extends Controller
 
     public function indexDepartments()
     {
-        return DepartmentResource::collection(Department::orderBy('created_at')->get());
+        return DepartmentResource::collection(
+            Department::with('managerEmployee')->withCount('employees')->orderBy('created_at')->get()
+        );
     }
 
     public function storeDepartment(Request $request)
     {
         $request->validate([
-            'id'        => 'sometimes|uuid',
-            'name'      => 'required|string|max:255',
-            'manager'   => 'required|string|max:255',
-            'headcount' => 'required|integer|min:0',
+            'id'         => 'sometimes|uuid',
+            'name'       => 'required|string|max:255',
+            'manager'    => 'nullable|string|max:255',
+            'manager_id' => 'nullable|uuid|exists:employees,id',
+            'headcount'  => 'sometimes|integer|min:0',
         ]);
 
-        $dept = new Department($request->only(['name', 'manager', 'headcount']));
+        $dept = new Department($request->only(['name', 'manager', 'manager_id', 'headcount']));
         if ($request->filled('id')) {
             $dept->id = $request->input('id');
         }
         $dept->save();
 
-        return new DepartmentResource($dept);
+        return new DepartmentResource($dept->loadCount('employees')->load('managerEmployee'));
     }
 
     public function updateDepartment(Request $request, Department $department)
     {
         $request->validate([
-            'name'      => 'sometimes|required|string|max:255',
-            'manager'   => 'sometimes|required|string|max:255',
-            'headcount' => 'sometimes|required|integer|min:0',
+            'name'       => 'sometimes|required|string|max:255',
+            'manager'    => 'sometimes|nullable|string|max:255',
+            'manager_id' => 'sometimes|nullable|uuid|exists:employees,id',
+            'headcount'  => 'sometimes|integer|min:0',
         ]);
 
-        $department->update($request->only(['name', 'manager', 'headcount']));
+        $department->update($request->only(['name', 'manager', 'manager_id', 'headcount']));
 
-        return new DepartmentResource($department);
+        return new DepartmentResource($department->loadCount('employees')->load('managerEmployee'));
     }
 
     public function destroyDepartment(Department $department)
@@ -114,7 +118,9 @@ class OrganizationController extends Controller
 
     public function indexEmployees()
     {
-        return EmployeeResource::collection(Employee::orderBy('created_at')->get());
+        return EmployeeResource::collection(
+            Employee::with('department')->orderBy('created_at')->get()
+        );
     }
 
     public function storeEmployee(Request $request)
@@ -124,6 +130,8 @@ class OrganizationController extends Controller
             'name'           => 'required|string|max:255',
             'role'           => 'required|string|max:255',
             'role_name'      => 'nullable|string|max:255',
+            'department_id'  => 'nullable|uuid|exists:departments,id',
+            'job_role_id'    => 'nullable|uuid|exists:roles,id',
             'capacity_role'  => 'nullable|in:frontend,backend,pm,qa,design',
             'monthly_salary' => 'required|numeric|min:0',
             'workable_hours' => 'required|integer|min:1|max:744',
@@ -132,16 +140,16 @@ class OrganizationController extends Controller
         ]);
 
         $employee = new Employee($request->only([
-            'name', 'role', 'role_name', 'capacity_role',
-            'monthly_salary', 'workable_hours', 'status',
+            'name', 'role', 'role_name', 'department_id', 'job_role_id',
+            'capacity_role', 'monthly_salary', 'workable_hours', 'status',
         ]));
         if ($request->filled('id')) {
             $employee->id = $request->input('id');
         }
         $employee->save();
 
-        // Reload to get the DB-computed cost_per_hour
-        return new EmployeeResource($employee->fresh());
+        // Reload to get the DB-computed cost_per_hour and eager-loaded department
+        return new EmployeeResource($employee->fresh()->load('department'));
     }
 
     public function updateEmployee(Request $request, Employee $employee)
@@ -150,6 +158,8 @@ class OrganizationController extends Controller
             'name'           => 'sometimes|required|string|max:255',
             'role'           => 'sometimes|required|string|max:255',
             'role_name'      => 'sometimes|nullable|string|max:255',
+            'department_id'  => 'sometimes|nullable|uuid|exists:departments,id',
+            'job_role_id'    => 'sometimes|nullable|uuid|exists:roles,id',
             'capacity_role'  => 'sometimes|nullable|in:frontend,backend,pm,qa,design',
             'monthly_salary' => 'sometimes|required|numeric|min:0',
             'workable_hours' => 'sometimes|required|integer|min:1|max:744',
@@ -158,11 +168,11 @@ class OrganizationController extends Controller
         ]);
 
         $employee->update($request->only([
-            'name', 'role', 'role_name', 'capacity_role',
-            'monthly_salary', 'workable_hours', 'status',
+            'name', 'role', 'role_name', 'department_id', 'job_role_id',
+            'capacity_role', 'monthly_salary', 'workable_hours', 'status',
         ]));
 
-        return new EmployeeResource($employee->fresh());
+        return new EmployeeResource($employee->fresh()->load('department'));
     }
 
     public function destroyEmployee(Employee $employee)
@@ -182,13 +192,17 @@ class OrganizationController extends Controller
     public function storeOverhead(Request $request)
     {
         $request->validate([
-            'id'           => 'sometimes|uuid',
-            'category'     => 'required|string|max:255',
-            'description'  => 'required|string|max:500',
-            'monthly_cost' => 'required|numeric|min:0',
+            'id'              => 'sometimes|uuid',
+            'category'        => 'required|string|max:255',
+            'description'     => 'required|string|max:500',
+            'monthly_cost'    => 'required|numeric|min:0',
+            'effective_month' => 'nullable|integer|min:1|max:12',
+            'effective_year'  => 'nullable|integer|min:2000',
         ]);
 
-        $overhead = new GlobalOverhead($request->only(['category', 'description', 'monthly_cost']));
+        $overhead = new GlobalOverhead(
+            $request->only(['category', 'description', 'monthly_cost', 'effective_month', 'effective_year'])
+        );
         if ($request->filled('id')) {
             $overhead->id = $request->input('id');
         }
@@ -200,12 +214,16 @@ class OrganizationController extends Controller
     public function updateOverhead(Request $request, GlobalOverhead $globalOverhead)
     {
         $request->validate([
-            'category'     => 'sometimes|required|string|max:255',
-            'description'  => 'sometimes|required|string|max:500',
-            'monthly_cost' => 'sometimes|required|numeric|min:0',
+            'category'        => 'sometimes|required|string|max:255',
+            'description'     => 'sometimes|required|string|max:500',
+            'monthly_cost'    => 'sometimes|required|numeric|min:0',
+            'effective_month' => 'sometimes|nullable|integer|min:1|max:12',
+            'effective_year'  => 'sometimes|nullable|integer|min:2000',
         ]);
 
-        $globalOverhead->update($request->only(['category', 'description', 'monthly_cost']));
+        $globalOverhead->update(
+            $request->only(['category', 'description', 'monthly_cost', 'effective_month', 'effective_year'])
+        );
 
         return new GlobalOverheadResource($globalOverhead);
     }

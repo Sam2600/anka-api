@@ -17,11 +17,15 @@ class GlobalOverhead extends Model
         'category',
         'description',
         'monthly_cost',
+        'effective_month',
+        'effective_year',
     ];
 
     protected $casts = [
-        'id'           => 'string',
-        'monthly_cost' => 'float',
+        'id'              => 'string',
+        'monthly_cost'    => 'float',
+        'effective_month' => 'integer',
+        'effective_year'  => 'integer',
     ];
 
     public function tenant()

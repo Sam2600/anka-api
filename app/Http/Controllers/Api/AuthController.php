@@ -50,4 +50,45 @@ class AuthController extends Controller
             'token' => $user->createToken('auth_token')->plainTextToken,
         ]);
     }
+
+    // Update the authenticated user's own profile.
+    public function updateProfile(Request $request)
+    {
+        $user = $request->user();
+
+        $validated = $request->validate([
+            'first_name' => 'sometimes|required|string|max:255',
+            'last_name'  => 'sometimes|required|string|max:255',
+            'email'      => 'sometimes|required|email|unique:users,email,'.$user->id,
+        ]);
+
+        $user->update($validated);
+
+        return new AuthUserResource($user->fresh()->load('tenant'));
+    }
+
+    // Change the authenticated user's password.
+    public function changePassword(Request $request)
+    {
+        $user = $request->user();
+
+        $validated = $request->validate([
+            'current_password'     => 'required|string',
+            'new_password'         => 'required|string|min:8|confirmed',
+            'new_password_confirmation' => 'required|string',
+        ]);
+
+        if (!Hash::check($validated['current_password'], $user->password)) {
+            return response()->json([
+                'message' => 'Current password is incorrect.',
+                'errors'  => ['current_password' => ['Current password is incorrect.']],
+            ], 422);
+        }
+
+        $user->update([
+            'password' => Hash::make($validated['new_password']),
+        ]);
+
+        return response()->json(['message' => 'Password changed successfully.']);
+    }
 }

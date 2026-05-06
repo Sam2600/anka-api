@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\ProjectController;
 use App\Http\Controllers\Api\TimeEntryController;
 use App\Http\Controllers\Api\TenantController;
 use App\Http\Controllers\Api\MilestoneController;
+use App\Http\Controllers\Api\AiUsageController;
 
 // throttle:5,1 = max 5 attempts per minute per IP — brute-force protection.
 Route::post('/auth/login', [AuthController::class, 'login'])->middleware('throttle:5,1');
@@ -20,6 +21,8 @@ Route::post('/auth/login', [AuthController::class, 'login'])->middleware('thrott
 Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     Route::delete('/auth/logout', [AuthController::class, 'logout']);
     Route::get('/auth/me', [AuthController::class, 'me']);
+    Route::put('/auth/profile', [AuthController::class, 'updateProfile']);
+    Route::post('/auth/password', [AuthController::class, 'changePassword']);
     Route::post('/auth/refresh', [AuthController::class, 'refresh']);
 });
 
@@ -32,6 +35,9 @@ Route::middleware(['auth:sanctum', 'super_admin', 'throttle:60,1'])->prefix('adm
     Route::delete('/tenants/{id}',                      [TenantController::class, 'destroy']);
     Route::get('/tenants/{tenantId}/users',             [TenantController::class, 'listUsers']);
     Route::post('/tenants/{tenantId}/users',            [TenantController::class, 'createUser']);
+    Route::put('/tenants/{tenantId}/users/{userId}',    [TenantController::class, 'updateUser']);
+    Route::delete('/tenants/{tenantId}/users/{userId}', [TenantController::class, 'deleteUser']);
+    Route::get('/ai-usage', [AiUsageController::class, 'adminIndex']);
 });
 
 // Business data routes — require tenant scope.
@@ -78,6 +84,9 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
 
     Route::get('/company-settings',              [OrganizationController::class, 'getSettings']);
     Route::put('/company-settings',              [OrganizationController::class, 'upsertSettings']);
+
+    // AI usage logging (tenant-scoped)
+    Route::post('/ai-usage', [AiUsageController::class, 'store']);
 
     // Tenant settings (own tenant only)
     Route::get('/tenant',  [TenantController::class, 'show']);
