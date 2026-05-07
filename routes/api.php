@@ -40,6 +40,7 @@ Route::middleware(['auth:sanctum', 'super_admin', 'throttle:60,1'])->prefix('adm
     Route::put('/tenants/{tenantId}/users/{userId}',    [TenantController::class, 'updateUser']);
     Route::delete('/tenants/{tenantId}/users/{userId}', [TenantController::class, 'deleteUser']);
     Route::get('/ai-usage', [AiUsageController::class, 'adminIndex']);
+    Route::get('/audit-logs', [AdminController::class, 'auditLogs']);
 });
 
 // Business data routes — require tenant scope.

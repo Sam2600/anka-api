@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\AuditService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use App\Models\User;
@@ -20,8 +21,11 @@ class AuthController extends Controller
         $user = User::with('tenant')->where('email', $request->email)->first();
 
         if (!$user || !Hash::check($request->password, $user->password)) {
+            AuditService::log('auth.login_failed', 'user', $user?->id, "Failed login attempt for {$request->email}");
             return response()->json(['message' => 'Invalid credentials'], 401);
         }
+
+        AuditService::log('auth.login', 'user', $user->id, "User {$user->email} logged in");
 
         return response()->json([
             'user'  => (new AuthUserResource($user))->resolve($request),

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AuditLog;
 use App\Models\Tenant;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
@@ -71,6 +72,36 @@ class AdminController extends Controller
                     'plan' => $p->plan,
                     'count' => $p->count,
                 ]),
+            ],
+        ]);
+    }
+
+    public function auditLogs()
+    {
+        $logs = AuditLog::with('user:id,first_name,last_name,email')
+            ->orderBy('created_at', 'desc')
+            ->paginate(50);
+
+        return response()->json([
+            'data' => $logs->map(fn ($log) => [
+                'id' => $log->id,
+                'action' => $log->action,
+                'target_type' => $log->target_type,
+                'target_id' => $log->target_id,
+                'details' => $log->details,
+                'ip_address' => $log->ip_address,
+                'created_at' => $log->created_at,
+                'user' => $log->user ? [
+                    'id' => $log->user->id,
+                    'name' => "{$log->user->first_name} {$log->user->last_name}",
+                    'email' => $log->user->email,
+                ] : null,
+            ]),
+            'meta' => [
+                'total' => $logs->total(),
+                'per_page' => $logs->perPage(),
+                'current_page' => $logs->currentPage(),
+                'last_page' => $logs->lastPage(),
             ],
         ]);
     }
