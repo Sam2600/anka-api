@@ -38,6 +38,9 @@ return new class extends Migration
             DB::statement('ALTER TABLE employees ADD COLUMN cost_per_hour numeric(10,4) GENERATED ALWAYS AS (monthly_salary / NULLIF(workable_hours, 0)) STORED');
             DB::statement("ALTER TABLE employees ADD CONSTRAINT check_employees_capacity_role CHECK (capacity_role IN ('frontend','backend','pm','qa','design'))");
             DB::statement("ALTER TABLE employees ADD CONSTRAINT check_employees_status CHECK (status IN ('Active','On Leave','Terminated'))");
+        } else {
+            // SQLite — add cost_per_hour as a regular column (not generated)
+            DB::statement('ALTER TABLE employees ADD COLUMN cost_per_hour decimal(10,4) DEFAULT 0');
         }
     }
 

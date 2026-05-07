@@ -2,15 +2,15 @@
 
 namespace App\Models;
 
+use App\Traits\BelongsToTenant;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
-use App\Traits\BelongsToTenant;
 
 class Deal extends Model
 {
-    use HasFactory, HasUuids, SoftDeletes, BelongsToTenant;
+    use BelongsToTenant, HasFactory, HasUuids, SoftDeletes;
 
     protected $fillable = [
         'tenant_id',
@@ -38,25 +38,27 @@ class Deal extends Model
         'lost_at',
         'win_reason',
         'loss_reason',
+        'wizard_step',
     ];
 
     protected $casts = [
-        'id'                     => 'string',
-        'estimated_value'        => 'float',
-        'win_probability'        => 'integer',
-        'client_budget'          => 'float',
-        'timeline_months'        => 'integer',
-        'workload_hours'         => 'float',
-        'target_margin'          => 'float',
-        'base_labor_cost'        => 'float',
-        'overhead_cost'          => 'float',
-        'buffer_cost'            => 'float',
-        'total_estimated_cost'   => 'float',
+        'id' => 'string',
+        'estimated_value' => 'float',
+        'win_probability' => 'integer',
+        'client_budget' => 'float',
+        'timeline_months' => 'integer',
+        'workload_hours' => 'float',
+        'target_margin' => 'float',
+        'base_labor_cost' => 'float',
+        'overhead_cost' => 'float',
+        'buffer_cost' => 'float',
+        'total_estimated_cost' => 'float',
         'estimated_gross_profit' => 'float',
-        'expected_close_date'    => 'date',
-        'won_at'                 => 'datetime',
-        'lost_at'                => 'datetime',
-        'deleted_at'             => 'datetime',
+        'expected_close_date' => 'date',
+        'won_at' => 'datetime',
+        'lost_at' => 'datetime',
+        'deleted_at' => 'datetime',
+        'wizard_step' => 'string',
     ];
 
     public function contract()

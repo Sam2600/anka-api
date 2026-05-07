@@ -24,7 +24,9 @@ class DatabaseSeeder extends Seeder
         ]);
 
         // Demo tenant + org admin user.
-        $tenantId = Str::uuid()->toString();
+        // Must match the hard-coded tenant ID in DemoTenantSeeder so all seeded
+        // demo data (deals, contracts, employees, etc.) lives in the same tenant.
+        $tenantId = 'aa24b68f-9de2-4621-b404-fb3edd318ee6';
 
         DB::table('tenants')->insert([
             'id' => $tenantId,
@@ -61,5 +63,20 @@ class DatabaseSeeder extends Seeder
             'is_super_admin' => false,
             'app_role' => 'Admin',
         ]);
+
+        // Regular team member user (no employee link)
+        User::create([
+            'tenant_id' => $tenantId,
+            'first_name' => 'Jane',
+            'last_name' => 'Doe',
+            'email' => 'jane@anka.dev',
+            'password' => 'password',
+            'system_role' => 'member',
+            'is_super_admin' => false,
+            'app_role' => 'Member',
+        ]);
+
+        // Seed all demo organization, deals, contracts, time entries, etc.
+        $this->call(DemoTenantSeeder::class);
     }
 }

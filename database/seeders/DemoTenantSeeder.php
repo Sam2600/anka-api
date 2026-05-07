@@ -28,7 +28,9 @@ class DemoTenantSeeder extends Seeder
 
     private function seedDepartments(): void
     {
-        if (DB::table('departments')->where('tenant_id', $this->tenantId)->exists()) return;
+        if (DB::table('departments')->where('tenant_id', $this->tenantId)->exists()) {
+            return;
+        }
         $now = now()->toDateTimeString();
 
         $departments = [
@@ -54,7 +56,9 @@ class DemoTenantSeeder extends Seeder
 
     private function seedRoles(): void
     {
-        if (DB::table('roles')->where('tenant_id', $this->tenantId)->exists()) return;
+        if (DB::table('roles')->where('tenant_id', $this->tenantId)->exists()) {
+            return;
+        }
         $now = now()->toDateTimeString();
 
         $engineeringId = DB::table('departments')
@@ -113,7 +117,9 @@ class DemoTenantSeeder extends Seeder
 
     private function seedEmployees(): void
     {
-        if (DB::table('employees')->where('tenant_id', $this->tenantId)->count() > 1) return;
+        if (DB::table('employees')->where('tenant_id', $this->tenantId)->count() > 1) {
+            return;
+        }
         $now = now()->toDateTimeString();
 
         $roles = DB::table('roles')
@@ -144,6 +150,7 @@ class DemoTenantSeeder extends Seeder
         foreach ($employees as $emp) {
             $role = $roles[$emp['role']] ?? null;
             $dept = $departments[$emp['dept']] ?? null;
+            $costPerHour = $emp['hours'] > 0 ? round($emp['salary'] / $emp['hours'], 4) : 0;
 
             DB::table('employees')->insert([
                 'id' => Str::uuid()->toString(),
@@ -151,10 +158,12 @@ class DemoTenantSeeder extends Seeder
                 'department_id' => $dept?->id,
                 'job_role_id' => $role?->id,
                 'name' => $emp['name'],
+                'role' => $emp['role'],
                 'role_name' => $emp['role'],
                 'capacity_role' => $emp['capacity_role'],
                 'monthly_salary' => $emp['salary'],
                 'workable_hours' => $emp['hours'],
+                'cost_per_hour' => $costPerHour,
                 'status' => $emp['status'],
                 'created_at' => $now,
                 'updated_at' => $now,
@@ -182,7 +191,9 @@ class DemoTenantSeeder extends Seeder
 
     private function seedGlobalOverheads(): void
     {
-        if (DB::table('global_overheads')->where('tenant_id', $this->tenantId)->exists()) return;
+        if (DB::table('global_overheads')->where('tenant_id', $this->tenantId)->exists()) {
+            return;
+        }
         $now = now()->toDateTimeString();
 
         $overheads = [
@@ -208,7 +219,9 @@ class DemoTenantSeeder extends Seeder
 
     private function seedDeals(): void
     {
-        if (DB::table('deals')->where('tenant_id', $this->tenantId)->exists()) return;
+        if (DB::table('deals')->where('tenant_id', $this->tenantId)->exists()) {
+            return;
+        }
         $now = now()->toDateTimeString();
 
         $deals = [
@@ -315,6 +328,41 @@ class DemoTenantSeeder extends Seeder
                 'estimated_gross_profit' => 17800,
                 'estimated_value' => 75000,
             ],
+            [
+                'name' => 'Wayne Enterprise ERP System',
+                'client' => 'Wayne Enterprise Holdings',
+                'status' => 'won',
+                'win_probability' => 100,
+                'client_budget' => 220000,
+                'timeline_months' => 10,
+                'workload_hours' => 4000,
+                'workload_description' => 'Enterprise ERP system with inventory, HR, finance, and supply chain modules. Multi-tenant architecture with role-based access control.',
+                'target_margin' => 32,
+                'base_labor_cost' => 120000,
+                'overhead_cost' => 24000,
+                'buffer_cost' => 12000,
+                'total_estimated_cost' => 156000,
+                'estimated_gross_profit' => 64000,
+                'estimated_value' => 220000,
+                'won_at' => '2026-04-10 00:00:00',
+            ],
+            [
+                'name' => 'Failed Startup App',
+                'client' => 'QuickBite Delivery',
+                'status' => 'lost',
+                'win_probability' => 0,
+                'client_budget' => 45000,
+                'timeline_months' => 3,
+                'workload_hours' => 720,
+                'workload_description' => 'Food delivery mobile app with real-time tracking, Stripe payments, and restaurant dashboard.',
+                'target_margin' => 30,
+                'base_labor_cost' => 24000,
+                'overhead_cost' => 4800,
+                'buffer_cost' => 2400,
+                'total_estimated_cost' => 31200,
+                'estimated_gross_profit' => 13800,
+                'estimated_value' => 45000,
+            ],
         ];
 
         $dealIds = [];
@@ -346,43 +394,55 @@ class DemoTenantSeeder extends Seeder
 
         $ghostRoles = [
             // GreenMart — won
-            [$dealIds['GreenMart E-Commerce Platform'], 'backend', 2, 8, 4800],
-            [$dealIds['GreenMart E-Commerce Platform'], 'frontend', 2, 8, 4500],
-            [$dealIds['GreenMart E-Commerce Platform'], 'pm', 1, 8, 4000],
-            [$dealIds['GreenMart E-Commerce Platform'], 'qa', 1, 6, 3000],
-            [$dealIds['GreenMart E-Commerce Platform'], 'design', 1, 4, 3500],
+            [$dealIds['GreenMart E-Commerce Platform'], 'backend', 2, 8, 4800, 3000, 5500],
+            [$dealIds['GreenMart E-Commerce Platform'], 'frontend', 2, 8, 4500, 2800, 5200],
+            [$dealIds['GreenMart E-Commerce Platform'], 'pm', 1, 8, 4000, 3000, 4800],
+            [$dealIds['GreenMart E-Commerce Platform'], 'qa', 1, 6, 3000, 2000, 4000],
+            [$dealIds['GreenMart E-Commerce Platform'], 'design', 1, 4, 3500, 2500, 4500],
 
             // MedConnect — contract
-            [$dealIds['MedConnect Telehealth Portal'], 'backend', 2, 5, 4800],
-            [$dealIds['MedConnect Telehealth Portal'], 'frontend', 1, 5, 4500],
-            [$dealIds['MedConnect Telehealth Portal'], 'pm', 1, 5, 4000],
-            [$dealIds['MedConnect Telehealth Portal'], 'qa', 1, 4, 3000],
+            [$dealIds['MedConnect Telehealth Portal'], 'backend', 2, 5, 4800, 3000, 5500],
+            [$dealIds['MedConnect Telehealth Portal'], 'frontend', 1, 5, 4500, 2800, 5200],
+            [$dealIds['MedConnect Telehealth Portal'], 'pm', 1, 5, 4000, 3000, 4800],
+            [$dealIds['MedConnect Telehealth Portal'], 'qa', 1, 4, 3000, 2000, 4000],
 
             // Fintech Dashboard — proposal
-            [$dealIds['Fintech Dashboard Redesign'], 'frontend', 2, 3, 4500],
-            [$dealIds['Fintech Dashboard Redesign'], 'backend', 1, 3, 4800],
-            [$dealIds['Fintech Dashboard Redesign'], 'design', 1, 2, 3500],
+            [$dealIds['Fintech Dashboard Redesign'], 'frontend', 2, 3, 4500, 2800, 5200],
+            [$dealIds['Fintech Dashboard Redesign'], 'backend', 1, 3, 4800, 3000, 5500],
+            [$dealIds['Fintech Dashboard Redesign'], 'design', 1, 2, 3500, 2500, 4500],
 
             // TravelOK — inquiry
-            [$dealIds['TravelOK Booking Engine'], 'backend', 3, 7, 4800],
-            [$dealIds['TravelOK Booking Engine'], 'frontend', 2, 7, 4500],
-            [$dealIds['TravelOK Booking Engine'], 'pm', 1, 7, 4000],
-            [$dealIds['TravelOK Booking Engine'], 'qa', 1, 5, 3000],
+            [$dealIds['TravelOK Booking Engine'], 'backend', 3, 7, 4800, 3000, 5500],
+            [$dealIds['TravelOK Booking Engine'], 'frontend', 2, 7, 4500, 2800, 5200],
+            [$dealIds['TravelOK Booking Engine'], 'pm', 1, 7, 4000, 3000, 4800],
+            [$dealIds['TravelOK Booking Engine'], 'qa', 1, 5, 3000, 2000, 4000],
 
             // EduNext — lead
-            [$dealIds['EduNext LMS Platform'], 'backend', 4, 12, 4800],
-            [$dealIds['EduNext LMS Platform'], 'frontend', 3, 12, 4500],
-            [$dealIds['EduNext LMS Platform'], 'pm', 1, 12, 4000],
-            [$dealIds['EduNext LMS Platform'], 'qa', 2, 10, 3000],
-            [$dealIds['EduNext LMS Platform'], 'design', 1, 6, 3500],
+            [$dealIds['EduNext LMS Platform'], 'backend', 4, 12, 4800, 3000, 5500],
+            [$dealIds['EduNext LMS Platform'], 'frontend', 3, 12, 4500, 2800, 5200],
+            [$dealIds['EduNext LMS Platform'], 'pm', 1, 12, 4000, 3000, 4800],
+            [$dealIds['EduNext LMS Platform'], 'qa', 2, 10, 3000, 2000, 4000],
+            [$dealIds['EduNext LMS Platform'], 'design', 1, 6, 3500, 2500, 4500],
 
             // SmartFactory — proposal
-            [$dealIds['SmartFactory IoT Dashboard'], 'backend', 2, 4, 4800],
-            [$dealIds['SmartFactory IoT Dashboard'], 'frontend', 1, 4, 4500],
-            [$dealIds['SmartFactory IoT Dashboard'], 'pm', 1, 4, 4000],
+            [$dealIds['SmartFactory IoT Dashboard'], 'backend', 2, 4, 4800, 3000, 5500],
+            [$dealIds['SmartFactory IoT Dashboard'], 'frontend', 1, 4, 4500, 2800, 5200],
+            [$dealIds['SmartFactory IoT Dashboard'], 'pm', 1, 4, 4000, 3000, 4800],
+
+            // Wayne Enterprise — won
+            [$dealIds['Wayne Enterprise ERP System'], 'backend', 3, 10, 5200, 3500, 6000],
+            [$dealIds['Wayne Enterprise ERP System'], 'frontend', 2, 10, 4800, 3000, 5500],
+            [$dealIds['Wayne Enterprise ERP System'], 'pm', 1, 10, 4500, 3000, 5500],
+            [$dealIds['Wayne Enterprise ERP System'], 'qa', 2, 8, 3500, 2200, 4200],
+            [$dealIds['Wayne Enterprise ERP System'], 'design', 1, 6, 3800, 2800, 4800],
+
+            // Failed Startup — lost
+            [$dealIds['Failed Startup App'], 'backend', 1, 3, 4800, 3000, 5500],
+            [$dealIds['Failed Startup App'], 'frontend', 1, 3, 4500, 2800, 5200],
+            [$dealIds['Failed Startup App'], 'design', 1, 2, 3500, 2500, 4500],
         ];
 
-        foreach ($ghostRoles as [$dealId, $roleType, $qty, $months, $salary]) {
+        foreach ($ghostRoles as [$dealId, $roleType, $qty, $months, $salary, $minSalary, $maxSalary]) {
             DB::table('deal_ghost_roles')->insert([
                 'id' => Str::uuid()->toString(),
                 'tenant_id' => $this->tenantId,
@@ -391,6 +451,8 @@ class DemoTenantSeeder extends Seeder
                 'quantity' => $qty,
                 'months' => $months,
                 'avg_monthly_salary' => $salary,
+                'min_monthly_salary' => $minSalary,
+                'max_monthly_salary' => $maxSalary,
                 'created_at' => $now,
                 'updated_at' => $now,
             ]);
@@ -419,7 +481,7 @@ class DemoTenantSeeder extends Seeder
         $assigned = [];
         foreach ($assignments as $i => $assignment) {
             $emp = $employees->first(function ($e) use ($assignment, $assigned) {
-                return $e->capacity_role === $assignment['role'] && !in_array($e->id, $assigned);
+                return $e->capacity_role === $assignment['role'] && ! in_array($e->id, $assigned);
             });
 
             if ($emp) {
@@ -435,11 +497,46 @@ class DemoTenantSeeder extends Seeder
                 ]);
             }
         }
+
+        // Assign real employees to the second won deal (Wayne Enterprise)
+        $wayneAssignments = [
+            ['role' => 'backend', 'hours' => 1600],
+            ['role' => 'backend', 'hours' => 1200],
+            ['role' => 'backend', 'hours' => 800],
+            ['role' => 'frontend', 'hours' => 1200],
+            ['role' => 'frontend', 'hours' => 800],
+            ['role' => 'pm', 'hours' => 1200],
+            ['role' => 'qa', 'hours' => 800],
+            ['role' => 'qa', 'hours' => 400],
+            ['role' => 'design', 'hours' => 600],
+        ];
+
+        $assignedWayne = [];
+        foreach ($wayneAssignments as $assignment) {
+            $emp = $employees->first(function ($e) use ($assignment, $assignedWayne) {
+                return $e->capacity_role === $assignment['role'] && ! in_array($e->id, $assignedWayne);
+            });
+
+            if ($emp) {
+                $assignedWayne[] = $emp->id;
+                DB::table('deal_hard_assignments')->insert([
+                    'id' => Str::uuid()->toString(),
+                    'tenant_id' => $this->tenantId,
+                    'deal_id' => $dealIds['Wayne Enterprise ERP System'],
+                    'employee_id' => $emp->id,
+                    'allocated_hours' => $assignment['hours'],
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+            }
+        }
     }
 
     private function seedContractsAndProjects(): void
     {
-        if (DB::table('contracts')->where('tenant_id', $this->tenantId)->exists()) return;
+        if (DB::table('contracts')->where('tenant_id', $this->tenantId)->exists()) {
+            return;
+        }
         $now = now()->toDateTimeString();
 
         $wonDealId = DB::table('deals')
@@ -454,6 +551,7 @@ class DemoTenantSeeder extends Seeder
             'tenant_id' => $this->tenantId,
             'deal_id' => $wonDealId,
             'client' => 'GreenMart Holdings',
+            'contract_number' => 'CON-0001',
             'total_value' => 180000,
             'revenue_recognized' => 60000,
             'status' => 'Active',
@@ -471,6 +569,7 @@ class DemoTenantSeeder extends Seeder
             'contract_id' => $contractId,
             'name' => 'GreenMart E-Commerce Platform',
             'client' => 'GreenMart Holdings',
+            'project_number' => 'PRJ-101',
             'budget_hours' => 3200,
             'consumed_hours' => 1280,
             'status' => 'On Track',
@@ -480,14 +579,53 @@ class DemoTenantSeeder extends Seeder
             'updated_at' => $now,
         ]);
 
-        // Second contract — for a deal in "contract" stage
+        // Third contract — for the second won deal (Wayne Enterprise)
+        $wayneDealId = DB::table('deals')
+            ->where('tenant_id', $this->tenantId)
+            ->where('name', 'Wayne Enterprise ERP System')
+            ->value('id');
+
+        $contract3Id = Str::uuid()->toString();
+        DB::table('contracts')->insert([
+            'id' => $contract3Id,
+            'tenant_id' => $this->tenantId,
+            'deal_id' => $wayneDealId,
+            'client' => 'Wayne Enterprise Holdings',
+            'contract_number' => 'CON-0003',
+            'total_value' => 220000,
+            'revenue_recognized' => 0,
+            'status' => 'Draft',
+            'start_date' => '2026-04-10',
+            'end_date' => '2027-02-10',
+            'notes' => 'ERP modules: inventory, HR, finance, supply chain. Multi-tenant architecture.',
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        DB::table('projects')->insert([
+            'id' => Str::uuid()->toString(),
+            'tenant_id' => $this->tenantId,
+            'contract_id' => $contract3Id,
+            'name' => 'Wayne Enterprise ERP System',
+            'client' => 'Wayne Enterprise Holdings',
+            'project_number' => 'PRJ-103',
+            'budget_hours' => 4000,
+            'consumed_hours' => 0,
+            'status' => 'Not Started',
+            'start_date' => '2026-04-10',
+            'end_date' => '2027-02-10',
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        // Fourth contract — for a deal in "contract" stage
         $contractDealId = DB::table('deals')
             ->where('tenant_id', $this->tenantId)
             ->where('name', 'MedConnect Telehealth Portal')
             ->value('id');
 
         // Note: MedConnect deal has status=contract but hasn't been "won" via stored proc,
-        // so we won't auto-create a contract/project for it here — 
+        // so we won't auto-create a contract/project for it here —
         // because the win_deal() stored proc would normally create these.
         // Instead, simulate it manually:
         $contract2Id = Str::uuid()->toString();
@@ -496,6 +634,7 @@ class DemoTenantSeeder extends Seeder
             'tenant_id' => $this->tenantId,
             'deal_id' => $contractDealId,
             'client' => 'MedConnect Health',
+            'contract_number' => 'CON-0002',
             'total_value' => 95000,
             'revenue_recognized' => 0,
             'status' => 'Draft',
@@ -512,6 +651,7 @@ class DemoTenantSeeder extends Seeder
             'contract_id' => $contract2Id,
             'name' => 'MedConnect Telehealth Portal',
             'client' => 'MedConnect Health',
+            'project_number' => 'PRJ-102',
             'budget_hours' => 1600,
             'consumed_hours' => 0,
             'status' => 'Not Started',
@@ -524,7 +664,9 @@ class DemoTenantSeeder extends Seeder
 
     private function seedMilestones(): void
     {
-        if (DB::table('milestones')->where('tenant_id', $this->tenantId)->exists()) return;
+        if (DB::table('milestones')->where('tenant_id', $this->tenantId)->exists()) {
+            return;
+        }
         $now = now()->toDateTimeString();
 
         $greenmartContractId = DB::table('contracts')
@@ -567,7 +709,9 @@ class DemoTenantSeeder extends Seeder
 
     private function seedInvoices(): void
     {
-        if (DB::table('invoices')->where('tenant_id', $this->tenantId)->exists()) return;
+        if (DB::table('invoices')->where('tenant_id', $this->tenantId)->exists()) {
+            return;
+        }
         $now = now()->toDateTimeString();
 
         $greenmartContractId = DB::table('contracts')
@@ -628,12 +772,14 @@ class DemoTenantSeeder extends Seeder
             ],
         ];
 
+        $invoiceNumber = 1042;
         foreach ($invoices as $inv) {
             DB::table('invoices')->insert([
                 'id' => Str::uuid()->toString(),
                 'tenant_id' => $this->tenantId,
                 'contract_id' => $inv['contract_id'],
                 'milestone_id' => $inv['milestone_id'],
+                'invoice_number' => 'INV-'.str_pad((string) $invoiceNumber++, 4, '0', STR_PAD_LEFT),
                 'issue_date' => $inv['issue_date'],
                 'due_date' => $inv['due_date'],
                 'amount' => $inv['amount'],
@@ -649,7 +795,9 @@ class DemoTenantSeeder extends Seeder
 
     private function seedTimeEntries(): void
     {
-        if (DB::table('time_entries')->where('tenant_id', $this->tenantId)->exists()) return;
+        if (DB::table('time_entries')->where('tenant_id', $this->tenantId)->exists()) {
+            return;
+        }
         $now = now()->toDateTimeString();
 
         $greenmartProjectId = DB::table('projects')
@@ -684,7 +832,9 @@ class DemoTenantSeeder extends Seeder
 
         foreach ($entries as $entry) {
             $emp = $employees->first(fn ($e) => $e->capacity_role === $entry['emp_role']);
-            if (!$emp) continue;
+            if (! $emp) {
+                continue;
+            }
 
             DB::table('time_entries')->insert([
                 'id' => Str::uuid()->toString(),
@@ -697,7 +847,7 @@ class DemoTenantSeeder extends Seeder
                 'hours' => $entry['hours'],
                 'billable' => $entry['billable'],
                 'status' => $entry['status'],
-                'approved_at' => $entry['status'] === 'Approved' ? $entry['date'] . ' 18:00:00' : null,
+                'approved_at' => $entry['status'] === 'Approved' ? $entry['date'].' 18:00:00' : null,
                 'notes' => null,
                 'created_at' => $now,
                 'updated_at' => $now,
