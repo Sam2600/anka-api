@@ -21,9 +21,10 @@ class AuthUserResource extends JsonResource
             'is_super_admin' => (bool) $this->is_super_admin,
             'tenant'         => $tenant
                 ? [
-                    'id'   => $tenant->id,
-                    'name' => $tenant->name,
-                    'slug' => $tenant->slug,
+                    'id'       => $tenant->id,
+                    'name'     => $tenant->name,
+                    'slug'     => $tenant->slug,
+                    'currency' => $tenant->currency ?? 'MMK',
                 ]
                 : null,
         ];
