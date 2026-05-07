@@ -5,28 +5,31 @@ namespace Database\Seeders;
 use App\Models\User;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
 
 class DatabaseSeeder extends Seeder
 {
     public function run(): void
     {
         // Super admin — belongs to no tenant.
-        User::create([
-            'tenant_id' => null,
-            'first_name' => 'Anka',
-            'last_name' => 'Owner',
-            'email' => 'owner@anka.app',
-            'password' => 'password',
-            'system_role' => 'owner',
-            'is_super_admin' => true,
-            'app_role' => 'Admin',
-        ]);
+        User::firstOrCreate(
+            ['email' => 'owner@anka.app'],
+            [
+                'tenant_id' => null,
+                'first_name' => 'Anka',
+                'last_name' => 'Owner',
+                'password' => 'password',
+                'system_role' => 'owner',
+                'is_super_admin' => true,
+                'app_role' => 'Admin',
+            ]
+        );
 
-        // Demo tenant + org admin user.
-        $tenantId = Str::uuid()->toString();
+        // Demo tenant + org admin user + full business data.
+        // Uses the same hard-coded tenant ID as DemoTenantSeeder
+        // so the admin user can access all seeded data.
+        $tenantId = 'aa24b68f-9de2-4621-b404-fb3edd318ee6';
 
-        DB::table('tenants')->insert([
+        DB::table('tenants')->insertOrIgnore([
             'id' => $tenantId,
             'name' => 'ANKA Agency',
             'slug' => 'anka-agency',
@@ -36,9 +39,9 @@ class DatabaseSeeder extends Seeder
             'updated_at' => now(),
         ]);
 
-        $employeeId = Str::uuid()->toString();
+        $employeeId = 'aa24b68f-9de2-4621-b404-fb3edd318ef0';
 
-        DB::table('employees')->insert([
+        DB::table('employees')->insertOrIgnore([
             'id' => $employeeId,
             'tenant_id' => $tenantId,
             'name' => 'Admin User',
@@ -50,16 +53,21 @@ class DatabaseSeeder extends Seeder
             'updated_at' => now(),
         ]);
 
-        User::create([
-            'tenant_id' => $tenantId,
-            'employee_id' => $employeeId,
-            'first_name' => 'Admin',
-            'last_name' => 'User',
-            'email' => 'admin@anka.dev',
-            'password' => 'password',
-            'system_role' => 'member',
-            'is_super_admin' => false,
-            'app_role' => 'Admin',
-        ]);
+        User::firstOrCreate(
+            ['email' => 'admin@anka.dev'],
+            [
+                'tenant_id' => $tenantId,
+                'employee_id' => $employeeId,
+                'first_name' => 'Admin',
+                'last_name' => 'User',
+                'password' => 'password',
+                'system_role' => 'member',
+                'is_super_admin' => false,
+                'app_role' => 'Admin',
+            ]
+        );
+
+        // Seed all business data (deals, contracts, invoices, time entries, etc.)
+        $this->call(DemoTenantSeeder::class);
     }
 }

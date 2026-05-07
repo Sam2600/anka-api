@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\DealController;
 use App\Http\Controllers\Api\ContractController;
@@ -28,6 +29,7 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
 
 // Super admin routes — no tenant scope, requires is_super_admin = true.
 Route::middleware(['auth:sanctum', 'super_admin', 'throttle:60,1'])->prefix('admin')->group(function () {
+    Route::get('/dashboard/stats',                      [AdminController::class, 'dashboardStats']);
     Route::get('/tenants',                              [TenantController::class, 'index']);
     Route::post('/tenants',                             [TenantController::class, 'store']);
     Route::get('/tenants/{id}',                         [TenantController::class, 'showAdmin']);
