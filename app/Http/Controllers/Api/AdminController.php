@@ -76,16 +76,41 @@ class AdminController extends Controller
         ]);
     }
 
-    public function auditLogs()
+    public function auditLogs(\Illuminate\Http\Request $request)
     {
-        $logs = AuditLog::with('user:id,first_name,last_name,email')
-            ->orderBy('created_at', 'desc')
-            ->paginate(50);
+        $query = AuditLog::with(['user:id,first_name,last_name,email', 'tenant:id,name'])
+            ->orderBy('created_at', 'desc');
+
+        // Filter by tenant
+        if ($request->filled('tenant_id')) {
+            $query->where('tenant_id', $request->input('tenant_id'));
+        }
+
+        // Filter by user
+        if ($request->filled('user_id')) {
+            $query->where('user_id', $request->input('user_id'));
+        }
+
+        // Filter by date range
+        if ($request->filled('date_from')) {
+            $query->whereDate('created_at', '>=', $request->input('date_from'));
+        }
+        if ($request->filled('date_to')) {
+            $query->whereDate('created_at', '<=', $request->input('date_to'));
+        }
+
+        // Filter by level (info, warning, error, critical)
+        if ($request->filled('level')) {
+            $query->where('level', $request->input('level'));
+        }
+
+        $logs = $query->paginate(50);
 
         return response()->json([
             'data' => $logs->map(fn ($log) => [
                 'id' => $log->id,
                 'action' => $log->action,
+                'level' => $log->level,
                 'target_type' => $log->target_type,
                 'target_id' => $log->target_id,
                 'details' => $log->details,
@@ -95,6 +120,10 @@ class AdminController extends Controller
                     'id' => $log->user->id,
                     'name' => "{$log->user->first_name} {$log->user->last_name}",
                     'email' => $log->user->email,
+                ] : null,
+                'tenant' => $log->tenant ? [
+                    'id' => $log->tenant->id,
+                    'name' => $log->tenant->name,
                 ] : null,
             ]),
             'meta' => [

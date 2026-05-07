@@ -100,7 +100,7 @@ class TenantController extends Controller
 
         $tenant->update($validated);
 
-        AuditService::log('tenant.update', 'tenant', $tenant->id, "Updated tenant {$tenant->name}");
+        AuditService::log('tenant.update', 'tenant', $tenant->id, "Updated tenant {$tenant->name}", null, $tenant->id);
 
         return response()->json(['data' => $this->tenantData($tenant)]);
     }
@@ -110,7 +110,7 @@ class TenantController extends Controller
         $tenant = Tenant::findOrFail($id);
         $tenant->update(['is_active' => false]);
 
-        AuditService::log('tenant.deactivate', 'tenant', $tenant->id, "Deactivated tenant {$tenant->name}");
+        AuditService::log('tenant.deactivate', 'tenant', $tenant->id, "Deactivated tenant {$tenant->name}", null, $tenant->id);
 
         return response()->json(['message' => 'Tenant deactivated']);
     }
@@ -166,7 +166,7 @@ class TenantController extends Controller
         // 4. Send welcome email to the user's email address
         Mail::to($user->email)->queue(new WelcomeUser($user, $plainPassword));
 
-        AuditService::log('user.create', 'user', $user->id, "Created user {$user->email} in tenant {$tenant->name}");
+        AuditService::log('user.create', 'user', $user->id, "Created user {$user->email}", null, $tenant->id);
 
         return response()->json([
             'data' => $this->userData($user->fresh()),
@@ -204,7 +204,7 @@ class TenantController extends Controller
             Employee::where('id', $user->employee_id)->update(['role_name' => $roleName]);
         }
 
-        AuditService::log('user.update', 'user', $user->id, "Updated user {$user->email}");
+        AuditService::log('user.update', 'user', $user->id, "Updated user {$user->email}", null, $user->tenant_id);
 
         return response()->json(['data' => $this->userData($user->fresh())]);
     }
@@ -226,7 +226,7 @@ class TenantController extends Controller
             Employee::where('id', $user->employee_id)->delete();
         }
 
-        AuditService::log('user.delete', 'user', $user->id, "Deleted user {$user->email}");
+        AuditService::log('user.delete', 'user', $user->id, "Deleted user {$user->email}", null, $user->tenant_id);
 
         return response()->json(['message' => 'User deleted']);
     }

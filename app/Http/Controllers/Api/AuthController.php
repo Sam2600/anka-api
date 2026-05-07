@@ -25,7 +25,7 @@ class AuthController extends Controller
             return response()->json(['message' => 'Invalid credentials'], 401);
         }
 
-        AuditService::log('auth.login', 'user', $user->id, "User {$user->email} logged in");
+        AuditService::log('auth.login', 'user', $user->id, "User {$user->email} logged in", null, $user->tenant_id);
 
         return response()->json([
             'user'  => (new AuthUserResource($user))->resolve($request),
