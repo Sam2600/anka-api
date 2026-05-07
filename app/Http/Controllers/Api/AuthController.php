@@ -21,7 +21,7 @@ class AuthController extends Controller
         $user = User::with('tenant')->where('email', $request->email)->first();
 
         if (!$user || !Hash::check($request->password, $user->password)) {
-            AuditService::log('auth.login_failed', 'user', $user?->id, "Failed login attempt for {$request->email}");
+            AuditService::logWarning('auth.login_failed', "Failed login attempt for {$request->email}", $user?->tenant_id);
             return response()->json(['message' => 'Invalid credentials'], 401);
         }
 
