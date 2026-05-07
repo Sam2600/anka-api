@@ -91,12 +91,12 @@ class AdminController extends Controller
             $query->where('user_id', $request->input('user_id'));
         }
 
-        // Filter by date range
+        // Filter by date range — use explicit datetime bounds for SQLite compatibility
         if ($request->filled('date_from')) {
-            $query->whereDate('created_at', '>=', $request->input('date_from'));
+            $query->where('created_at', '>=', $request->input('date_from') . ' 00:00:00');
         }
         if ($request->filled('date_to')) {
-            $query->whereDate('created_at', '<=', $request->input('date_to'));
+            $query->where('created_at', '<=', $request->input('date_to') . ' 23:59:59');
         }
 
         // Filter by level (info, warning, error, critical)
@@ -132,6 +132,21 @@ class AdminController extends Controller
                 'current_page' => $logs->currentPage(),
                 'last_page' => $logs->lastPage(),
             ],
+        ]);
+    }
+
+    public function listAllUsers()
+    {
+        $users = User::whereNull('deleted_at')
+            ->orderBy('first_name')
+            ->get(['id', 'first_name', 'last_name', 'email']);
+
+        return response()->json([
+            'data' => $users->map(fn ($u) => [
+                'id' => $u->id,
+                'name' => "{$u->first_name} {$u->last_name}",
+                'email' => $u->email,
+            ]),
         ]);
     }
 }
