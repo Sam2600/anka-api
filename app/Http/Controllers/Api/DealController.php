@@ -34,15 +34,20 @@ class DealController extends Controller
     public function store(Request $request)
     {
         $request->validate([
-            'name'   => 'required|string|max:255',
-            'client' => 'nullable|string|max:255',
-            'status' => 'nullable|in:lead,opportunity,inquiry,proposal,contract,won,lost',
-            'estimated_value'    => 'nullable|numeric|min:0',
-            'win_probability'    => 'nullable|integer|min:0|max:100',
-            'client_budget'      => 'nullable|numeric|min:0',
-            'timeline_months'    => 'nullable|integer|min:1',
-            'workload_hours'     => 'nullable|numeric|min:0',
-            'target_margin'      => 'nullable|numeric|min:0|max:100',
+            'name'                => 'required|string|max:255',
+            'client'              => 'required|string|max:255',
+            'contact_name'        => 'required|string|max:255',
+            'contact_email'       => 'required|email|max:255',
+            'contact_phone'       => 'required|string|max:50',
+            'status'              => 'nullable|in:lead,inquiry,opportunity,proposal,contract,won,lost',
+            'expected_close_date' => 'nullable|date',
+            'lead_source'         => 'nullable|in:inbound,referral,cold_outreach,social,event,partner,other',
+            'estimated_value'     => 'nullable|numeric|min:0',
+            'win_probability'     => 'nullable|integer|min:0|max:100',
+            'client_budget'       => 'nullable|numeric|min:0',
+            'timeline_months'     => 'nullable|integer|min:1',
+            'workload_hours'      => 'nullable|numeric|min:0',
+            'target_margin'       => 'nullable|numeric|min:0|max:100',
         ]);
 
         $deal = DB::transaction(function () use ($request) {
@@ -69,15 +74,20 @@ class DealController extends Controller
     public function update(Request $request, Deal $deal)
     {
         $request->validate([
-            'name'   => 'sometimes|required|string|max:255',
-            'client' => 'sometimes|nullable|string|max:255',
-            'status' => 'sometimes|in:lead,opportunity,inquiry,proposal,contract,won,lost',
-            'estimated_value'    => 'sometimes|nullable|numeric|min:0',
-            'win_probability'    => 'sometimes|nullable|integer|min:0|max:100',
-            'client_budget'      => 'sometimes|nullable|numeric|min:0',
-            'timeline_months'    => 'sometimes|nullable|integer|min:1',
-            'workload_hours'     => 'sometimes|nullable|numeric|min:0',
-            'target_margin'      => 'sometimes|nullable|numeric|min:0|max:100',
+            'name'                => 'sometimes|required|string|max:255',
+            'client'              => 'sometimes|required|string|max:255',
+            'contact_name'        => 'sometimes|required|string|max:255',
+            'contact_email'       => 'sometimes|required|email|max:255',
+            'contact_phone'       => 'sometimes|required|string|max:50',
+            'status'              => 'sometimes|in:lead,inquiry,opportunity,proposal,contract,won,lost',
+            'expected_close_date' => 'sometimes|nullable|date',
+            'lead_source'         => 'sometimes|nullable|in:inbound,referral,cold_outreach,social,event,partner,other',
+            'estimated_value'     => 'sometimes|nullable|numeric|min:0',
+            'win_probability'     => 'sometimes|nullable|integer|min:0|max:100',
+            'client_budget'       => 'sometimes|nullable|numeric|min:0',
+            'timeline_months'     => 'sometimes|nullable|integer|min:1',
+            'workload_hours'      => 'sometimes|nullable|numeric|min:0',
+            'target_margin'       => 'sometimes|nullable|numeric|min:0|max:100',
         ]);
 
         DB::transaction(function () use ($request, $deal) {
@@ -97,13 +107,27 @@ class DealController extends Controller
     public function updateStage(Request $request, Deal $deal)
     {
         $request->validate([
-            'status'          => 'required|string',
-            'win_probability' => 'required|integer',
+            'status'          => 'required|in:lead,inquiry,opportunity,proposal,contract,won,lost',
+            'win_probability' => 'required|integer|min:0|max:100',
         ]);
+
+        // Server-side probability defaults per stage, applied when client doesn't send one.
+        $stageProbabilities = [
+            'lead'        => 10,
+            'inquiry'     => 20,
+            'opportunity' => 40,
+            'proposal'    => 60,
+            'contract'    => 80,
+            'won'         => 100,
+            'lost'        => 0,
+        ];
+
+        $probability = $request->win_probability
+            ?? ($stageProbabilities[$request->status] ?? 50);
 
         $deal->update([
             'status'          => $request->status,
-            'win_probability' => $request->win_probability,
+            'win_probability' => $probability,
         ]);
 
         return new DealResource($deal->load(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads']));
@@ -111,7 +135,21 @@ class DealController extends Controller
 
     public function win(Request $request, Deal $deal)
     {
+        abort_if(
+            in_array($deal->status, ['won', 'lost']),
+            409,
+            'This deal is already closed.'
+        );
+
+        $request->validate([
+            'win_reason' => 'nullable|string|max:500',
+        ]);
+
         DB::select('SELECT win_deal(?, ?)', [$deal->id, app('tenant_id')]);
+
+        if ($request->filled('win_reason')) {
+            $deal->update(['win_reason' => $request->win_reason]);
+        }
 
         $contract = \App\Models\Contract::where('deal_id', $deal->id)->first();
         $project  = \App\Models\Project::where('contract_id', $contract?->id)->first();
@@ -123,6 +161,36 @@ class DealController extends Controller
             'contract' => $contract ? (new ContractResource($contract))->resolve($request) : null,
             'project'  => $project ? (new ProjectResource($project))->resolve($request) : null,
         ]);
+    }
+
+    public function lose(Request $request, Deal $deal)
+    {
+        abort_if(
+            in_array($deal->status, ['won', 'lost']),
+            409,
+            'This deal is already closed.'
+        );
+
+        $request->validate([
+            'loss_reason' => 'required|string|max:500',
+        ]);
+
+        $deal->update([
+            'status'          => 'lost',
+            'lost_at'         => now(),
+            'loss_reason'     => $request->loss_reason,
+            'win_probability' => 0,
+        ]);
+
+        return new DealResource($deal->load(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads']));
+    }
+
+    public function linkedContract(Deal $deal)
+    {
+        $contract = \App\Models\Contract::where('deal_id', $deal->id)->first();
+        return $contract
+            ? new ContractResource($contract)
+            : response()->json(['data' => null], 200);
     }
 
     public function destroy(Deal $deal)

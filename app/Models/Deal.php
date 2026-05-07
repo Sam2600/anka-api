@@ -16,9 +16,14 @@ class Deal extends Model
         'tenant_id',
         'name',
         'client',
+        'contact_name',
+        'contact_email',
+        'contact_phone',
         'estimated_value',
         'win_probability',
         'status',
+        'expected_close_date',
+        'lead_source',
         'client_budget',
         'timeline_months',
         'workload_hours',
@@ -31,6 +36,8 @@ class Deal extends Model
         'estimated_gross_profit',
         'won_at',
         'lost_at',
+        'win_reason',
+        'loss_reason',
     ];
 
     protected $casts = [
@@ -46,6 +53,7 @@ class Deal extends Model
         'buffer_cost'            => 'float',
         'total_estimated_cost'   => 'float',
         'estimated_gross_profit' => 'float',
+        'expected_close_date'    => 'date',
         'won_at'                 => 'datetime',
         'lost_at'                => 'datetime',
         'deleted_at'             => 'datetime',

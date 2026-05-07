@@ -13,9 +13,14 @@ class DealResource extends JsonResource
             'id'                     => $this->id,
             'name'                   => $this->name,
             'client'                 => $this->client,
+            'contact_name'           => $this->contact_name,
+            'contact_email'          => $this->contact_email,
+            'contact_phone'          => $this->contact_phone,
             'estimated_value'        => $this->estimated_value,
             'win_probability'        => $this->win_probability,
             'status'                 => $this->status,
+            'expected_close_date'    => $this->expected_close_date?->format('Y-m-d'),
+            'lead_source'            => $this->lead_source,
             'client_budget'          => $this->client_budget,
             'timeline_months'        => $this->timeline_months,
             'workload_hours'         => $this->workload_hours,
@@ -26,6 +31,8 @@ class DealResource extends JsonResource
             'buffer_cost'            => $this->buffer_cost,
             'total_estimated_cost'   => $this->total_estimated_cost,
             'estimated_gross_profit' => $this->estimated_gross_profit,
+            'win_reason'             => $this->win_reason,
+            'loss_reason'            => $this->loss_reason,
             'ghost_roles'            => $this->whenLoaded('ghost_roles', fn () =>
                 $this->ghost_roles->map(fn ($gr) => [
                     'id'                 => $gr->id,

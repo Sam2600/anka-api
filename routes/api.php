@@ -44,11 +44,14 @@ Route::middleware(['auth:sanctum', 'super_admin', 'throttle:60,1'])->prefix('adm
 Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function () {
     // Deals
     Route::apiResource('deals', DealController::class);
-    Route::patch('/deals/{deal}/stage', [DealController::class, 'updateStage']);
-    Route::post('/deals/{deal}/win', [DealController::class, 'win']);
+    Route::patch('/deals/{deal}/stage',    [DealController::class,    'updateStage']);
+    Route::post('/deals/{deal}/win',       [DealController::class,    'win']);
+    Route::post('/deals/{deal}/lose',      [DealController::class,    'lose']);
+    Route::get('/deals/{deal}/contract',   [DealController::class,    'linkedContract']);
 
     // Contracts (created only via win_deal; no store route)
     Route::apiResource('contracts', ContractController::class)->only(['index', 'show', 'update', 'destroy']);
+    Route::get('/contracts/{contract}/project', [ContractController::class, 'linkedProject']);
 
     // Invoices
     Route::apiResource('invoices', InvoiceController::class)->only(['index', 'show', 'store', 'destroy']);

@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Contract;
 use App\Http\Resources\ContractResource;
+use App\Http\Resources\ProjectResource;
 use Illuminate\Http\Request;
 
 class ContractController extends Controller
@@ -40,6 +41,14 @@ class ContractController extends Controller
 
         $contract->update($request->only(['status', 'notes', 'end_date', 'total_value']));
         return new ContractResource($contract->fresh());
+    }
+
+    public function linkedProject(Contract $contract)
+    {
+        $project = \App\Models\Project::where('contract_id', $contract->id)->first();
+        return $project
+            ? new ProjectResource($project)
+            : response()->json(['data' => null], 200);
     }
 
     public function destroy(Contract $contract)
