@@ -74,6 +74,8 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     // Time Entries
     Route::apiResource('time-entries', TimeEntryController::class)->only(['index', 'show', 'store', 'destroy']);
     Route::patch('/time-entries/{time_entry}/approve', [TimeEntryController::class, 'approve']);
+    Route::patch('/time-entries/{time_entry}/submit',  [TimeEntryController::class, 'submit']);
+    Route::patch('/time-entries/{time_entry}/reject',  [TimeEntryController::class, 'reject']);
 
     // Organization
     Route::get('/departments', [OrganizationController::class, 'indexDepartments']);

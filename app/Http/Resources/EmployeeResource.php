@@ -22,6 +22,10 @@ class EmployeeResource extends JsonResource
             'workable_hours'  => $this->workable_hours,
             'cost_per_hour'   => $this->cost_per_hour, // GENERATED column — read-only
             'status'          => $this->status,
+            // Surface the linked user's email so the Edit form can pre-fill it.
+            // Lazy-loads the relation if not eager-loaded — endpoints that already
+            // call ->load('user') avoid the N+1.
+            'email'           => optional($this->user)->email,
         ];
     }
 }
