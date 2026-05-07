@@ -14,6 +14,7 @@ class Tenant extends Model
         'name',
         'slug',
         'plan',
+        'currency',
         'is_active',
     ];
 
