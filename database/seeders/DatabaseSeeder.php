@@ -24,7 +24,7 @@ class DatabaseSeeder extends Seeder
             ]
         );
 
-        // Demo tenant + org admin user + full business data.
+// Demo tenant + org admin user + full business data.
         // Uses the same hard-coded tenant ID as DemoTenantSeeder
         // so the admin user can access all seeded data.
         $tenantId = 'aa24b68f-9de2-4621-b404-fb3edd318ee6';
@@ -53,7 +53,7 @@ class DatabaseSeeder extends Seeder
             'updated_at' => now(),
         ]);
 
-        User::firstOrCreate(
+User::firstOrCreate(
             ['email' => 'admin@anka.dev'],
             [
                 'tenant_id' => $tenantId,
@@ -67,7 +67,19 @@ class DatabaseSeeder extends Seeder
             ]
         );
 
-        // Seed all business data (deals, contracts, invoices, time entries, etc.)
+        User::firstOrCreate(
+            ['email' => 'jane@anka.dev'],
+            [
+                'tenant_id' => $tenantId,
+                'first_name' => 'Jane',
+                'last_name' => 'Doe',
+                'password' => 'password',
+                'system_role' => 'member',
+                'is_super_admin' => false,
+                'app_role' => 'Member',
+            ]
+        );
+
         $this->call(DemoTenantSeeder::class);
     }
 }
