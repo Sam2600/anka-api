@@ -1,5 +1,6 @@
 <?php
 
+use App\Services\AuditService;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -12,12 +13,26 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware) {
+        $middleware->append(\App\Http\Middleware\LogSystemErrors::class);
         $middleware->alias([
             'tenant'      => \App\Http\Middleware\TenantScope::class,
             'super_admin' => \App\Http\Middleware\SuperAdmin::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {
+        $exceptions->report(function (\Throwable $e, \Illuminate\Http\Request $request) {
+            $tenantId = $request->header('X-Tenant-ID');
+            $path = $request->path();
+            $message = $e->getMessage();
+            $class = get_class($e);
+
+            AuditService::logError(
+                'system.exception',
+                "{$class} on {$path}: {$message}",
+                $tenantId ?: null,
+            );
+        });
+
         // Return JSON for all API / JSON-expecting requests so the frontend
         // never receives an HTML error page it cannot parse.
         $exceptions->render(function (\Throwable $e, \Illuminate\Http\Request $request) {
