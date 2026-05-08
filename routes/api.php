@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\AiAutoAssignController;
 use App\Http\Controllers\Api\AiUsageController;
 use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
@@ -101,6 +102,23 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::get('/company-settings', [OrganizationController::class, 'getSettings']);
     Route::put('/company-settings', [OrganizationController::class, 'upsertSettings']);
 
+    // Capacity Roles
+    Route::get('/capacity-roles', [OrganizationController::class, 'indexCapacityRoles']);
+    Route::post('/capacity-roles', [OrganizationController::class, 'storeCapacityRole']);
+    Route::put('/capacity-roles/{capacityRole}', [OrganizationController::class, 'updateCapacityRole']);
+    Route::delete('/capacity-roles/{capacityRole}', [OrganizationController::class, 'destroyCapacityRole']);
+
+    // Skills
+    Route::get('/skills', [OrganizationController::class, 'indexSkills']);
+    Route::post('/skills', [OrganizationController::class, 'storeSkill']);
+    Route::put('/skills/{skill}', [OrganizationController::class, 'updateSkill']);
+    Route::delete('/skills/{skill}', [OrganizationController::class, 'destroySkill']);
+
+    // Employee Skills
+    Route::get('/employees/{employee}/skills', [OrganizationController::class, 'employeeSkills']);
+    Route::post('/employees/{employee}/skills', [OrganizationController::class, 'assignSkill']);
+    Route::delete('/employees/{employee}/skills/{skill}', [OrganizationController::class, 'removeSkill']);
+
     // AI usage logging (tenant-scoped)
     Route::post('/ai-usage', [AiUsageController::class, 'store']);
 
@@ -110,4 +128,10 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
 
     // Milestones
     Route::apiResource('milestones', MilestoneController::class);
+
+    // Project Team Assignments
+    Route::get('/projects/{project}/team', [AiAutoAssignController::class, 'index']);
+    Route::post('/projects/{project}/team', [AiAutoAssignController::class, 'store']);
+    Route::delete('/projects/{project}/team/{assignment}', [AiAutoAssignController::class, 'destroy']);
+    Route::post('/projects/{project}/auto-assign', [AiAutoAssignController::class, 'autoAssign']);
 });

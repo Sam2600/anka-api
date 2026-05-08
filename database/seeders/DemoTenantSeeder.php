@@ -795,7 +795,7 @@ class DemoTenantSeeder extends Seeder
                 'tenant_id' => $this->tenantId,
                 'contract_id' => $inv['contract_id'],
                 'milestone_id' => $inv['milestone_id'],
-'invoice_number' => $inv['invoice_number'] ?? 'INV-'.str_pad((string) $invoiceNumber++, 4, '0', STR_PAD_LEFT),
+                'invoice_number' => $inv['invoice_number'] ?? 'INV-'.str_pad((string) $invoiceNumber++, 4, '0', STR_PAD_LEFT),
                 'issue_date' => $inv['issue_date'],
                 'due_date' => $inv['due_date'],
                 'amount' => $inv['amount'],

@@ -24,7 +24,7 @@ class DatabaseSeeder extends Seeder
             ]
         );
 
-// Demo tenant + org admin user + full business data.
+        // Demo tenant + org admin user + full business data.
         // Uses the same hard-coded tenant ID as DemoTenantSeeder
         // so the admin user can access all seeded data.
         $tenantId = 'aa24b68f-9de2-4621-b404-fb3edd318ee6';
@@ -53,7 +53,7 @@ class DatabaseSeeder extends Seeder
             'updated_at' => now(),
         ]);
 
-User::firstOrCreate(
+        User::firstOrCreate(
             ['email' => 'admin@anka.dev'],
             [
                 'tenant_id' => $tenantId,

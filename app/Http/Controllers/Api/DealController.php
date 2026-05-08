@@ -13,6 +13,7 @@ use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use App\Models\ProjectTeamAssignment;
 
 class DealController extends Controller
 {
@@ -25,9 +26,10 @@ class DealController extends Controller
         }
         if ($request->filled('search')) {
             $search = '%'.$request->search.'%';
-            $query->where(function ($q) use ($search) {
-                $q->where('name', 'ilike', $search)
-                    ->orWhere('client', 'ilike', $search);
+            $op = DB::getDriverName() === 'pgsql' ? 'ilike' : 'like';
+            $query->where(function ($q) use ($search, $op) {
+                $q->where('name', $op, $search)
+                    ->orWhere('client', $op, $search);
             });
         }
 
@@ -198,7 +200,7 @@ class DealController extends Controller
                         'start_date' => now()->toDateString(),
                     ]);
 
-                    Project::create([
+                    $project = Project::create([
                         'id' => Str::orderedUuid(),
                         'tenant_id' => $deal->tenant_id,
                         'contract_id' => $contract->id,
@@ -209,6 +211,17 @@ class DealController extends Controller
                         'status' => 'Not Started',
                         'start_date' => now()->toDateString(),
                     ]);
+
+                    // Transfer deal hard assignments → project team assignments
+                    foreach ($deal->hard_assignments as $ha) {
+                        ProjectTeamAssignment::create([
+                            'tenant_id' => $deal->tenant_id,
+                            'project_id' => $project->id,
+                            'employee_id' => $ha->employee_id,
+                            'allocated_hours' => $ha->allocated_hours,
+                            'assignment_source' => 'deal_transfer',
+                        ]);
+                    }
                 }
 
                 $deal->update([

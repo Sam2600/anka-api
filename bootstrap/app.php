@@ -20,7 +20,8 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {
-        $exceptions->report(function (\Throwable $e, \Illuminate\Http\Request $request) {
+        $exceptions->report(function (\Throwable $e) {
+            $request = app('request');
             $tenantId = $request->header('X-Tenant-ID');
             $path = $request->path();
             $message = $e->getMessage();

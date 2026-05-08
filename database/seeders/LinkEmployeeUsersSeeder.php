@@ -25,6 +25,7 @@ class LinkEmployeeUsersSeeder extends Seeder
         $tenantId = DB::table('tenants')->value('id');
         if (! $tenantId) {
             $this->command?->error('No tenant found. Aborting.');
+
             return;
         }
 
@@ -36,17 +37,17 @@ class LinkEmployeeUsersSeeder extends Seeder
         $accounts = [
             [
                 'employee_name' => 'Ma Mintzu',
-                'first_name'    => 'Ma',
-                'last_name'     => 'Mintzu',
-                'email'         => 'mintzu@anka.dev',
-                'app_role'      => 'Executive', // manager-level
+                'first_name' => 'Ma',
+                'last_name' => 'Mintzu',
+                'email' => 'mintzu@anka.dev',
+                'app_role' => 'Executive', // manager-level
             ],
             [
                 'employee_name' => 'kg kg',
-                'first_name'    => 'kg',
-                'last_name'     => 'kg',
-                'email'         => 'kgkg@anka.dev',
-                'app_role'      => 'Delivery', // engineer-level
+                'first_name' => 'kg',
+                'last_name' => 'kg',
+                'email' => 'kgkg@anka.dev',
+                'app_role' => 'Delivery', // engineer-level
             ],
         ];
 
@@ -58,6 +59,7 @@ class LinkEmployeeUsersSeeder extends Seeder
 
             if (! $employee) {
                 $this->command?->warn("Employee '{$a['employee_name']}' not found — skipping.");
+
                 continue;
             }
 
@@ -65,32 +67,34 @@ class LinkEmployeeUsersSeeder extends Seeder
             $existingByEmployee = User::withTrashed()->where('employee_id', $employee->id)->first();
             if ($existingByEmployee) {
                 $this->command?->info("Login already exists for {$a['employee_name']} ({$existingByEmployee->email}) — skipping.");
+
                 continue;
             }
 
             // Email already taken by some other user? Skip rather than collide.
             if (User::withTrashed()->where('email', $a['email'])->exists()) {
                 $this->command?->warn("Email {$a['email']} already in use — skipping {$a['employee_name']}.");
+
                 continue;
             }
 
             // The User model casts `password` as `hashed`, so a plain string
             // is hashed automatically on insert.
             User::create([
-                'tenant_id'      => $tenantId,
-                'employee_id'    => $employee->id,
-                'first_name'     => $a['first_name'],
-                'last_name'      => $a['last_name'],
-                'email'          => $a['email'],
-                'password'       => self::DEFAULT_PASSWORD,
-                'app_role'       => $a['app_role'],
-                'system_role'    => 'member',
+                'tenant_id' => $tenantId,
+                'employee_id' => $employee->id,
+                'first_name' => $a['first_name'],
+                'last_name' => $a['last_name'],
+                'email' => $a['email'],
+                'password' => self::DEFAULT_PASSWORD,
+                'app_role' => $a['app_role'],
+                'system_role' => 'member',
                 'is_super_admin' => false,
             ]);
 
             $this->command?->info(
                 "Created login {$a['email']} → employee {$a['employee_name']} "
-                . "(role: {$a['app_role']}, password: " . self::DEFAULT_PASSWORD . ")"
+                ."(role: {$a['app_role']}, password: ".self::DEFAULT_PASSWORD.')'
             );
         }
     }
