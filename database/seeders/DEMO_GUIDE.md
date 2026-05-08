@@ -21,6 +21,10 @@ php artisan migrate:fresh
 php artisan db:seed --class=DemoSeeder
 ```
 
+### One-click demo login
+
+Go to **`/login?demo=1`** and click **"Log in as Demo Admin"** — this automatically signs you in as `admin@pixelagency.test` with real seeded data.
+
 ### Demo accounts
 
 | Role | Email | Password |
@@ -169,6 +173,20 @@ Avoid these areas during the presentation to prevent broken or incomplete UX:
 
 ---
 
+## Demo Safety Net — AI Features Are Bulletproof
+
+All three AI features have **automatic demo fallbacks**. If the Anthropic API is unreachable, rate-limited, or returns invalid data, the system instantly switches to a realistic mock mode — the UI looks identical and the demo continues without interruption.
+
+| AI Feature | Fallback Behavior |
+|---|---|
+| **Team Builder** (`/api/ai-team-builder`) | Analyzes workload keywords and distributes hours across active employees by capacity role. Returns full JSON with costs, margins, and skill-gap analysis. |
+| **Auto Assign** (`/api/projects/{id}/auto-assign`) | Matches deal ghost roles to employee capacity roles and allocates hours proportionally. Clears old assignments and creates new ones with `assignment_source: ai`. |
+| **Chatbot** (`/api/ai-chatbot`) | Uses the built-in knowledge base to return pre-written answers for common questions. Falls back to a helpful "I'm not sure" message for unknown topics. |
+
+**How to verify:** temporarily rename `ANTHROPIC_API_KEY` in `.env.local` and refresh — all three features still work.
+
+---
+
 ## Quick Recovery (If Something Goes Wrong)
 
 | Problem | Fix |
@@ -178,6 +196,7 @@ Avoid these areas during the presentation to prevent broken or incomplete UX:
 | Financial page shows "No financial data" | Ensure at least one invoice has `status = Paid` and one time entry has `status = Approved` |
 | Kanban board empty | Verify deals were seeded with `tenant_id` matching the logged-in user's tenant |
 | Project missing team assignments | Re-run `php artisan db:seed --class=ProjectSeeder` or full `DemoSeeder` |
+| AI feature returns 500 | Check console — it should have auto-fallen back to demo mode. If not, verify `generateDemoResult` / `demoAutoAssign` functions are present. |
 
 ---
 

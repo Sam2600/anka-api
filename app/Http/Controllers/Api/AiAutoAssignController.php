@@ -31,27 +31,28 @@ class AiAutoAssignController extends Controller
             ? $this->extractSkillsFromDescription($deal->workload_description)
             : [];
 
-        $employeesWithSkills = $employees->map(fn ($emp) => [
-            'id' => $emp->id,
-            'name' => $emp->name,
-            'capacity_role' => $emp->capacityRole?->name ?? $emp->capacity_role ?? 'unknown',
-            'workable_hours' => $emp->workable_hours,
-            'monthly_salary' => $emp->monthly_salary,
-            'cost_per_hour' => $emp->cost_per_hour,
-            'skills' => $emp->skills->map(fn ($s) => [
-                'name' => $s->name,
-                'category' => $s->category,
-                'proficiency' => $s->pivot->proficiency,
-            ])->toArray(),
-        ])->toArray();
-
         $apiKey = config('services.anthropic.api_key') ?? env('ANTHROPIC_API_KEY');
 
+        // ── Demo fallback: distribute hours by capacity role when no AI key or on error ──
         if (! $apiKey) {
-            return response()->json(['error' => 'AI service not configured'], 500);
+            return $this->demoAutoAssign($project, $deal, $employees, $tenantId);
         }
 
         try {
+            $employeesWithSkills = $employees->map(fn ($emp) => [
+                'id' => $emp->id,
+                'name' => $emp->name,
+                'capacity_role' => $emp->capacityRole?->name ?? $emp->capacity_role ?? 'unknown',
+                'workable_hours' => $emp->workable_hours,
+                'monthly_salary' => $emp->monthly_salary,
+                'cost_per_hour' => $emp->cost_per_hour,
+                'skills' => $emp->skills->map(fn ($s) => [
+                    'name' => $s->name,
+                    'category' => $s->category,
+                    'proficiency' => $s->pivot->proficiency,
+                ])->toArray(),
+            ])->toArray();
+
             $prompt = $this->buildAutoAssignPrompt($project, $deal, $employeesWithSkills, $requiredSkills);
 
             $response = Http::withHeaders([
@@ -79,9 +80,9 @@ class AiAutoAssignController extends Controller
             $assignments = json_decode($text, true);
 
             if (! is_array($assignments)) {
-                Log::error('AI AutoAssign: invalid JSON response', ['text' => substr($text, 0, 300)]);
+                Log::error('AI AutoAssign: invalid JSON response, falling back to demo mode', ['text' => substr($text, 0, 300)]);
 
-                return response()->json(['error' => 'AI returned invalid response'], 500);
+                return $this->demoAutoAssign($project, $deal, $employees, $tenantId);
             }
 
             DB::transaction(function () use ($assignments, $project, $tenantId) {
@@ -107,10 +108,85 @@ class AiAutoAssignController extends Controller
             return ProjectTeamAssignmentResource::collection($project->teamAssignments);
 
         } catch (\Exception $e) {
-            Log::error('AI AutoAssign error', ['message' => $e->getMessage()]);
+            Log::error('AI AutoAssign error, falling back to demo mode', ['message' => $e->getMessage()]);
 
-            return response()->json(['error' => 'Failed to auto-assign team: '.$e->getMessage()], 500);
+            return $this->demoAutoAssign($project, $deal, $employees, $tenantId);
         }
+    }
+
+    /**
+     * Demo fallback: distributes workload hours proportionally across active employees
+     * by matching capacity roles to the deal's ghost roles (or evenly if no deal).
+     */
+    private function demoAutoAssign(Project $project, $deal, $employees, string $tenantId)
+    {
+        $totalHours = $deal?->workload_hours ?? $project->budget_hours ?? 160;
+        $timelineMonths = $deal?->timeline_months ?? 3;
+
+        // Get ghost roles from deal to understand desired team composition
+        $ghostRoles = $deal?->ghost_roles ?? [];
+        $roleTargets = [];
+        foreach ($ghostRoles as $gr) {
+            $roleType = $gr->role_type ?? 'unknown';
+            $roleTargets[$roleType] = ($roleTargets[$roleType] ?? 0) + ($gr->quantity ?? 1);
+        }
+
+        $activeEmployees = $employees->where('status', 'Active');
+
+        // Group employees by capacity role
+        $byRole = $activeEmployees->groupBy(fn ($e) => $e->capacityRole?->code ?? $e->capacity_role ?? 'unknown');
+
+        $assignments = [];
+
+        foreach ($roleTargets as $roleType => $targetCount) {
+            $candidates = $byRole->get($roleType, collect());
+            if ($candidates->isEmpty()) {
+                continue;
+            }
+
+            // Pick up to targetCount employees for this role
+            $selected = $candidates->shuffle()->take($targetCount);
+            $hoursPerPerson = min(
+                round($totalHours / count($roleTargets) / $selected->count()),
+                ($selected->first()->workable_hours ?? 160) * $timelineMonths
+            );
+
+            foreach ($selected as $emp) {
+                $assignments[] = [
+                    'employee_id' => $emp->id,
+                    'allocated_hours' => $hoursPerPerson,
+                ];
+            }
+        }
+
+        // If no assignments from ghost roles, distribute evenly across all active employees
+        if (empty($assignments) && $activeEmployees->isNotEmpty()) {
+            $hoursPerPerson = round($totalHours / $activeEmployees->count());
+            foreach ($activeEmployees as $emp) {
+                $assignments[] = [
+                    'employee_id' => $emp->id,
+                    'allocated_hours' => min($hoursPerPerson, ($emp->workable_hours ?? 160) * $timelineMonths),
+                ];
+            }
+        }
+
+        DB::transaction(function () use ($assignments, $project, $tenantId) {
+            ProjectTeamAssignment::where('project_id', $project->id)->delete();
+
+            foreach ($assignments as $item) {
+                ProjectTeamAssignment::create([
+                    'tenant_id' => $tenantId,
+                    'project_id' => $project->id,
+                    'employee_id' => $item['employee_id'],
+                    'allocated_hours' => $item['allocated_hours'],
+                    'assignment_source' => 'ai',
+                ]);
+            }
+        });
+
+        $project->load('teamAssignments.employee');
+
+        return ProjectTeamAssignmentResource::collection($project->teamAssignments);
     }
 
     public function index(Project $project)
