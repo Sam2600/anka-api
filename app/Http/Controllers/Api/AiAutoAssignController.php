@@ -120,8 +120,11 @@ class AiAutoAssignController extends Controller
      */
     private function demoAutoAssign(Project $project, $deal, $employees, string $tenantId)
     {
-        $totalHours = $deal?->workload_hours ?? $project->budget_hours ?? 160;
-        $timelineMonths = $deal?->timeline_months ?? 3;
+        $totalHours = (float) ($deal?->workload_hours ?? $project->budget_hours ?? 160);
+        $timelineMonths = (int) ($deal?->timeline_months ?? 1);
+
+        // Sanity cap: never assign more than total project hours total across all members
+        $maxHoursPerPerson = max($totalHours, 160 * $timelineMonths);
 
         // Get ghost roles from deal to understand desired team composition
         $ghostRoles = $deal?->ghost_roles ?? [];
@@ -137,6 +140,7 @@ class AiAutoAssignController extends Controller
         $byRole = $activeEmployees->groupBy(fn ($e) => $e->capacityRole?->code ?? $e->capacity_role ?? 'unknown');
 
         $assignments = [];
+        $assignedCount = 0;
 
         foreach ($roleTargets as $roleType => $targetCount) {
             $candidates = $byRole->get($roleType, collect());
@@ -146,27 +150,33 @@ class AiAutoAssignController extends Controller
 
             // Pick up to targetCount employees for this role
             $selected = $candidates->shuffle()->take($targetCount);
+            $roleAllocation = $totalHours / max(count($roleTargets), 1);
             $hoursPerPerson = min(
-                round($totalHours / count($roleTargets) / $selected->count()),
-                ($selected->first()->workable_hours ?? 160) * $timelineMonths
+                round($roleAllocation / max($selected->count(), 1)),
+                $maxHoursPerPerson
             );
 
             foreach ($selected as $emp) {
+                $empMaxHours = ((int) ($emp->workable_hours ?? 160)) * $timelineMonths;
                 $assignments[] = [
                     'employee_id' => $emp->id,
-                    'allocated_hours' => $hoursPerPerson,
+                    'allocated_hours' => min($hoursPerPerson, $empMaxHours),
                 ];
+                $assignedCount++;
             }
         }
 
         // If no assignments from ghost roles, distribute evenly across all active employees
         if (empty($assignments) && $activeEmployees->isNotEmpty()) {
-            $hoursPerPerson = round($totalHours / $activeEmployees->count());
+            $count = $activeEmployees->count();
+            $hoursPerPerson = round($totalHours / max($count, 1));
             foreach ($activeEmployees as $emp) {
+                $empMaxHours = ((int) ($emp->workable_hours ?? 160)) * $timelineMonths;
                 $assignments[] = [
                     'employee_id' => $emp->id,
-                    'allocated_hours' => min($hoursPerPerson, ($emp->workable_hours ?? 160) * $timelineMonths),
+                    'allocated_hours' => min($hoursPerPerson, $empMaxHours),
                 ];
+                $assignedCount++;
             }
         }
 

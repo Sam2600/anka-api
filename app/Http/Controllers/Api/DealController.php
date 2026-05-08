@@ -9,11 +9,11 @@ use App\Http\Resources\ProjectResource;
 use App\Models\Contract;
 use App\Models\Deal;
 use App\Models\Project;
+use App\Models\ProjectTeamAssignment;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
-use App\Models\ProjectTeamAssignment;
 
 class DealController extends Controller
 {
@@ -174,36 +174,52 @@ class DealController extends Controller
             'win_reason' => 'nullable|string|max:500',
         ]);
 
-        try {
-            DB::select('SELECT win_deal(?, ?)', [$deal->id, app('tenant_id')]);
-        } catch (QueryException $e) {
-            // If the SP doesn't exist (e.g. SQLite tests), fall back to Eloquent
-            if (DB::getDriverName() === 'pgsql') {
+        // PostgreSQL: use the atomic stored procedure.
+        // SQLite / other: fall back to Eloquent (SP doesn't exist).
+        if (DB::getDriverName() === 'pgsql') {
+            try {
+                DB::select('SELECT win_deal(?, ?)', [$deal->id, app('tenant_id')]);
+            } catch (QueryException $e) {
                 $message = $e->getPrevious()?->getMessage() ?? $e->getMessage();
 
                 return response()->json([
                     'message' => 'Failed to win deal: '.$message,
                 ], 422);
             }
-
+        } else {
             DB::transaction(function () use ($deal) {
                 // Idempotent: don't create duplicate contract
                 $existingContract = Contract::where('deal_id', $deal->id)->first();
                 if (! $existingContract) {
+                    // SQLite doesn't have the contract_number_seq default — generate manually.
+                    // Must query across all tenants because contract_number is globally unique.
+                    $lastNumber = (int) (Contract::withoutGlobalScope('tenant')->max(
+                        DB::raw('CAST(SUBSTR(contract_number, 5) AS INTEGER)')
+                    ) ?? 0);
+                    $nextNumber = 'CON-'.str_pad((string) ($lastNumber + 1), 4, '0', STR_PAD_LEFT);
+
                     $contract = Contract::create([
                         'id' => Str::orderedUuid(),
                         'tenant_id' => $deal->tenant_id,
                         'deal_id' => $deal->id,
+                        'contract_number' => $nextNumber,
                         'client' => $deal->client ?? '',
                         'total_value' => $deal->client_budget ?? $deal->estimated_value ?? 0,
                         'status' => 'Draft',
                         'start_date' => now()->toDateString(),
                     ]);
 
+                    // SQLite doesn't have the project_number_seq default either.
+                    $lastPrj = (int) (Project::withoutGlobalScope('tenant')->max(
+                        DB::raw('CAST(SUBSTR(project_number, 5) AS INTEGER)')
+                    ) ?? 100);
+                    $nextPrj = 'PRJ-'.str_pad((string) ($lastPrj + 1), 3, '0', STR_PAD_LEFT);
+
                     $project = Project::create([
                         'id' => Str::orderedUuid(),
                         'tenant_id' => $deal->tenant_id,
                         'contract_id' => $contract->id,
+                        'project_number' => $nextPrj,
                         'name' => $deal->name ?? '',
                         'client' => $deal->client ?? '',
                         'budget_hours' => $deal->workload_hours ?? 0,
