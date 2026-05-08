@@ -65,6 +65,7 @@ class TenantController extends Controller
             'name' => 'required|string|max:255',
             'slug' => 'required|string|max:100|alpha_dash|unique:tenants,slug',
             'plan' => 'nullable|string|max:50',
+            'currency' => 'nullable|string|in:MMK,JPY',
             'is_active' => 'boolean',
         ]);
 
@@ -72,6 +73,7 @@ class TenantController extends Controller
             'name' => $validated['name'],
             'slug' => $validated['slug'],
             'plan' => $validated['plan'] ?? null,
+            'currency' => $validated['currency'] ?? 'MMK',
             'is_active' => $validated['is_active'] ?? true,
         ]);
 
@@ -95,6 +97,7 @@ class TenantController extends Controller
             'name' => 'sometimes|required|string|max:255',
             'slug' => 'sometimes|required|string|max:100|alpha_dash|unique:tenants,slug,'.$id,
             'plan' => 'nullable|string|max:50',
+            'currency' => 'nullable|string|in:MMK,JPY',
             'is_active' => 'boolean',
         ]);
 
@@ -264,6 +267,7 @@ class TenantController extends Controller
             'name' => $tenant->name,
             'slug' => $tenant->slug,
             'plan' => $tenant->plan,
+            'currency' => $tenant->currency ?? 'MMK',
             'is_active' => $tenant->is_active,
             'created_at' => $tenant->created_at,
         ];
