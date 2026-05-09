@@ -433,11 +433,14 @@ class OrganizationController extends Controller
     public function upsertSettings(Request $request)
     {
         $validated = $request->validate([
-            'overhead_percentage'     => 'required|numeric|min:0|max:100',
-            'buffer_percentage'       => 'required|numeric|min:0|max:100',
-            'yearly_fixed_cost'       => 'required|numeric|min:0',
-            'employer_tax_percentage' => 'required|numeric|min:0|max:100',
-            'benefits_percentage'     => 'required|numeric|min:0|max:100',
+            'overhead_percentage'             => 'required|numeric|min:0|max:100',
+            'buffer_percentage'               => 'required|numeric|min:0|max:100',
+            'yearly_fixed_cost'               => 'required|numeric|min:0',
+            'employer_tax_percentage'         => 'required|numeric|min:0|max:100',
+            'benefits_percentage'             => 'required|numeric|min:0|max:100',
+            'cost_to_bill_ratio'              => 'sometimes|numeric|min:0|max:1',
+            'default_monthly_capacity_hours'  => 'sometimes|integer|min:1|max:744',
+            'fallback_hourly_cost'            => 'sometimes|numeric|min:0',
         ]);
 
         $tenantId = app('tenant_id');
