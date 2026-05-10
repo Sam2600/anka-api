@@ -46,7 +46,7 @@ class DealController extends Controller
             'contact_name' => 'required|string|max:255',
             'contact_email' => 'required|email|max:255',
             'contact_phone' => 'required|string|max:50',
-            'status' => 'nullable|in:lead,inquiry,opportunity,proposal,contract,won,lost',
+            'status' => 'nullable|in:lead,qualified,proposal,negotiation,won,lost',
             'expected_close_date' => 'nullable|date',
             'lead_source' => 'nullable|in:inbound,referral,cold_outreach,social,event,partner,other',
             'estimated_value' => 'nullable|numeric|min:0',
@@ -97,7 +97,7 @@ class DealController extends Controller
             'contact_name' => 'sometimes|required|string|max:255',
             'contact_email' => 'sometimes|required|email|max:255',
             'contact_phone' => 'sometimes|required|string|max:50',
-            'status' => 'sometimes|in:lead,inquiry,opportunity,proposal,contract,won,lost',
+            'status' => 'sometimes|in:lead,qualified,proposal,negotiation,won,lost',
             'expected_close_date' => 'sometimes|nullable|date',
             'lead_source' => 'sometimes|nullable|in:inbound,referral,cold_outreach,social,event,partner,other',
             'estimated_value' => 'sometimes|nullable|numeric|min:0',
@@ -136,19 +136,20 @@ class DealController extends Controller
     public function updateStage(Request $request, Deal $deal)
     {
         $request->validate([
-            'status' => 'required|in:lead,inquiry,opportunity,proposal,contract,won,lost',
+            'status' => 'required|in:lead,qualified,proposal,negotiation,won,lost',
             'win_probability' => 'required|integer|min:0|max:100',
         ]);
 
         // Server-side probability defaults per stage, applied when client doesn't send one.
+        // Calibrated for an agency where most leads don't convert; tune per
+        // tenant once you have real conversion-rate data.
         $stageProbabilities = [
-            'lead' => 10,
-            'inquiry' => 20,
-            'opportunity' => 40,
-            'proposal' => 60,
-            'contract' => 80,
-            'won' => 100,
-            'lost' => 0,
+            'lead'        => 10,
+            'qualified'   => 30,
+            'proposal'    => 50,
+            'negotiation' => 75,
+            'won'         => 100,
+            'lost'        => 0,
         ];
 
         $probability = $request->win_probability

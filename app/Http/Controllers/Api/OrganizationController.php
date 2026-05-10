@@ -190,11 +190,7 @@ class OrganizationController extends Controller
             $employee->save();
 
             if ($request->has('skills')) {
-                $syncData = [];
-                foreach ($request->input('skills') as $skillItem) {
-                    $syncData[$skillItem['skill_id']] = ['proficiency' => $skillItem['proficiency']];
-                }
-                $employee->skills()->sync($syncData);
+                $this->syncEmployeeSkills($employee, $request->input('skills', []));
             }
 
             $parts     = preg_split('/\s+/', trim($request->input('name')), 2);
@@ -259,11 +255,7 @@ class OrganizationController extends Controller
             ]));
 
             if ($request->has('skills')) {
-                $syncData = [];
-                foreach ($request->input('skills') as $skillItem) {
-                    $syncData[$skillItem['skill_id']] = ['proficiency' => $skillItem['proficiency']];
-                }
-                $employee->skills()->sync($syncData);
+                $this->syncEmployeeSkills($employee, $request->input('skills', []));
             }
 
             $hasEmail    = $request->filled('email');
@@ -312,6 +304,32 @@ class OrganizationController extends Controller
         $employee->delete();
 
         return response()->noContent();
+    }
+
+    /**
+     * Replace the employee's skill set with $skills, where each item is
+     * ['skill_id' => UUID, 'proficiency' => string].
+     *
+     * Called by storeEmployee and updateEmployee. Goes through the
+     * EmployeeSkill model (rather than $employee->skills()->sync(...)) because
+     * the pivot table requires a UUID `id` and a NOT NULL `tenant_id` which
+     * Laravel's default Pivot does not populate — sync() would crash on a
+     * NOT NULL constraint. EmployeeSkill's HasUuids + BelongsToTenant traits
+     * fill both correctly on create.
+     *
+     * @param  array<int, array{skill_id: string, proficiency: string}>  $skills
+     */
+    private function syncEmployeeSkills(Employee $employee, array $skills): void
+    {
+        EmployeeSkill::where('employee_id', $employee->id)->delete();
+
+        foreach ($skills as $item) {
+            EmployeeSkill::create([
+                'employee_id' => $employee->id,
+                'skill_id'    => $item['skill_id'],
+                'proficiency' => $item['proficiency'],
+            ]);
+        }
     }
 
     // ── Global Overheads ──────────────────────────────────────────────────────
@@ -415,11 +433,14 @@ class OrganizationController extends Controller
     public function upsertSettings(Request $request)
     {
         $validated = $request->validate([
-            'overhead_percentage'     => 'required|numeric|min:0|max:100',
-            'buffer_percentage'       => 'required|numeric|min:0|max:100',
-            'yearly_fixed_cost'       => 'required|numeric|min:0',
-            'employer_tax_percentage' => 'required|numeric|min:0|max:100',
-            'benefits_percentage'     => 'required|numeric|min:0|max:100',
+            'overhead_percentage'             => 'required|numeric|min:0|max:100',
+            'buffer_percentage'               => 'required|numeric|min:0|max:100',
+            'yearly_fixed_cost'               => 'required|numeric|min:0',
+            'employer_tax_percentage'         => 'required|numeric|min:0|max:100',
+            'benefits_percentage'             => 'required|numeric|min:0|max:100',
+            'cost_to_bill_ratio'              => 'sometimes|numeric|min:0|max:1',
+            'default_monthly_capacity_hours'  => 'sometimes|integer|min:1|max:744',
+            'fallback_hourly_cost'            => 'sometimes|numeric|min:0',
         ]);
 
         $tenantId = app('tenant_id');

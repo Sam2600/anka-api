@@ -81,5 +81,10 @@ class DatabaseSeeder extends Seeder
         );
 
         $this->call(DemoTenantSeeder::class);
+
+        // Baseline skill catalog — feeds the AI Team Builder. Runs after
+        // DemoTenantSeeder so the demo tenant exists, but is tenant-agnostic
+        // and will populate every tenant in the table.
+        $this->call(SkillSeeder::class);
     }
 }
