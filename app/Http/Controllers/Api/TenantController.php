@@ -26,9 +26,11 @@ class TenantController extends Controller
 
     public function update(Request $request)
     {
+        // Org-users cannot change name/slug — those are super-admin-only via /admin/tenants/{id}.
         $validated = $request->validate([
-            'name' => 'sometimes|required|string|max:255',
-            'slug' => 'sometimes|required|string|max:100|alpha_dash|unique:tenants,slug,'.app('tenant_id'),
+            'tax_rate' => 'sometimes|numeric|min:0|max:1',
+            'avg_delivery_lag_months' => 'sometimes|integer|min:0|max:24',
+            'avg_payment_days_late' => 'sometimes|integer|min:0|max:365',
         ]);
 
         $tenant = Tenant::findOrFail(app('tenant_id'));
@@ -66,6 +68,9 @@ class TenantController extends Controller
             'slug' => 'required|string|max:100|alpha_dash|unique:tenants,slug',
             'plan' => 'nullable|string|max:50',
             'currency' => 'nullable|string|in:MMK,JPY',
+            'tax_rate' => 'nullable|numeric|min:0|max:1',
+            'avg_delivery_lag_months' => 'nullable|integer|min:0|max:24',
+            'avg_payment_days_late' => 'nullable|integer|min:0|max:365',
             'is_active' => 'boolean',
         ]);
 
@@ -74,6 +79,9 @@ class TenantController extends Controller
             'slug' => $validated['slug'],
             'plan' => $validated['plan'] ?? null,
             'currency' => $validated['currency'] ?? 'MMK',
+            'tax_rate' => $validated['tax_rate'] ?? 0.20,
+            'avg_delivery_lag_months' => $validated['avg_delivery_lag_months'] ?? 1,
+            'avg_payment_days_late' => $validated['avg_payment_days_late'] ?? 0,
             'is_active' => $validated['is_active'] ?? true,
         ]);
 
@@ -98,6 +106,9 @@ class TenantController extends Controller
             'slug' => 'sometimes|required|string|max:100|alpha_dash|unique:tenants,slug,'.$id,
             'plan' => 'nullable|string|max:50',
             'currency' => 'nullable|string|in:MMK,JPY',
+            'tax_rate' => 'sometimes|numeric|min:0|max:1',
+            'avg_delivery_lag_months' => 'sometimes|integer|min:0|max:24',
+            'avg_payment_days_late' => 'sometimes|integer|min:0|max:365',
             'is_active' => 'boolean',
         ]);
 
@@ -268,6 +279,9 @@ class TenantController extends Controller
             'slug' => $tenant->slug,
             'plan' => $tenant->plan,
             'currency' => $tenant->currency ?? 'MMK',
+            'tax_rate' => (float) ($tenant->tax_rate ?? 0.20),
+            'avg_delivery_lag_months' => (int) ($tenant->avg_delivery_lag_months ?? 1),
+            'avg_payment_days_late' => (int) ($tenant->avg_payment_days_late ?? 0),
             'is_active' => $tenant->is_active,
             'created_at' => $tenant->created_at,
         ];

@@ -32,14 +32,19 @@ class ProjectController extends Controller
     public function update(Request $request, Project $project)
     {
         $request->validate([
-            'status'         => 'sometimes|in:Not Started,On Track,At Risk,Over Budget,Completed',
-            'name'           => 'sometimes|required|string|max:255',
-            'budget_hours'   => 'sometimes|numeric|min:0',
-            'end_date'       => 'sometimes|nullable|date',
-            'consumed_hours' => 'sometimes|numeric|min:0',
+            'status'             => 'sometimes|in:Not Started,On Track,At Risk,Over Budget,Completed',
+            'name'               => 'sometimes|required|string|max:255',
+            'budget_hours'       => 'sometimes|numeric|min:0',
+            'end_date'           => 'sometimes|nullable|date',
+            'consumed_hours'     => 'sometimes|numeric|min:0',
+            'kickoff_date'       => 'sometimes|nullable|date',
+            'project_manager_id' => 'sometimes|nullable|uuid|exists:employees,id',
         ]);
 
-        $project->update($request->only(['status', 'name', 'budget_hours', 'end_date', 'consumed_hours']));
+        $project->update($request->only([
+            'status', 'name', 'budget_hours', 'end_date', 'consumed_hours',
+            'kickoff_date', 'project_manager_id',
+        ]));
         return new ProjectResource($project->fresh());
     }
 

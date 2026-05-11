@@ -24,6 +24,8 @@ class Project extends Model
         'status',
         'start_date',
         'end_date',
+        'kickoff_date',
+        'project_manager_id',
     ];
 
     protected $casts = [
@@ -32,6 +34,7 @@ class Project extends Model
         'consumed_hours' => 'float',
         'start_date'     => 'date',
         'end_date'       => 'date',
+        'kickoff_date'   => 'date',
         'deleted_at'     => 'datetime',
     ];
 
@@ -48,5 +51,10 @@ class Project extends Model
     public function teamAssignments()
     {
         return $this->hasMany(ProjectTeamAssignment::class);
+    }
+
+    public function projectManager()
+    {
+        return $this->belongsTo(Employee::class, 'project_manager_id');
     }
 }

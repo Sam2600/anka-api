@@ -85,7 +85,9 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
 
     // Invoices
     Route::apiResource('invoices', InvoiceController::class)->only(['index', 'show', 'store', 'destroy']);
-    Route::patch('/invoices/{invoice}/pay', [InvoiceController::class, 'pay']);
+    Route::patch('/invoices/{invoice}',      [InvoiceController::class, 'update']);
+    Route::patch('/invoices/{invoice}/pay',  [InvoiceController::class, 'pay']);
+    Route::post('/invoices/{invoice}/send',  [InvoiceController::class, 'send']);
 
     // Projects (created only via win_deal; no store route)
     Route::apiResource('projects', ProjectController::class)->only(['index', 'show', 'update', 'destroy']);
@@ -146,6 +148,7 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
 
     // Milestones
     Route::apiResource('milestones', MilestoneController::class);
+    Route::patch('/milestones/{milestone}/accept', [MilestoneController::class, 'accept']);
 
     // Project Team Assignments
     Route::get('/projects/{project}/team', [AiAutoAssignController::class, 'index']);
