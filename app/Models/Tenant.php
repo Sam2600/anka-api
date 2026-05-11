@@ -15,12 +15,18 @@ class Tenant extends Model
         'slug',
         'plan',
         'currency',
+        'tax_rate',
+        'avg_delivery_lag_months',
+        'avg_payment_days_late',
         'is_active',
     ];
 
     protected $casts = [
-        'id'        => 'string',
+        'id' => 'string',
         'is_active' => 'boolean',
+        'tax_rate' => 'float',
+        'avg_delivery_lag_months' => 'integer',
+        'avg_payment_days_late' => 'integer',
     ];
 
     public function users()
