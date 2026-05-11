@@ -48,12 +48,15 @@ Route::middleware(['auth:sanctum', 'super_admin', 'throttle:60,1'])->prefix('adm
 
 // Business data routes — require tenant scope.
 Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function () {
-    // Deals — reads open to anyone in the tenant; writes gated by manage_crm.
-    // Splitting `apiResource` so the index/show pair stays readable for Executive
-    // / Delivery roles while only Sales + Admin can mutate.
-    Route::get('/deals', [DealController::class, 'index']);
-    Route::get('/deals/{deal}', [DealController::class, 'show']);
-    Route::get('/deals/{deal}/contract', [DealController::class, 'linkedContract']);
+    // Deals — reads require view_crm (Executive, Sales, Admin), writes
+    // require manage_crm (Sales, Admin). Aligns with the frontend route
+    // permission table in lib/route-permissions.ts so Delivery and HR
+    // can't reach the CRM API even by URL.
+    Route::middleware('permission:view_crm')->group(function () {
+        Route::get('/deals', [DealController::class, 'index']);
+        Route::get('/deals/{deal}', [DealController::class, 'show']);
+        Route::get('/deals/{deal}/contract', [DealController::class, 'linkedContract']);
+    });
 
     Route::middleware('permission:manage_crm')->group(function () {
         Route::post('/deals', [DealController::class, 'store']);
@@ -65,10 +68,12 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         Route::post('/deals/{deal}/lose', [DealController::class, 'lose']);
     });
 
-    // Estimation Versions — reads open; writes gated by manage_crm because
-    // saving / restoring a version mutates the parent deal's cost fields.
-    Route::get('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'index']);
-    Route::get('/estimation-versions/{id}', [EstimationVersionController::class, 'show']);
+    // Estimation Versions — reads require view_crm; writes require manage_crm
+    // because saving / restoring a version mutates the parent deal's cost fields.
+    Route::middleware('permission:view_crm')->group(function () {
+        Route::get('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'index']);
+        Route::get('/estimation-versions/{id}', [EstimationVersionController::class, 'show']);
+    });
     Route::middleware('permission:manage_crm')->group(function () {
         Route::post('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'store']);
         Route::post('/estimation-versions/{id}/restore', [EstimationVersionController::class, 'restore']);
