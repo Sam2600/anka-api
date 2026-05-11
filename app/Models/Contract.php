@@ -19,9 +19,17 @@ class Contract extends Model
         'client',
         'total_value',
         'revenue_recognized',
+        'cash_collected',
         'status',
         'start_date',
         'end_date',
+        'signed_at',
+        'payment_terms_days',
+        'po_number',
+        'billing_contact_name',
+        'billing_email',
+        'currency',
+        'tax_jurisdiction',
         'notes',
     ];
 
@@ -29,8 +37,11 @@ class Contract extends Model
         'id'                 => 'string',
         'total_value'        => 'float',
         'revenue_recognized' => 'float',
+        'cash_collected'     => 'float',
         'start_date'         => 'date',
         'end_date'           => 'date',
+        'signed_at'          => 'datetime',
+        'payment_terms_days' => 'integer',
         'deleted_at'         => 'datetime',
     ];
 

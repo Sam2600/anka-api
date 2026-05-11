@@ -87,7 +87,17 @@ class TimeEntryController extends Controller
                 ->increment('consumed_hours', $entry->hours);
         });
 
-        return new TimeEntryResource($timeEntry->fresh());
+        // Soft gate: if the linked contract isn't yet binding, warn the approver
+        // that these hours may not be invoiceable. We don't block — sometimes
+        // urgent work happens before paperwork is final, and finance reconciles
+        // later. The frontend toasts this so it surfaces in the approval queue.
+        $contractStatus = optional($timeEntry->fresh()->project?->contract)->status;
+        $warning = in_array($contractStatus, ['Draft', 'Cancelled'], true)
+            ? "Approved — but the linked contract is in '{$contractStatus}' status. These hours may not yet be invoiceable."
+            : null;
+
+        return (new TimeEntryResource($timeEntry->fresh()))
+            ->additional($warning ? ['warning' => $warning] : []);
     }
 
     /**
