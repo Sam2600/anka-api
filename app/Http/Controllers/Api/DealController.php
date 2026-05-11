@@ -10,10 +10,13 @@ use App\Models\Contract;
 use App\Models\Deal;
 use App\Models\Project;
 use App\Models\ProjectTeamAssignment;
+use App\Models\Employee;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class DealController extends Controller
 {
@@ -64,9 +67,24 @@ class DealController extends Controller
             'ghost_roles.*.min_monthly_salary' => 'nullable|numeric|min:0',
             'ghost_roles.*.max_monthly_salary' => 'nullable|numeric|min:0',
             'hard_assignments' => 'sometimes|array',
-            'hard_assignments.*.employee_id' => 'required|string',
+            // Constrain employee_id to the active tenant: Rule::exists uses the
+            // raw query builder (Eloquent global scopes don't apply), so without
+            // the explicit where(tenant_id) a crafted request could attach
+            // another tenant's employee id. whereNull(deleted_at) keeps
+            // soft-deleted employees out of the candidate set too.
+            'hard_assignments.*.employee_id' => [
+                'required',
+                'string',
+                Rule::exists('employees', 'id')
+                    ->where('tenant_id', app('tenant_id'))
+                    ->whereNull('deleted_at'),
+            ],
             'hard_assignments.*.allocated_hours' => 'required|numeric|min:0',
         ]);
+
+        // Server-side capacity check: the staffing UI blocks over-allocation,
+        // but a direct API request would otherwise sail past it.
+        $this->assertCapacityFeasible($request, null);
 
         $deal = DB::transaction(function () use ($request) {
             $deal = Deal::create($request->except([
@@ -115,9 +133,20 @@ class DealController extends Controller
             'ghost_roles.*.min_monthly_salary' => 'nullable|numeric|min:0',
             'ghost_roles.*.max_monthly_salary' => 'nullable|numeric|min:0',
             'hard_assignments' => 'sometimes|array',
-            'hard_assignments.*.employee_id' => 'required|string',
+            // Same tenant-scoped Rule::exists as `store` — see comment there for rationale.
+            'hard_assignments.*.employee_id' => [
+                'required',
+                'string',
+                Rule::exists('employees', 'id')
+                    ->where('tenant_id', app('tenant_id'))
+                    ->whereNull('deleted_at'),
+            ],
             'hard_assignments.*.allocated_hours' => 'required|numeric|min:0',
         ]);
+
+        // Capacity check uses the deal's existing timeline_months if the
+        // request doesn't override it (see assertCapacityFeasible).
+        $this->assertCapacityFeasible($request, $deal);
 
         DB::transaction(function () use ($request, $deal) {
             $deal->update($request->except([
@@ -137,7 +166,11 @@ class DealController extends Controller
     {
         $request->validate([
             'status' => 'required|in:lead,qualified,proposal,negotiation,won,lost',
-            'win_probability' => 'required|integer|min:0|max:100',
+            // win_probability is optional: when omitted we fall back to the
+            // stage default below. Previously `required` here contradicted the
+            // server-side default logic — clients that relied on the default
+            // would always 422.
+            'win_probability' => 'sometimes|integer|min:0|max:100',
         ]);
 
         // Server-side probability defaults per stage, applied when client doesn't send one.
@@ -152,8 +185,9 @@ class DealController extends Controller
             'lost'        => 0,
         ];
 
-        $probability = $request->win_probability
-            ?? ($stageProbabilities[$request->status] ?? 50);
+        $probability = $request->has('win_probability')
+            ? (int) $request->win_probability
+            : ($stageProbabilities[$request->status] ?? 50);
 
         $deal->update([
             'status' => $request->status,
@@ -301,6 +335,86 @@ class DealController extends Controller
         $deal->delete();
 
         return response()->noContent();
+    }
+
+    /**
+     * Validate that no employee in the incoming hard_assignments would exceed
+     * their monthly workable_hours once we account for assignments on every
+     * other non-lost deal in the same tenant.
+     *
+     * Frontend has the same check in /crm/[id]/staffing, but a direct API
+     * call could bypass it. Run this BEFORE replaceDealChildren so the write
+     * never goes through when capacity is exhausted.
+     *
+     * Throws ValidationException (→ 422) so the response shape matches what
+     * the frontend's error handler already understands.
+     */
+    private function assertCapacityFeasible(Request $request, ?Deal $deal = null): void
+    {
+        $assignments = $request->input('hard_assignments');
+        if (! is_array($assignments) || empty($assignments)) {
+            return;
+        }
+
+        // Resolve the effective timeline for this deal: request value first
+        // (incoming change wins), else the persisted deal, else 1 month.
+        $timelineMonths = max(1, (int) (
+            $request->input('timeline_months')
+            ?? $deal?->timeline_months
+            ?? 1
+        ));
+
+        $excludeDealId = $deal?->id;
+        $errors = [];
+
+        foreach ($assignments as $index => $a) {
+            $employeeId = $a['employee_id'] ?? null;
+            $hours      = (float) ($a['allocated_hours'] ?? 0);
+            if (! $employeeId || $hours <= 0) {
+                continue;
+            }
+
+            $employee = Employee::find($employeeId);
+            // Rule::exists above guarantees we find one in the same tenant,
+            // but guard against soft-deletes between validation and this step.
+            if (! $employee) {
+                continue;
+            }
+
+            $thisDealMonthly = $hours / $timelineMonths;
+
+            // Monthly hours already booked on OTHER open deals (excluding this one).
+            // Status=lost releases booking; everything else still holds capacity.
+            // COALESCE(NULLIF(timeline_months, 0), 1) so deals with NULL or 0
+            // timelines still count their full allocated_hours as 1 month of
+            // load — matching the frontend's `Math.max(1, timelineMonths || 1)`
+            // behaviour in staffing/page.tsx. Previously the > 0 filter
+            // dropped these deals from the load total entirely, so the
+            // backend let bookings through that the UI would have blocked.
+            $otherMonthly = (float) DB::table('deal_hard_assignments as dha')
+                ->join('deals as d', 'd.id', '=', 'dha.deal_id')
+                ->where('dha.tenant_id', app('tenant_id'))
+                ->where('dha.employee_id', $employeeId)
+                ->whereNull('d.deleted_at')
+                ->where('d.status', '!=', 'lost')
+                ->when($excludeDealId, fn ($q) => $q->where('d.id', '!=', $excludeDealId))
+                ->sum(DB::raw('CAST(dha.allocated_hours AS REAL) / COALESCE(NULLIF(d.timeline_months, 0), 1)'));
+
+            $totalMonthly = $thisDealMonthly + $otherMonthly;
+            $capacity     = (float) ($employee->workable_hours ?? 0);
+
+            if ($capacity > 0 && $totalMonthly > $capacity) {
+                $over = round($totalMonthly - $capacity, 1);
+                $errors["hard_assignments.{$index}.allocated_hours"] = [
+                    "{$employee->name} would be over-allocated by {$over} h/month "
+                    . "({$totalMonthly} requested vs {$capacity} capacity, including other open deals).",
+                ];
+            }
+        }
+
+        if (! empty($errors)) {
+            throw ValidationException::withMessages($errors);
+        }
     }
 
     private function replaceDealChildren(Deal $deal, Request $request): void
