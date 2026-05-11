@@ -48,18 +48,31 @@ Route::middleware(['auth:sanctum', 'super_admin', 'throttle:60,1'])->prefix('adm
 
 // Business data routes — require tenant scope.
 Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function () {
-    // Deals
-    Route::apiResource('deals', DealController::class);
-    Route::patch('/deals/{deal}/stage', [DealController::class,    'updateStage']);
-    Route::post('/deals/{deal}/win', [DealController::class,    'win']);
-    Route::post('/deals/{deal}/lose', [DealController::class,    'lose']);
-    Route::get('/deals/{deal}/contract', [DealController::class,    'linkedContract']);
+    // Deals — reads open to anyone in the tenant; writes gated by manage_crm.
+    // Splitting `apiResource` so the index/show pair stays readable for Executive
+    // / Delivery roles while only Sales + Admin can mutate.
+    Route::get('/deals', [DealController::class, 'index']);
+    Route::get('/deals/{deal}', [DealController::class, 'show']);
+    Route::get('/deals/{deal}/contract', [DealController::class, 'linkedContract']);
 
-    // Estimation Versions
+    Route::middleware('permission:manage_crm')->group(function () {
+        Route::post('/deals', [DealController::class, 'store']);
+        Route::put('/deals/{deal}', [DealController::class, 'update']);
+        Route::patch('/deals/{deal}', [DealController::class, 'update']);
+        Route::delete('/deals/{deal}', [DealController::class, 'destroy']);
+        Route::patch('/deals/{deal}/stage', [DealController::class, 'updateStage']);
+        Route::post('/deals/{deal}/win', [DealController::class, 'win']);
+        Route::post('/deals/{deal}/lose', [DealController::class, 'lose']);
+    });
+
+    // Estimation Versions — reads open; writes gated by manage_crm because
+    // saving / restoring a version mutates the parent deal's cost fields.
     Route::get('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'index']);
-    Route::post('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'store']);
     Route::get('/estimation-versions/{id}', [EstimationVersionController::class, 'show']);
-    Route::post('/estimation-versions/{id}/restore', [EstimationVersionController::class, 'restore']);
+    Route::middleware('permission:manage_crm')->group(function () {
+        Route::post('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'store']);
+        Route::post('/estimation-versions/{id}/restore', [EstimationVersionController::class, 'restore']);
+    });
 
     // Contracts (created only via win_deal; no store route)
     Route::apiResource('contracts', ContractController::class)->only(['index', 'show', 'update', 'destroy']);

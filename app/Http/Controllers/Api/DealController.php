@@ -14,6 +14,7 @@ use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 
 class DealController extends Controller
 {
@@ -64,7 +65,18 @@ class DealController extends Controller
             'ghost_roles.*.min_monthly_salary' => 'nullable|numeric|min:0',
             'ghost_roles.*.max_monthly_salary' => 'nullable|numeric|min:0',
             'hard_assignments' => 'sometimes|array',
-            'hard_assignments.*.employee_id' => 'required|string',
+            // Constrain employee_id to the active tenant: Rule::exists uses the
+            // raw query builder (Eloquent global scopes don't apply), so without
+            // the explicit where(tenant_id) a crafted request could attach
+            // another tenant's employee id. whereNull(deleted_at) keeps
+            // soft-deleted employees out of the candidate set too.
+            'hard_assignments.*.employee_id' => [
+                'required',
+                'string',
+                Rule::exists('employees', 'id')
+                    ->where('tenant_id', app('tenant_id'))
+                    ->whereNull('deleted_at'),
+            ],
             'hard_assignments.*.allocated_hours' => 'required|numeric|min:0',
         ]);
 
@@ -115,7 +127,14 @@ class DealController extends Controller
             'ghost_roles.*.min_monthly_salary' => 'nullable|numeric|min:0',
             'ghost_roles.*.max_monthly_salary' => 'nullable|numeric|min:0',
             'hard_assignments' => 'sometimes|array',
-            'hard_assignments.*.employee_id' => 'required|string',
+            // Same tenant-scoped Rule::exists as `store` — see comment there for rationale.
+            'hard_assignments.*.employee_id' => [
+                'required',
+                'string',
+                Rule::exists('employees', 'id')
+                    ->where('tenant_id', app('tenant_id'))
+                    ->whereNull('deleted_at'),
+            ],
             'hard_assignments.*.allocated_hours' => 'required|numeric|min:0',
         ]);
 
@@ -137,7 +156,11 @@ class DealController extends Controller
     {
         $request->validate([
             'status' => 'required|in:lead,qualified,proposal,negotiation,won,lost',
-            'win_probability' => 'required|integer|min:0|max:100',
+            // win_probability is optional: when omitted we fall back to the
+            // stage default below. Previously `required` here contradicted the
+            // server-side default logic — clients that relied on the default
+            // would always 422.
+            'win_probability' => 'sometimes|integer|min:0|max:100',
         ]);
 
         // Server-side probability defaults per stage, applied when client doesn't send one.
@@ -152,8 +175,9 @@ class DealController extends Controller
             'lost'        => 0,
         ];
 
-        $probability = $request->win_probability
-            ?? ($stageProbabilities[$request->status] ?? 50);
+        $probability = $request->has('win_probability')
+            ? (int) $request->win_probability
+            : ($stageProbabilities[$request->status] ?? 50);
 
         $deal->update([
             'status' => $request->status,
