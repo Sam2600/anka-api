@@ -385,6 +385,12 @@ class DealController extends Controller
 
             // Monthly hours already booked on OTHER open deals (excluding this one).
             // Status=lost releases booking; everything else still holds capacity.
+            // COALESCE(NULLIF(timeline_months, 0), 1) so deals with NULL or 0
+            // timelines still count their full allocated_hours as 1 month of
+            // load — matching the frontend's `Math.max(1, timelineMonths || 1)`
+            // behaviour in staffing/page.tsx. Previously the > 0 filter
+            // dropped these deals from the load total entirely, so the
+            // backend let bookings through that the UI would have blocked.
             $otherMonthly = (float) DB::table('deal_hard_assignments as dha')
                 ->join('deals as d', 'd.id', '=', 'dha.deal_id')
                 ->where('dha.tenant_id', app('tenant_id'))
@@ -392,8 +398,7 @@ class DealController extends Controller
                 ->whereNull('d.deleted_at')
                 ->where('d.status', '!=', 'lost')
                 ->when($excludeDealId, fn ($q) => $q->where('d.id', '!=', $excludeDealId))
-                ->where('d.timeline_months', '>', 0)
-                ->sum(DB::raw('CAST(dha.allocated_hours AS REAL) / d.timeline_months'));
+                ->sum(DB::raw('CAST(dha.allocated_hours AS REAL) / COALESCE(NULLIF(d.timeline_months, 0), 1)'));
 
             $totalMonthly = $thisDealMonthly + $otherMonthly;
             $capacity     = (float) ($employee->workable_hours ?? 0);
