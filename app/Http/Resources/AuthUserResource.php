@@ -29,6 +29,11 @@ class AuthUserResource extends JsonResource
                     'tax_rate' => (float) ($tenant->tax_rate ?? 0.20),
                     'avg_delivery_lag_months' => (int) ($tenant->avg_delivery_lag_months ?? 1),
                     'avg_payment_days_late' => (int) ($tenant->avg_payment_days_late ?? 0),
+                    'exchange_rates' => $tenant->exchangeRates()
+                        ->where('to_currency', 'USD')
+                        ->get(['from_currency', 'rate'])
+                        ->keyBy('from_currency')
+                        ->map(fn ($r) => (float) $r->rate),
                 ]
                 : null,
         ];

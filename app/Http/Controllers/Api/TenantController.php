@@ -284,6 +284,11 @@ class TenantController extends Controller
             'avg_payment_days_late' => (int) ($tenant->avg_payment_days_late ?? 0),
             'is_active' => $tenant->is_active,
             'created_at' => $tenant->created_at,
+            'exchange_rates' => $tenant->exchangeRates()
+                ->where('to_currency', 'USD')
+                ->get(['from_currency', 'rate'])
+                ->keyBy('from_currency')
+                ->map(fn ($r) => (float) $r->rate),
         ];
     }
 
