@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ContractController;
 use App\Http\Controllers\Api\DealController;
 use App\Http\Controllers\Api\EstimationVersionController;
+use App\Http\Controllers\Api\ExchangeRateController;
 use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\MilestoneController;
 use App\Http\Controllers\Api\OrganizationController;
@@ -141,6 +142,11 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
 
     // AI usage logging (tenant-scoped)
     Route::post('/ai-usage', [AiUsageController::class, 'store']);
+
+    // Exchange Rates
+    Route::get('/exchange-rates', [ExchangeRateController::class, 'index']);
+    Route::put('/exchange-rates', [ExchangeRateController::class, 'upsert']);
+    Route::delete('/exchange-rates/{rate}', [ExchangeRateController::class, 'destroy']);
 
     // Tenant settings (own tenant only)
     Route::get('/tenant', [TenantController::class, 'show']);

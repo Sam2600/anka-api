@@ -78,4 +78,9 @@ class Tenant extends Model
     {
         return $this->hasOne(CompanySetting::class);
     }
+
+    public function exchangeRates()
+    {
+        return $this->hasMany(ExchangeRate::class);
+    }
 }
