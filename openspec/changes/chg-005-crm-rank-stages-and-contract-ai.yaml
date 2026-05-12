@@ -1,0 +1,81 @@
+id: chg-005-crm-rank-stages-and-contract-ai
+name: Collapse CRM stages to ranked C/B/A/S/D + AI contract gate
+status: implemented
+created: 2026-05-12
+owners: [claude.max@brycenmyanmar.com.mm]
+
+why: |
+  The pipeline had 6 stages (lead, qualified, proposal, negotiation, won, lost)
+  with overlapping semantics — Qualified vs Proposal were two stages for what
+  the sales team treated as a single "we've sent the pitch / quote" phase, and
+  there was no enforced step between Negotiation and a closed-won contract. Sales
+  reps could move a deal to Won without any signed customer artefact, creating
+  premature Contracts and Projects.
+
+  This change reduces the pipeline to 5 stages (4 active + lost) with rank
+  labels and inserts a Claude-powered contract-document gate before S/won.
+
+what:
+  - Migration 2026_05_12_000001_collapse_proposal_into_qualified.php
+    - Rewrites any deals.status = 'proposal' to 'qualified'.
+    - Updates the deals_status CHECK constraint to the new 5-value set.
+
+  - Migration 2026_05_12_000002_create_deal_contract_documents_table.php
+    - New `deal_contract_documents` table tracking uploaded files and analysis verdicts.
+    - CHECK constraints on analysis_status, extension, and size_bytes.
+
+  - DealController: dropped 'proposal' from validation `in:` lists; updated the
+    stage-probability default map; qualified now defaults to 40 (was 30 for
+    qualified + 50 for proposal).
+
+  - New DealContractDocumentController (REST: index/show/store/destroy).
+    - POST /deals/{deal}/contract-documents accepts a multipart file
+      (pdf|docx|xlsx|pptx|txt, ≤25 MB) and runs ContractAnalysisService
+      synchronously.
+    - On `approved` verdict, the controller invokes win_deal() (Postgres) or
+      the SQLite fallback so the deal jumps to S/won + Contract + Project are
+      created atomically — same code path as DealController@win.
+
+  - New App\Services\ContractAnalysisService.
+    - Extracts text from each supported format using smalot/pdfparser,
+      phpoffice/phpword, phpoffice/phpspreadsheet, phpoffice/phppresentation.
+    - Sends extracted text + a placeholder required-fields checklist to
+      Claude 3.5 Sonnet (`claude-3-5-sonnet-latest`). Logs token usage to
+      `ai_usage_logs` with feature='contract_analysis'.
+    - Keyword fallback when ANTHROPIC_API_KEY is missing or the API errors.
+
+  - Routes registered under tenant-scoped middleware. view_crm gates reads;
+    manage_crm gates writes (POST/DELETE).
+
+  - composer.json now requires smalot/pdfparser, phpoffice/phpword,
+    phpoffice/phpspreadsheet, phpoffice/phppresentation. Run `composer update`
+    on the affected machines.
+
+  - Seeder rows that used 'proposal' relabelled to 'qualified'.
+
+  - openspec/specs/domain-models.yaml, database-schema.yaml, api-contracts.yaml
+    updated to reflect the 5-stage set, new model/table, and new routes.
+
+placeholders:
+  - The required-fields list in ContractAnalysisService::REQUIRED_FIELDS_PLACEHOLDER
+    is a placeholder per the original request. Replace with the agency's real
+    contract checklist once finalised.
+
+risk: |
+  - Tenants that had deals in 'proposal' now show them in 'qualified'; downstream
+    counts/charts may shift but no data is lost.
+  - First-time upload of a large document is synchronous and may take several
+    seconds — acceptable for v1; can be moved to a queued job later.
+  - Manual override of win — the DealController@win endpoint still exists and
+    is still gated by manage_crm; the frontend Kanban no longer surfaces it.
+
+rollback: |
+  - Migration rollback restores the 6-value CHECK constraint (deals data merge
+    is not reversible by migration; manual reclassification needed if rolling
+    back).
+  - deal_contract_documents table can be dropped without affecting deals.
+
+manual_steps:
+  - composer update            # pull the new PHP packages
+  - php artisan migrate        # apply the two new migrations
+  - (frontend) npm install / npm run build  # picks up new components and queries

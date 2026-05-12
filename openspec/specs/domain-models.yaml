@@ -140,7 +140,12 @@ models:
       - estimation_resources (hasMany)
       - deal_overheads (hasMany)
     constraints:
-      - status ∈ [lead, qualified, proposal, negotiation, won, lost]
+      - status ∈ [lead, qualified, negotiation, won, lost]
+    notes: |
+      UI rank labels: lead → C, qualified → B (Qualified + Proposal merged),
+      negotiation → A (contract-document upload gate), won → S, lost → D.
+      The old `proposal` stage was collapsed into `qualified` in migration
+      2026_05_12_000001_collapse_proposal_into_qualified.php.
 
   - name: DealGhostRole
     file: app/Models/DealGhostRole.php
@@ -177,6 +182,26 @@ models:
     key_fields: [tenant_id, deal_id, name, cost]
     relationships:
       - deal (belongsTo)
+
+  - name: DealContractDocument
+    file: app/Models/DealContractDocument.php
+    traits: [BelongsToTenant, HasFactory, HasUuids]
+    soft_deletes: false
+    key_fields: [tenant_id, deal_id, uploaded_by, original_filename, mime_type, extension, size_bytes, storage_path, analysis_status, analysis_result, analyzed_at]
+    relationships:
+      - deal (belongsTo)
+      - uploader (belongsTo User, 'uploaded_by')
+    constraints:
+      - analysis_status ∈ [pending, analyzing, approved, rejected, failed]
+      - extension ∈ [pdf, docx, xlsx, pptx, txt]
+      - size_bytes > 0 AND ≤ 26214400 (25 MB)
+    notes: |
+      Customer contract documents uploaded while a deal is in the A-rank
+      `negotiation` stage. ContractAnalysisService extracts text per format
+      and asks Claude whether the agency's required fields are present.
+      When analysis_status = 'approved' the controller auto-fires win_deal()
+      so the deal jumps straight to the S-rank `won` stage and the linked
+      Contract + Project are created atomically.
 
   - name: EstimationVersion
     file: app/Models/EstimationVersion.php

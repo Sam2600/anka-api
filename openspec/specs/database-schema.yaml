@@ -46,8 +46,17 @@ check_constraints:
       - "capacity_role IN ('frontend', 'backend', 'pm', 'qa', 'design')"
   - table: deals
     constraints:
-      - "status IN ('lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost')"
+      - "status IN ('lead', 'qualified', 'negotiation', 'won', 'lost')"
       - numerous non-negative value checks on financial fields
+      - notes: |
+          Reduced from 6 stages to 5 in migration 2026_05_12_000001. The old
+          `proposal` rows were folded into `qualified`. UI rank labels:
+          lead→C, qualified→B, negotiation→A, won→S, lost→D.
+  - table: deal_contract_documents
+    constraints:
+      - "analysis_status IN ('pending', 'analyzing', 'approved', 'rejected', 'failed')"
+      - "extension IN ('pdf', 'docx', 'xlsx', 'pptx', 'txt')"
+      - "size_bytes > 0 AND size_bytes <= 26214400"
   - table: contracts
     constraints:
       - "status IN ('Draft', 'Signed', 'Active', 'Completed', 'Cancelled')"
@@ -230,6 +239,21 @@ tables:
       - { name: deal_id, type: UUID, fk: deals.id }
       - { name: name, type: string }
       - { name: cost, type: decimal }
+
+  - name: deal_contract_documents
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: deal_id, type: UUID, fk: deals.id, on_delete: CASCADE }
+      - { name: uploaded_by, type: UUID, nullable: true, fk: users.id, on_delete: SET NULL }
+      - { name: original_filename, type: string }
+      - { name: mime_type, type: string }
+      - { name: extension, type: string }
+      - { name: size_bytes, type: integer }
+      - { name: storage_path, type: string }
+      - { name: analysis_status, type: string, default: "'pending'" }
+      - { name: analysis_result, type: jsonb, nullable: true }
+      - { name: analyzed_at, type: timestamp, nullable: true }
 
   - name: estimation_versions
     key_columns:

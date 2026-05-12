@@ -49,7 +49,7 @@ class DealController extends Controller
             'contact_name' => 'required|string|max:255',
             'contact_email' => 'required|email|max:255',
             'contact_phone' => 'required|string|max:50',
-            'status' => 'nullable|in:lead,qualified,proposal,negotiation,won,lost',
+            'status' => 'nullable|in:lead,qualified,negotiation,won,lost',
             'expected_close_date' => 'nullable|date',
             'lead_source' => 'nullable|in:inbound,referral,cold_outreach,social,event,partner,other',
             'estimated_value' => 'nullable|numeric|min:0',
@@ -115,7 +115,7 @@ class DealController extends Controller
             'contact_name' => 'sometimes|required|string|max:255',
             'contact_email' => 'sometimes|required|email|max:255',
             'contact_phone' => 'sometimes|required|string|max:50',
-            'status' => 'sometimes|in:lead,qualified,proposal,negotiation,won,lost',
+            'status' => 'sometimes|in:lead,qualified,negotiation,won,lost',
             'expected_close_date' => 'sometimes|nullable|date',
             'lead_source' => 'sometimes|nullable|in:inbound,referral,cold_outreach,social,event,partner,other',
             'estimated_value' => 'sometimes|nullable|numeric|min:0',
@@ -165,7 +165,7 @@ class DealController extends Controller
     public function updateStage(Request $request, Deal $deal)
     {
         $request->validate([
-            'status' => 'required|in:lead,qualified,proposal,negotiation,won,lost',
+            'status' => 'required|in:lead,qualified,negotiation,won,lost',
             // win_probability is optional: when omitted we fall back to the
             // stage default below. Previously `required` here contradicted the
             // server-side default logic — clients that relied on the default
@@ -176,10 +176,11 @@ class DealController extends Controller
         // Server-side probability defaults per stage, applied when client doesn't send one.
         // Calibrated for an agency where most leads don't convert; tune per
         // tenant once you have real conversion-rate data.
+        // 5 stages now (qualified merges the old proposal stage).
+        // Frontend rank labels: lead→C, qualified→B, negotiation→A, won→S, lost→D.
         $stageProbabilities = [
             'lead'        => 10,
-            'qualified'   => 30,
-            'proposal'    => 50,
+            'qualified'   => 40,
             'negotiation' => 75,
             'won'         => 100,
             'lost'        => 0,
