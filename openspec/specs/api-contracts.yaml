@@ -101,6 +101,20 @@ middleware_tiers:
           - { method: POST,   path: /deals/{deal}/lose,              controller: DealController@lose,            permission: manage_crm }
           - { method: GET,    path: /deals/{deal}/contract,          controller: DealController@linkedContract,  permission: view_crm }
 
+      - name: Deal Contract Documents (A-rank gate)
+        permission_gate: view_crm / manage_crm
+        notes: |
+          Customer contract documents uploaded while a deal is in `negotiation`
+          (rank A). The store endpoint extracts text from the file, asks Claude
+          whether the agency's required fields are present, stores the verdict
+          in `analysis_result`, and on `approved` invokes win_deal() so the
+          deal auto-transitions to `won` (rank S).
+        routes:
+          - { method: GET,    path: /deals/{deal}/contract-documents,                controller: DealContractDocumentController@index,   permission: view_crm }
+          - { method: GET,    path: /contract-documents/{contractDocument},         controller: DealContractDocumentController@show,    permission: view_crm }
+          - { method: POST,   path: /deals/{deal}/contract-documents,                controller: DealContractDocumentController@store,   permission: manage_crm, notes: "Multipart upload (file). Allowed: pdf, docx, xlsx, pptx, txt. Max 25 MB. Auto-fires win_deal() on approved analysis." }
+          - { method: DELETE, path: /contract-documents/{contractDocument},         controller: DealContractDocumentController@destroy, permission: manage_crm }
+
       - name: Estimation Versions
         routes:
           - { method: GET,    path: /deals/{deal}/estimation-versions, controller: EstimationVersionController@index }
@@ -198,6 +212,7 @@ resources:
   - AuthUserResource
   - CompanySettingResource
   - ContractResource
+  - DealContractDocumentResource
   - DealResource
   - DepartmentResource
   - EmployeeResource

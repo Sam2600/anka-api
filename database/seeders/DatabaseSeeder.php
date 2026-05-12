@@ -7,6 +7,7 @@ use App\Models\CapacityRole;
 use App\Models\CompanySetting;
 use App\Models\Contract;
 use App\Models\Deal;
+use App\Models\DealContractDocument;
 use App\Models\DealGhostRole;
 use App\Models\DealHardAssignment;
 use App\Models\DealOverhead;
@@ -64,6 +65,7 @@ class DatabaseSeeder extends Seeder
             'projects',
             'contracts',
             'estimation_versions',
+            'deal_contract_documents',
             'deal_overheads',
             'estimation_resources',
             'deal_hard_assignments',
@@ -439,7 +441,91 @@ class DatabaseSeeder extends Seeder
             'created_at' => Carbon::parse($row['expected_close'])->subDays(14),
         ]);
 
+        // Seed demo contract documents for deals in the A-rank (negotiation)
+        // stage so the new contract-AI gate UI has data on first load.
+        // The actual file isn't materialised — only the metadata + analysis
+        // verdict. Re-running the analyser on these rows would 404 because
+        // storage_path is fictional, which is fine for demo purposes.
+        if ($deal->status === 'negotiation') {
+            $this->seedDemoContractDocuments($tenant, $deal, $admin);
+        }
+
         return $deal;
+    }
+
+    /**
+     * Demo `deal_contract_documents` rows. Uses a small status rotation
+     * keyed by deal id so different negotiation deals show different AI
+     * verdicts (rejected / pending / failed) across the demo dataset.
+     *
+     * `approved` is intentionally NOT seeded here — in production an
+     * `approved` analysis auto-fires win_deal() so the deal would have
+     * already left `negotiation`. Seeding that combination would model an
+     * impossible state.
+     */
+    private function seedDemoContractDocuments(Tenant $tenant, Deal $deal, User $admin): void
+    {
+        // Pick a status from a deterministic rotation based on the deal's UUID
+        // so re-seeding produces the same demo layout.
+        $bucket = hexdec(substr(str_replace('-', '', $deal->id), 0, 4)) % 3;
+        $scenario = ['rejected', 'pending', 'failed'][$bucket];
+
+        $base = [
+            'tenant_id' => $tenant->id,
+            'deal_id' => $deal->id,
+            'uploaded_by' => $admin->id,
+            'mime_type' => 'application/pdf',
+            'extension' => 'pdf',
+            'storage_path' => sprintf('contract-docs/%s/%s/demo-seed.pdf', $tenant->id, $deal->id),
+        ];
+
+        if ($scenario === 'rejected') {
+            DealContractDocument::create($base + [
+                'original_filename' => Str::slug($deal->client).'-draft-contract.pdf',
+                'size_bytes' => 412_300,
+                'analysis_status' => 'rejected',
+                'analysis_result' => [
+                    'approved' => false,
+                    'missing_fields' => ['payment_terms', 'effective_date'],
+                    'reasoning' => 'Draft contract includes scope and signatures, but no payment schedule or commencement date — both required before this deal can move to Won.',
+                    'required_fields' => ['client_name', 'contract_value', 'payment_terms', 'effective_date', 'signatures', 'scope_of_work'],
+                    'model' => 'claude-3-5-sonnet-latest',
+                ],
+                'analyzed_at' => now()->subDays(2),
+                'created_at' => now()->subDays(2),
+                'updated_at' => now()->subDays(2),
+            ]);
+
+            return;
+        }
+
+        if ($scenario === 'failed') {
+            DealContractDocument::create($base + [
+                'original_filename' => Str::slug($deal->client).'-scanned-contract.pdf',
+                'size_bytes' => 1_240_500,
+                'analysis_status' => 'failed',
+                'analysis_result' => [
+                    'error' => 'Document contained no extractable text.',
+                    'suggestion' => 'The file appears to be image-only (scanned). Re-export as a text-based PDF or DOCX and try again.',
+                ],
+                'analyzed_at' => now()->subHours(20),
+                'created_at' => now()->subHours(20),
+                'updated_at' => now()->subHours(20),
+            ]);
+
+            return;
+        }
+
+        // pending — represents a doc uploaded mid-day, analysis still queued / in flight.
+        DealContractDocument::create($base + [
+            'original_filename' => Str::slug($deal->client).'-signed-contract.pdf',
+            'size_bytes' => 287_900,
+            'analysis_status' => 'pending',
+            'analysis_result' => null,
+            'analyzed_at' => null,
+            'created_at' => now()->subMinutes(5),
+            'updated_at' => now()->subMinutes(5),
+        ]);
     }
 
     private function createDelivery(Tenant $tenant, Deal $deal, array $row, array $employees, User $admin): void
@@ -798,7 +884,7 @@ class DatabaseSeeder extends Seeder
                 ['number' => 'YDW-INV-2026-004', 'milestone' => 'rollout', 'issue_date' => '2026-04-26', 'due_date' => '2026-05-10', 'amount' => 76000000, 'tax' => 3800000, 'status' => 'Paid', 'paid_at' => '2026-05-08', 'notes' => 'Rollout accepted.'],
             ]),
             $this->pipelineDeal('Cross-Border Remittance Risk Dashboard', 'Mingalar Money Transfer', 242000000, 2100, 'negotiation', 75, '2026-06-15', 'partner', ['backend_one' => 220, 'frontend_one' => 160, 'designer' => 80, 'project_manager' => 80]),
-            $this->pipelineDeal('Tea Exporter B2B Ordering Portal', 'Golden Leaf Export', 86000000, 780, 'proposal', 55, '2026-06-04', 'referral', []),
+            $this->pipelineDeal('Tea Exporter B2B Ordering Portal', 'Golden Leaf Export', 86000000, 780, 'qualified', 55, '2026-06-04', 'referral', []),
             $this->pipelineDeal('Insurance Claims Mobile Back Office', 'Tharaphu Insurance', 156000000, 1320, 'qualified', 35, '2026-07-22', 'inbound', []),
             $this->lostDeal('Legacy ERP Rescue Assessment', 'Irrawaddy Distribution', 48000000, 360, '2026-04-12', 'Client deferred until Q4 after board review.'),
         ];
@@ -826,7 +912,7 @@ class DatabaseSeeder extends Seeder
                 ['number' => 'MSC-INV-2026-003', 'milestone' => 'prototype', 'issue_date' => '2026-02-13', 'due_date' => '2026-02-27', 'amount' => 24000000, 'tax' => 1200000, 'status' => 'Paid', 'paid_at' => '2026-02-25', 'notes' => 'Prototype paid.'],
                 ['number' => 'MSC-INV-2026-004', 'milestone' => 'sites', 'issue_date' => '2026-04-11', 'due_date' => '2026-04-25', 'amount' => 38000000, 'tax' => 1900000, 'status' => 'Paid', 'paid_at' => '2026-04-23', 'notes' => 'Microsites delivered.'],
             ]),
-            $this->pipelineDeal('Wholesale Inventory Mobile App', 'Zay Cho Market Cooperative', 72000000, 840, 'proposal', 60, '2026-06-20', 'event', []),
+            $this->pipelineDeal('Wholesale Inventory Mobile App', 'Zay Cho Market Cooperative', 72000000, 840, 'qualified', 60, '2026-06-20', 'event', []),
             $this->pipelineDeal('Tour Operator CRM and Quotation Tool', 'Upper Myanmar Journeys', 54000000, 620, 'qualified', 40, '2026-07-02', 'inbound', []),
             $this->pipelineDeal('Retail Loyalty Data Mart', 'Mandalay Mart', 118000000, 1250, 'negotiation', 70, '2026-06-10', 'referral', ['backend_one' => 160, 'frontend_one' => 100, 'project_manager' => 60]),
             $this->lostDeal('Food Delivery Campaign Microsite', 'Taste Mandalay', 26000000, 260, '2026-04-16', 'Lost to a lower-cost freelancer.'),
@@ -855,7 +941,7 @@ class DatabaseSeeder extends Seeder
                 ['number' => 'TPL-INV-2026-003', 'milestone' => 'mvp', 'issue_date' => '2026-03-19', 'due_date' => '2026-04-02', 'amount' => 9800000, 'tax' => 980000, 'status' => 'Paid', 'paid_at' => '2026-03-31', 'notes' => 'MVP accepted.'],
                 ['number' => 'TPL-INV-2026-004', 'milestone' => 'pilot', 'issue_date' => '2026-04-29', 'due_date' => '2026-05-13', 'amount' => 7000000, 'tax' => 700000, 'status' => 'Paid', 'paid_at' => '2026-05-11', 'notes' => 'Pilot completed.'],
             ]),
-            $this->pipelineDeal('Multilingual Partner Portal', 'Nihon Travel Partners', 13200000, 760, 'proposal', 50, '2026-06-18', 'partner', []),
+            $this->pipelineDeal('Multilingual Partner Portal', 'Nihon Travel Partners', 13200000, 760, 'qualified', 50, '2026-06-18', 'partner', []),
             $this->pipelineDeal('Fintech Compliance Evidence Vault', 'Shinjuku Payments', 28600000, 1660, 'negotiation', 80, '2026-06-28', 'referral', ['solution_architect' => 220, 'backend_one' => 180, 'qa_one' => 120, 'project_manager' => 90]),
             $this->pipelineDeal('HR Onboarding Workflow Tool', 'Meguro People Ops', 9400000, 520, 'qualified', 35, '2026-07-15', 'inbound', []),
             $this->lostDeal('Event Ticketing Landing System', 'Tokyo Culture Week', 5200000, 300, '2026-04-07', 'Client paused the campaign after sponsor budget changed.'),

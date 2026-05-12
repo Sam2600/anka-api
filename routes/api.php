@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\AiUsageController;
 use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ContractController;
+use App\Http\Controllers\Api\DealContractDocumentController;
 use App\Http\Controllers\Api\DealController;
 use App\Http\Controllers\Api\EstimationVersionController;
 use App\Http\Controllers\Api\ExchangeRateController;
@@ -67,6 +68,18 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         Route::patch('/deals/{deal}/stage', [DealController::class, 'updateStage']);
         Route::post('/deals/{deal}/win', [DealController::class, 'win']);
         Route::post('/deals/{deal}/lose', [DealController::class, 'lose']);
+    });
+
+    // Customer contract documents (uploaded while deal is in Negotiation / A-rank).
+    // Reads with view_crm so a Sales user can see analysis results; writes with
+    // manage_crm because an approved upload auto-fires win_deal().
+    Route::middleware('permission:view_crm')->group(function () {
+        Route::get('/deals/{deal}/contract-documents', [DealContractDocumentController::class, 'index']);
+        Route::get('/contract-documents/{contractDocument}', [DealContractDocumentController::class, 'show']);
+    });
+    Route::middleware('permission:manage_crm')->group(function () {
+        Route::post('/deals/{deal}/contract-documents', [DealContractDocumentController::class, 'store']);
+        Route::delete('/contract-documents/{contractDocument}', [DealContractDocumentController::class, 'destroy']);
     });
 
     // Estimation Versions — reads require view_crm; writes require manage_crm
