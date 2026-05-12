@@ -1,0 +1,236 @@
+id: api-contracts
+name: API Contracts, Routes & Middleware
+version: "1.0"
+
+summary: |
+  All API routes live in `routes/api.php` under the `/api` prefix. Responses are JSON
+  shaped by Laravel API Resources. Errors return JSON (never HTML) via configuration
+  in `bootstrap/app.php`.
+
+middleware_tiers:
+  - tier: Public / Throttled
+    prefix: ""
+    middleware: [throttle:5,1]
+    routes:
+      - method: POST
+        path: /auth/login
+        controller: AuthController@login
+        notes: No auth required. Rate limited to 5 attempts/minute.
+
+  - tier: Auth-only
+    prefix: /auth
+    middleware: [auth:sanctum, throttle:60,1]
+    routes:
+      - method: DELETE
+        path: /auth/logout
+        controller: AuthController@logout
+      - method: GET
+        path: /auth/me
+        controller: AuthController@me
+        notes: Returns AuthUserResource with embedded tenant object.
+      - method: PUT
+        path: /auth/profile
+        controller: AuthController@updateProfile
+      - method: POST
+        path: /auth/password
+        controller: AuthController@changePassword
+      - method: POST
+        path: /auth/refresh
+        controller: AuthController@refresh
+
+  - tier: Super Admin
+    prefix: /admin
+    middleware: [auth:sanctum, super_admin, throttle:60,1]
+    routes:
+      - method: GET
+        path: /admin/dashboard/stats
+        controller: AdminController@dashboardStats
+      - method: GET
+        path: /admin/tenants
+        controller: TenantController@index
+      - method: POST
+        path: /admin/tenants
+        controller: TenantController@store
+      - method: GET
+        path: /admin/tenants/{id}
+        controller: TenantController@showAdmin
+      - method: PUT
+        path: /admin/tenants/{id}
+        controller: TenantController@updateAdmin
+      - method: DELETE
+        path: /admin/tenants/{id}
+        controller: TenantController@destroy
+      - method: GET
+        path: /admin/tenants/{tenantId}/users
+        controller: TenantController@listUsers
+      - method: POST
+        path: /admin/tenants/{tenantId}/users
+        controller: TenantController@createUser
+      - method: PUT
+        path: /admin/tenants/{tenantId}/users/{userId}
+        controller: TenantController@updateUser
+      - method: DELETE
+        path: /admin/tenants/{tenantId}/users/{userId}
+        controller: TenantController@deleteUser
+      - method: GET
+        path: /admin/ai-usage
+        controller: AiUsageController@adminIndex
+      - method: GET
+        path: /admin/audit-logs
+        controller: AdminController@auditLogs
+      - method: GET
+        path: /admin/users
+        controller: AdminController@listAllUsers
+
+  - tier: Tenant-scoped
+    prefix: ""
+    middleware: [auth:sanctum, tenant, throttle:60,1]
+    notes: Every request must include the `X-Tenant-ID` header.
+    groups:
+      - name: Deals (CRM)
+        permission_gate: view_crm / manage_crm
+        routes:
+          - { method: GET,    path: /deals,                          controller: DealController@index,           permission: view_crm }
+          - { method: POST,   path: /deals,                          controller: DealController@store,           permission: manage_crm }
+          - { method: GET,    path: /deals/{deal},                   controller: DealController@show,            permission: view_crm }
+          - { method: PUT,    path: /deals/{deal},                   controller: DealController@update,          permission: manage_crm }
+          - { method: PATCH,  path: /deals/{deal},                   controller: DealController@update,          permission: manage_crm }
+          - { method: DELETE, path: /deals/{deal},                   controller: DealController@destroy,         permission: manage_crm }
+          - { method: PATCH,  path: /deals/{deal}/stage,             controller: DealController@updateStage,     permission: manage_crm }
+          - { method: POST,   path: /deals/{deal}/win,               controller: DealController@win,             permission: manage_crm, notes: "Invokes PostgreSQL stored procedure win_deal()" }
+          - { method: POST,   path: /deals/{deal}/lose,              controller: DealController@lose,            permission: manage_crm }
+          - { method: GET,    path: /deals/{deal}/contract,          controller: DealController@linkedContract,  permission: view_crm }
+
+      - name: Estimation Versions
+        routes:
+          - { method: GET,    path: /deals/{deal}/estimation-versions, controller: EstimationVersionController@index }
+          - { method: POST,   path: /deals/{deal}/estimation-versions, controller: EstimationVersionController@store }
+          - { method: GET,    path: /estimation-versions/{id},         controller: EstimationVersionController@show }
+          - { method: POST,   path: /estimation-versions/{id}/restore, controller: EstimationVersionController@restore }
+
+      - name: Contracts
+        routes:
+          - { method: GET,    path: /contracts,                      controller: ContractController@index }
+          - { method: GET,    path: /contracts/{contract},           controller: ContractController@show }
+          - { method: PUT,    path: /contracts/{contract},           controller: ContractController@update }
+          - { method: DELETE, path: /contracts/{contract},           controller: ContractController@destroy }
+          - { method: GET,    path: /contracts/{contract}/project,   controller: ContractController@linkedProject }
+
+      - name: Invoices
+        routes:
+          - { method: GET,    path: /invoices,                       controller: InvoiceController@index }
+          - { method: GET,    path: /invoices/{invoice},             controller: InvoiceController@show }
+          - { method: POST,   path: /invoices,                       controller: InvoiceController@store }
+          - { method: PATCH,  path: /invoices/{invoice},             controller: InvoiceController@update }
+          - { method: DELETE, path: /invoices/{invoice},             controller: InvoiceController@destroy }
+          - { method: PATCH,  path: /invoices/{invoice}/pay,         controller: InvoiceController@pay, notes: "Runs inside DB::transaction(); increments contracts.revenue_recognized" }
+          - { method: POST,   path: /invoices/{invoice}/send,        controller: InvoiceController@send }
+
+      - name: Milestones
+        routes:
+          - { method: GET,    path: /milestones,                     controller: MilestoneController@index }
+          - { method: POST,   path: /milestones,                     controller: MilestoneController@store }
+          - { method: GET,    path: /milestones/{milestone},         controller: MilestoneController@show }
+          - { method: PUT,    path: /milestones/{milestone},         controller: MilestoneController@update }
+          - { method: DELETE, path: /milestones/{milestone},         controller: MilestoneController@destroy }
+          - { method: PATCH,  path: /milestones/{milestone}/accept,  controller: MilestoneController@accept }
+
+      - name: Projects
+        routes:
+          - { method: GET,    path: /projects,                       controller: ProjectController@index }
+          - { method: GET,    path: /projects/{project},             controller: ProjectController@show }
+          - { method: PUT,    path: /projects/{project},             controller: ProjectController@update }
+          - { method: DELETE, path: /projects/{project},             controller: ProjectController@destroy }
+          - { method: GET,    path: /projects/{project}/team,        controller: AiAutoAssignController@index }
+          - { method: POST,   path: /projects/{project}/team,        controller: AiAutoAssignController@store }
+          - { method: DELETE, path: /projects/{project}/team/{assignment}, controller: AiAutoAssignController@destroy }
+          - { method: POST,   path: /projects/{project}/auto-assign, controller: AiAutoAssignController@autoAssign }
+
+      - name: Time Entries
+        routes:
+          - { method: GET,    path: /time-entries,                   controller: TimeEntryController@index }
+          - { method: GET,    path: /time-entries/{time_entry},      controller: TimeEntryController@show }
+          - { method: POST,   path: /time-entries,                   controller: TimeEntryController@store }
+          - { method: DELETE, path: /time-entries/{time_entry},      controller: TimeEntryController@destroy }
+          - { method: PATCH,  path: /time-entries/{time_entry}/approve, controller: TimeEntryController@approve, notes: "Uses lockForUpdate() inside transaction before incrementing projects.consumed_hours" }
+          - { method: PATCH,  path: /time-entries/{time_entry}/submit,  controller: TimeEntryController@submit }
+          - { method: PATCH,  path: /time-entries/{time_entry}/reject,  controller: TimeEntryController@reject }
+
+      - name: Organization
+        routes:
+          - { method: GET,    path: /departments,                    controller: OrganizationController@departmentsIndex }
+          - { method: POST,   path: /departments,                    controller: OrganizationController@departmentsStore }
+          - { method: PUT,    path: /departments/{department},       controller: OrganizationController@departmentsUpdate }
+          - { method: DELETE, path: /departments/{department},       controller: OrganizationController@departmentsDestroy }
+          - { method: GET,    path: /roles,                          controller: OrganizationController@rolesIndex }
+          - { method: POST,   path: /roles,                          controller: OrganizationController@rolesStore }
+          - { method: PUT,    path: /roles/{role},                   controller: OrganizationController@rolesUpdate }
+          - { method: DELETE, path: /roles/{role},                   controller: OrganizationController@rolesDestroy }
+          - { method: GET,    path: /employees,                      controller: OrganizationController@employeesIndex }
+          - { method: POST,   path: /employees,                      controller: OrganizationController@employeesStore }
+          - { method: PUT,    path: /employees/{employee},           controller: OrganizationController@employeesUpdate }
+          - { method: DELETE, path: /employees/{employee},           controller: OrganizationController@employeesDestroy }
+          - { method: GET,    path: /global-overheads,               controller: OrganizationController@overheadsIndex }
+          - { method: POST,   path: /global-overheads,               controller: OrganizationController@overheadsStore }
+          - { method: PUT,    path: /global-overheads/{globalOverhead}, controller: OrganizationController@overheadsUpdate }
+          - { method: DELETE, path: /global-overheads/{globalOverhead}, controller: OrganizationController@overheadsDestroy }
+          - { method: GET,    path: /company-settings,               controller: OrganizationController@settingsShow }
+          - { method: PUT,    path: /company-settings,               controller: OrganizationController@settingsUpdate }
+          - { method: GET,    path: /capacity-roles,                 controller: OrganizationController@capacityRolesIndex }
+          - { method: POST,   path: /capacity-roles,                 controller: OrganizationController@capacityRolesStore }
+          - { method: PUT,    path: /capacity-roles/{capacityRole},  controller: OrganizationController@capacityRolesUpdate }
+          - { method: DELETE, path: /capacity-roles/{capacityRole},  controller: OrganizationController@capacityRolesDestroy }
+          - { method: GET,    path: /skills,                         controller: OrganizationController@skillsIndex }
+          - { method: POST,   path: /skills,                         controller: OrganizationController@skillsStore }
+          - { method: PUT,    path: /skills/{skill},                 controller: OrganizationController@skillsUpdate }
+          - { method: DELETE, path: /skills/{skill},                 controller: OrganizationController@skillsDestroy }
+          - { method: GET,    path: /employees/{employee}/skills,    controller: OrganizationController@employeeSkillsIndex }
+          - { method: POST,   path: /employees/{employee}/skills,    controller: OrganizationController@employeeSkillsStore }
+          - { method: DELETE, path: /employees/{employee}/skills/{skill}, controller: OrganizationController@employeeSkillsDestroy }
+
+      - name: Tenant & AI
+        routes:
+          - { method: GET,    path: /tenant,                         controller: TenantController@show }
+          - { method: PUT,    path: /tenant,                         controller: TenantController@update }
+          - { method: POST,   path: /ai-usage,                       controller: AiUsageController@store }
+
+resources:
+  - AuthUserResource
+  - CompanySettingResource
+  - ContractResource
+  - DealResource
+  - DepartmentResource
+  - EmployeeResource
+  - GlobalOverheadResource
+  - InvoiceResource
+  - MilestoneResource
+  - ProjectResource
+  - ProjectTeamAssignmentResource
+  - RoleResource
+  - SkillResource
+  - TimeEntryResource
+  - CapacityRoleResource
+  - AiUsageLogResource
+
+middleware_classes:
+  - name: TenantScope
+    file: app/Http/Middleware/TenantScope.php
+    alias: tenant
+    behavior: |
+      Reads `X-Tenant-ID` header. Validates UUID format. Verifies tenant exists
+      and `is_active = true`. Cross-tenant defence: rejects if `$user->tenant_id`
+      does not match header (super admins bypass). Binds `tenant_id` into app container.
+  - name: CheckPermission
+    file: app/Http/Middleware/CheckPermission.php
+    behavior: |
+      RBAC gate mirroring frontend `lib/rbac.ts`. Super admins bypass.
+      Role map: Admin => [all], Executive => [view_dashboard, view_reports, manage_tenant, view_projects, view_crm],
+      Sales => [view_crm, manage_crm, manage_estimation, view_contracts],
+      Delivery => [view_projects, manage_projects, track_time],
+      HR => [manage_organization, view_employees, manage_employees].
+  - name: SuperAdmin
+    file: app/Http/Middleware/SuperAdmin.php
+    behavior: Returns 403 if `!$request->user()->isSuperAdmin()`.
+  - name: LogSystemErrors
+    file: app/Http/Middleware/LogSystemErrors.php
+    behavior: Intercepts >=500 responses and writes to AuditService::logError.
