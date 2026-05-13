@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\AiAutoAssignController;
+use App\Http\Controllers\Api\AiTeamBuilderContextController;
 use App\Http\Controllers\Api\AiUsageController;
 use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
@@ -13,6 +14,7 @@ use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\MilestoneController;
 use App\Http\Controllers\Api\OrganizationController;
 use App\Http\Controllers\Api\ProjectController;
+use App\Http\Controllers\Api\RankController;
 use App\Http\Controllers\Api\TenantController;
 use App\Http\Controllers\Api\TimeEntryController;
 use Illuminate\Support\Facades\Route;
@@ -76,6 +78,10 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::middleware('permission:view_crm')->group(function () {
         Route::get('/deals/{deal}/contract-documents', [DealContractDocumentController::class, 'index']);
         Route::get('/contract-documents/{contractDocument}', [DealContractDocumentController::class, 'show']);
+        // Rich employee + past-projects context for the AI Team Builder.
+        // view_crm because the data shown (employees + past projects) is
+        // already visible to anyone with CRM-read access via other endpoints.
+        Route::get('/deals/{deal}/ai-team-builder-context', [AiTeamBuilderContextController::class, 'show']);
     });
     Route::middleware('permission:manage_crm')->group(function () {
         Route::post('/deals/{deal}/contract-documents', [DealContractDocumentController::class, 'store']);
@@ -141,6 +147,14 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::post('/capacity-roles', [OrganizationController::class, 'storeCapacityRole']);
     Route::put('/capacity-roles/{capacityRole}', [OrganizationController::class, 'updateCapacityRole']);
     Route::delete('/capacity-roles/{capacityRole}', [OrganizationController::class, 'destroyCapacityRole']);
+
+    // Ranks — tenant-managed seniority tiers used by the AI Team Builder.
+    // Defaults seeded as Junior/Mid/Senior/Lead but tenants can add custom
+    // ranks (e.g. "Principal", "Staff Engineer") via this endpoint.
+    Route::get('/ranks', [RankController::class, 'index']);
+    Route::post('/ranks', [RankController::class, 'store']);
+    Route::put('/ranks/{rank}', [RankController::class, 'update']);
+    Route::delete('/ranks/{rank}', [RankController::class, 'destroy']);
 
     // Skills
     Route::get('/skills', [OrganizationController::class, 'indexSkills']);

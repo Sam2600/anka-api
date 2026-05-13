@@ -20,6 +20,16 @@ class EmployeeResource extends JsonResource
             'capacity_role' => $this->capacity_role,
             'capacity_role_id' => $this->capacity_role_id,
             'capacity_role_name' => optional($this->capacityRole)->name,
+            // Rank — added in chg-009. Null when employee has no rank set
+            // (legacy data, or new hires the org hasn't tagged yet). The AI
+            // Team Builder falls back to role-title keyword matching when null.
+            'rank_id' => $this->rank_id,
+            'rank' => $this->whenLoaded('rank', fn () => $this->rank ? [
+                'id' => $this->rank->id,
+                'code' => $this->rank->code,
+                'name' => $this->rank->name,
+                'level' => (int) $this->rank->level,
+            ] : null),
             'monthly_salary' => $this->monthly_salary,
             'workable_hours' => $this->workable_hours,
             'cost_per_hour' => $this->cost_per_hour,

@@ -112,6 +112,11 @@ middleware_tiers:
         routes:
           - { method: GET,    path: /deals/{deal}/contract-documents,                controller: DealContractDocumentController@index,   permission: view_crm }
           - { method: GET,    path: /contract-documents/{contractDocument},         controller: DealContractDocumentController@show,    permission: view_crm }
+          # AI Team Builder context (added in chg-009): rich employee payload
+          # with rank + past_projects (cap 3 per employee, in-flight/Completed
+          # only, deal description truncated to 500 chars). Drives the
+          # seniority + experience-over-cost rules in the Claude prompt.
+          - { method: GET,    path: /deals/{deal}/ai-team-builder-context,           controller: AiTeamBuilderContextController@show,    permission: view_crm }
           - { method: POST,   path: /deals/{deal}/contract-documents,                controller: DealContractDocumentController@store,   permission: manage_crm, notes: "Multipart upload (file). Allowed: pdf, docx, xlsx, pptx, txt. Max 25 MB. Auto-fires win_deal() on approved analysis." }
           - { method: DELETE, path: /contract-documents/{contractDocument},         controller: DealContractDocumentController@destroy, permission: manage_crm }
 
@@ -194,6 +199,12 @@ middleware_tiers:
           - { method: POST,   path: /capacity-roles,                 controller: OrganizationController@capacityRolesStore }
           - { method: PUT,    path: /capacity-roles/{capacityRole},  controller: OrganizationController@capacityRolesUpdate }
           - { method: DELETE, path: /capacity-roles/{capacityRole},  controller: OrganizationController@capacityRolesDestroy }
+          # Ranks (added in chg-009): tenant-managed seniority tiers used by
+          # the AI Team Builder. Soft-delete on destroy keeps employee rank_id intact.
+          - { method: GET,    path: /ranks,                          controller: RankController@index }
+          - { method: POST,   path: /ranks,                          controller: RankController@store }
+          - { method: PUT,    path: /ranks/{rank},                   controller: RankController@update }
+          - { method: DELETE, path: /ranks/{rank},                   controller: RankController@destroy }
           - { method: GET,    path: /skills,                         controller: OrganizationController@skillsIndex }
           - { method: POST,   path: /skills,                         controller: OrganizationController@skillsStore }
           - { method: PUT,    path: /skills/{skill},                 controller: OrganizationController@skillsUpdate }

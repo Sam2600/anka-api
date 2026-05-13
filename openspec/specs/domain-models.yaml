@@ -65,7 +65,7 @@ models:
     file: app/Models/Employee.php
     traits: [HasFactory, HasUuids, SoftDeletes, BelongsToTenant]
     soft_deletes: true
-    key_fields: [tenant_id, department_id, job_role_id, name, role, role_name, capacity_role, capacity_role_id, monthly_salary, workable_hours, cost_per_hour, status]
+    key_fields: [tenant_id, department_id, job_role_id, name, role, role_name, capacity_role, capacity_role_id, rank_id, monthly_salary, workable_hours, cost_per_hour, status]
     generated_columns:
       - cost_per_hour: "monthly_salary / workable_hours"
     relationships:
@@ -76,6 +76,7 @@ models:
       - timeEntries (hasMany)
       - hardAssignments (hasMany)
       - capacityRole (belongsTo)
+      - rank (belongsTo Rank, FK rank_id, ON DELETE SET NULL)
       - skills (belongsToMany via employee_skills)
     constraints:
       - status ∈ [Active, On Leave, Terminated]
@@ -182,6 +183,23 @@ models:
     key_fields: [tenant_id, deal_id, name, cost]
     relationships:
       - deal (belongsTo)
+
+  - name: Rank
+    file: app/Models/Rank.php
+    traits: [BelongsToTenant, HasFactory, HasUuids, SoftDeletes]
+    soft_deletes: true
+    key_fields: [tenant_id, name, code, level]
+    relationships:
+      - employees (hasMany via rank_id)
+    constraints:
+      - unique: [tenant_id, code]
+      - level: integer, 0-100; higher = more senior
+    notes: |
+      Tenant-managed seniority ranks. Seeded defaults: Junior(10), Mid(20),
+      Senior(30), Lead(40). Tenants can add custom ranks via /ranks CRUD.
+      Used by the AI Team Builder as the canonical seniority signal in the
+      Claude prompt (rank.level), with the older roleTitle keyword logic
+      as a fallback for employees that haven't been ranked yet.
 
   - name: DealContractDocument
     file: app/Models/DealContractDocument.php

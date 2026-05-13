@@ -21,6 +21,7 @@ use App\Models\Invoice;
 use App\Models\Milestone;
 use App\Models\Project;
 use App\Models\ProjectTeamAssignment;
+use App\Models\Rank;
 use App\Models\Role;
 use App\Models\Skill;
 use App\Models\Tenant;
@@ -75,6 +76,7 @@ class DatabaseSeeder extends Seeder
             'users',
             'employees',
             'skills',
+            'ranks',
             'capacity_roles',
             'roles',
             'departments',
@@ -114,10 +116,11 @@ class DatabaseSeeder extends Seeder
         ]);
 
         $capacityRoles = $this->createCapacityRoles($tenant);
+        $ranks = $this->createRanks($tenant);
         $departments = $this->createDepartments($tenant);
         $roles = $this->createRoles($tenant, $departments, $blueprint['role_rates']);
         $skills = $this->createSkills($tenant, $blueprint['skills']);
-        $employees = $this->createEmployees($tenant, $blueprint['employees'], $departments, $roles, $capacityRoles, $skills);
+        $employees = $this->createEmployees($tenant, $blueprint['employees'], $departments, $roles, $capacityRoles, $ranks, $skills);
         $users = $this->createUsers($tenant, $blueprint['users'], $employees);
 
         $this->finishDepartments($departments, $employees);
@@ -146,6 +149,65 @@ class DatabaseSeeder extends Seeder
         }
 
         return $roles;
+    }
+
+    /**
+     * Seniority ranks per tenant. Levels are chosen with gaps so tenants
+     * can add custom ranks ("Principal" 35, "Staff" 45) without bumping
+     * every other rank's level. Higher = more senior.
+     */
+    private function createRanks(Tenant $tenant): array
+    {
+        $ranks = [];
+
+        foreach ([
+            ['code' => 'Junior', 'name' => 'Junior',           'level' => 10],
+            ['code' => 'Mid',    'name' => 'Mid-Level',        'level' => 20],
+            ['code' => 'Senior', 'name' => 'Senior',           'level' => 30],
+            ['code' => 'Lead',   'name' => 'Lead / Tech Lead', 'level' => 40],
+        ] as $row) {
+            $ranks[$row['code']] = Rank::create([
+                'tenant_id' => $tenant->id,
+                'code' => $row['code'],
+                'name' => $row['name'],
+                'level' => $row['level'],
+            ]);
+        }
+
+        return $ranks;
+    }
+
+    /**
+     * Heuristic rank assignment from a seeded employee's role title.
+     * Mirrors the AI prompt's pre-existing keyword logic so the seeded
+     * data exercises the same seniority taxonomy. Returns the rank code
+     * key ('Lead', 'Senior', 'Mid', 'Junior') for the supplied ranks
+     * map; returns null when no keywords match (employee stays unranked).
+     */
+    private function deriveRankCode(?string $roleTitle): string
+    {
+        $title = strtolower((string) $roleTitle);
+        if ($title === '') {
+            return 'Mid';
+        }
+
+        foreach (['lead', 'head', 'principal', 'master', 'manager', 'director', 'architect'] as $kw) {
+            if (str_contains($title, $kw)) {
+                return 'Lead';
+            }
+        }
+        foreach (['senior'] as $kw) {
+            if (str_contains($title, $kw)) {
+                return 'Senior';
+            }
+        }
+        foreach (['junior', 'intern', 'associate', 'trainee'] as $kw) {
+            if (str_contains($title, $kw)) {
+                return 'Junior';
+            }
+        }
+
+        return 'Mid';
     }
 
     private function createDepartments(Tenant $tenant): array
@@ -213,12 +275,14 @@ class DatabaseSeeder extends Seeder
         array $departments,
         array $roles,
         array $capacityRoles,
+        array $ranks,
         array $skills
     ): array {
         $employees = [];
 
         foreach ($employeeRows as $row) {
             $role = $roles[$row['role']];
+            $rankCode = $this->deriveRankCode($row['role']);
             $employee = Employee::create([
                 'tenant_id' => $tenant->id,
                 'department_id' => $departments[$row['department']]->id,
@@ -228,6 +292,7 @@ class DatabaseSeeder extends Seeder
                 'role_name' => $row['role'],
                 'capacity_role' => $row['capacity'],
                 'capacity_role_id' => $capacityRoles[$row['capacity']]->id,
+                'rank_id' => $ranks[$rankCode]->id,
                 'monthly_salary' => $row['salary'],
                 'workable_hours' => $row['hours'],
                 'status' => $row['status'] ?? 'Active',
