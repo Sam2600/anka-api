@@ -69,6 +69,32 @@ class DealContractDocumentController extends Controller
         );
 
         $tenantId = app('tenant_id');
+
+        // Re-upload semantics (per the chg-008 plan): keep ONE rolling level of
+        // history. Snapshot the previous row's analysis_result into the new row's
+        // `previous_analysis` so Claude can compute diff_vs_previous, then delete
+        // the prior file + row. If the user wants full audit history later we'd
+        // switch this to a "mark-superseded" pattern instead.
+        //
+        // The "real previous upload" check (`fileExistsOnDisk`) filters out the
+        // seeded demo rows — they have fictional storage paths and no actual
+        // files, so they shouldn't pollute first-time uploads with a phantom
+        // diff against a verdict the user never produced.
+        $previousDocs = DealContractDocument::where('deal_id', $deal->id)->get();
+        $previousAnalysisForDiff = null;
+        foreach ($previousDocs as $prev) {
+            $fileExistsOnDisk = $prev->storage_path
+                && Storage::disk('local')->exists($prev->storage_path);
+
+            if ($prev->analysis_result && $fileExistsOnDisk && ! $previousAnalysisForDiff) {
+                $previousAnalysisForDiff = $prev->analysis_result;
+            }
+            if ($fileExistsOnDisk) {
+                Storage::disk('local')->delete($prev->storage_path);
+            }
+            $prev->delete();
+        }
+
         $storagePath = sprintf(
             'contract-docs/%s/%s/%s.%s',
             $tenantId,
@@ -89,9 +115,14 @@ class DealContractDocumentController extends Controller
             'size_bytes' => $file->getSize(),
             'storage_path' => $storagePath,
             'analysis_status' => 'pending',
+            'previous_analysis' => $previousAnalysisForDiff,
         ]);
 
-        $document = $analyzer->analyze($document);
+        // Pass the deal so the analyzer can verify the uploaded contract is
+        // actually for THIS deal (client name / project name / value match).
+        // Without this the AI would happily approve a wrong-customer contract
+        // and auto-fire win_deal() with mis-routed Contract + Project data.
+        $document = $analyzer->analyze($document, $deal);
 
         // Auto-fire win when Claude (or the keyword fallback) approves the contract.
         if ($document->analysis_status === 'approved' && $deal->status === 'negotiation') {

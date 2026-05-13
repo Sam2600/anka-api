@@ -480,17 +480,14 @@ class DatabaseSeeder extends Seeder
         ];
 
         if ($scenario === 'rejected') {
+            $verdict = $this->demoRejectedVerdict();
             DealContractDocument::create($base + [
                 'original_filename' => Str::slug($deal->client).'-draft-contract.pdf',
                 'size_bytes' => 412_300,
                 'analysis_status' => 'rejected',
-                'analysis_result' => [
-                    'approved' => false,
-                    'missing_fields' => ['payment_terms', 'effective_date'],
-                    'reasoning' => 'Draft contract includes scope and signatures, but no payment schedule or commencement date — both required before this deal can move to Won.',
-                    'required_fields' => ['client_name', 'contract_value', 'payment_terms', 'effective_date', 'signatures', 'scope_of_work'],
-                    'model' => 'claude-3-5-sonnet-latest',
-                ],
+                'analysis_result' => $verdict,
+                'overall_score' => $verdict['overall_score'],
+                'detected_payment_pattern' => $verdict['detected_payment_pattern'],
                 'analyzed_at' => now()->subDays(2),
                 'created_at' => now()->subDays(2),
                 'updated_at' => now()->subDays(2),
@@ -526,6 +523,108 @@ class DatabaseSeeder extends Seeder
             'created_at' => now()->subMinutes(5),
             'updated_at' => now()->subMinutes(5),
         ]);
+    }
+
+    /**
+     * Shaped verdict for a representative `rejected` demo doc — mirrors the
+     * production ContractAnalysisService output (field_grades, dispute_risks,
+     * critical_failures, executive_summary). Two critical failures
+     * (customer_signature, out_of_scope_clause) so the UI shows both the red
+     * "critical" block and the amber "required" block.
+     */
+    private function demoRejectedVerdict(): array
+    {
+        // Build a default-present grade list with two missing critical entries.
+        $grades = [];
+        $missing = [
+            'customer_signature' => 'User signature block has Name / Position / NRC / Date all blank on page 5.',
+            'out_of_scope_clause' => 'No explicit statement that out-of-scope work is billable separately or unsupported.',
+        ];
+        $partial = [
+            'working_hours_timezone' => [
+                'evidence' => 'Online supporting for technical issue during 09:00 AM to 16:00 PM except Holidays.',
+                'location' => '§7 Monitoring',
+                'reasoning' => 'Hours are stated but no timezone — fine locally, ambiguous for offshore.',
+                'fix' => 'Add "Myanmar Standard Time (UTC+6:30)" to the §7 hours statement.',
+            ],
+        ];
+
+        foreach (\App\Services\ContractAnalysisService::FIELD_DEFINITIONS as $def) {
+            $field = $def['field'];
+            if (isset($missing[$field])) {
+                $grades[] = [
+                    'field' => $field,
+                    'label' => $def['label'],
+                    'status' => 'missing',
+                    'severity' => $def['severity'],
+                    'score' => 0,
+                    'evidence' => null,
+                    'evidence_location' => null,
+                    'reasoning' => $missing[$field],
+                    'suggested_fix' => 'Add this clause before re-uploading.',
+                ];
+            } elseif (isset($partial[$field])) {
+                $p = $partial[$field];
+                $grades[] = [
+                    'field' => $field,
+                    'label' => $def['label'],
+                    'status' => 'partial',
+                    'severity' => $def['severity'],
+                    'score' => 60,
+                    'evidence' => $p['evidence'],
+                    'evidence_location' => $p['location'],
+                    'reasoning' => $p['reasoning'],
+                    'suggested_fix' => $p['fix'],
+                ];
+            } else {
+                $grades[] = [
+                    'field' => $field,
+                    'label' => $def['label'],
+                    'status' => 'present',
+                    'severity' => $def['severity'],
+                    'score' => 90,
+                    'evidence' => null,
+                    'evidence_location' => null,
+                    'reasoning' => 'Clause present and clearly worded.',
+                    'suggested_fix' => null,
+                ];
+            }
+        }
+
+        return [
+            'approved' => false,
+            'overall_score' => 72,
+            'detected_payment_pattern' => 'monthly_recurring',
+            'executive_summary' => 'Strong commercial terms but missing customer signature and an explicit out-of-scope clause. Two critical failures — cannot approve.',
+            'field_grades' => $grades,
+            'critical_failures' => array_keys($missing),
+            'dispute_risks' => [
+                [
+                    'concern' => 'Commencement date is left as the placeholder text "Date" rather than an actual date.',
+                    'severity' => 'high',
+                    'clause_quote' => 'starting from Date to Date will be encompassed as "Free"',
+                    'suggested_remediation' => 'Fill the exact trial dates before signing — otherwise the trial-period and term-length boundaries are undefined.',
+                ],
+            ],
+            'deal_match' => [
+                // Demo shows a passing deal-match so the rejection is clearly
+                // attributable to missing fields (not a wrong-customer upload).
+                'is_match' => true,
+                'confidence' => 0.92,
+                'deal_client' => null,
+                'doc_parties' => ['Brycen Myanmar Ltd.', 'Customer Co.,Ltd'],
+                'checks' => [
+                    'client_name_match' => 'present',
+                    'value_alignment' => 'within_25%',
+                    'project_name_match' => 'partial',
+                    'contact_match' => 'present',
+                ],
+                'discrepancies' => [],
+                'reasoning' => 'Contract parties and project description match the deal context.',
+            ],
+            'diff_vs_previous' => null,
+            'model' => 'claude-3-5-sonnet-latest',
+        ];
     }
 
     private function createDelivery(Tenant $tenant, Deal $deal, array $row, array $employees, User $admin): void
