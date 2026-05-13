@@ -75,13 +75,21 @@ class DealContractDocumentController extends Controller
         // `previous_analysis` so Claude can compute diff_vs_previous, then delete
         // the prior file + row. If the user wants full audit history later we'd
         // switch this to a "mark-superseded" pattern instead.
+        //
+        // The "real previous upload" check (`fileExistsOnDisk`) filters out the
+        // seeded demo rows — they have fictional storage paths and no actual
+        // files, so they shouldn't pollute first-time uploads with a phantom
+        // diff against a verdict the user never produced.
         $previousDocs = DealContractDocument::where('deal_id', $deal->id)->get();
         $previousAnalysisForDiff = null;
         foreach ($previousDocs as $prev) {
-            if ($prev->analysis_result && ! $previousAnalysisForDiff) {
+            $fileExistsOnDisk = $prev->storage_path
+                && Storage::disk('local')->exists($prev->storage_path);
+
+            if ($prev->analysis_result && $fileExistsOnDisk && ! $previousAnalysisForDiff) {
                 $previousAnalysisForDiff = $prev->analysis_result;
             }
-            if ($prev->storage_path && Storage::disk('local')->exists($prev->storage_path)) {
+            if ($fileExistsOnDisk) {
                 Storage::disk('local')->delete($prev->storage_path);
             }
             $prev->delete();
