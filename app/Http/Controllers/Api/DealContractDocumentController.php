@@ -24,7 +24,10 @@ use Illuminate\Support\Str;
 class DealContractDocumentController extends Controller
 {
     private const MAX_BYTES = 25 * 1024 * 1024; // 25 MB
-    private const ALLOWED_EXT = ['pdf', 'docx', 'xlsx', 'pptx', 'txt'];
+    // xlsx + pptx were dropped because every release of phpoffice/phpspreadsheet
+    // has published security advisories and Composer's audit gate blocks
+    // installation. Clients should re-export those files as PDF or DOCX.
+    private const ALLOWED_EXT = ['pdf', 'docx', 'txt'];
 
     public function index(Deal $deal)
     {

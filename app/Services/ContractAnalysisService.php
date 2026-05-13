@@ -110,13 +110,12 @@ class ContractAnalysisService
             throw new \RuntimeException('Uploaded file is missing from storage.');
         }
 
+        // xlsx + pptx are intentionally unsupported — see DealContractDocumentController::ALLOWED_EXT.
         return match ($document->extension) {
             'txt' => $this->extractTxt($absPath),
             'pdf' => $this->extractPdf($absPath),
             'docx' => $this->extractDocx($absPath),
-            'xlsx' => $this->extractXlsx($absPath),
-            'pptx' => $this->extractPptx($absPath),
-            default => throw new \RuntimeException("Unsupported extension: {$document->extension}"),
+            default => throw new \RuntimeException("Unsupported extension: {$document->extension}. Allowed: pdf, docx, txt."),
         };
     }
 
@@ -167,48 +166,6 @@ class ContractAnalysisService
                 $this->flattenPhpWordElement($child, $out);
             }
         }
-    }
-
-    private function extractXlsx(string $path): string
-    {
-        if (! class_exists(\PhpOffice\PhpSpreadsheet\IOFactory::class)) {
-            throw new \RuntimeException('phpoffice/phpspreadsheet not installed.');
-        }
-
-        $spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($path);
-        $lines = [];
-
-        foreach ($spreadsheet->getAllSheets() as $sheet) {
-            $lines[] = '# Sheet: '.$sheet->getTitle();
-            foreach ($sheet->toArray(null, true, true, false) as $row) {
-                $cells = array_map(fn ($c) => $c === null ? '' : (string) $c, $row);
-                $lines[] = implode("\t", $cells);
-            }
-        }
-
-        return implode("\n", $lines);
-    }
-
-    private function extractPptx(string $path): string
-    {
-        if (! class_exists(\PhpOffice\PhpPresentation\IOFactory::class)) {
-            throw new \RuntimeException('phpoffice/phppresentation not installed.');
-        }
-
-        $reader = \PhpOffice\PhpPresentation\IOFactory::createReader('PowerPoint2007');
-        $pres = $reader->load($path);
-
-        $out = [];
-        foreach ($pres->getAllSlides() as $i => $slide) {
-            $out[] = '# Slide '.($i + 1);
-            foreach ($slide->getShapeCollection() as $shape) {
-                if (method_exists($shape, 'getPlainText')) {
-                    $out[] = $shape->getPlainText();
-                }
-            }
-        }
-
-        return implode("\n", $out);
     }
 
     private function callClaude(string $apiKey, string $text, DealContractDocument $document): array
