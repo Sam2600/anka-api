@@ -23,6 +23,7 @@ class Employee extends Model
         'role_name',
         'capacity_role',
         'capacity_role_id',
+        'rank_id',
         'monthly_salary',
         'workable_hours',
         'status',
@@ -81,6 +82,11 @@ class Employee extends Model
     public function capacityRole()
     {
         return $this->belongsTo(CapacityRole::class, 'capacity_role_id');
+    }
+
+    public function rank()
+    {
+        return $this->belongsTo(Rank::class, 'rank_id');
     }
 
     public function skills()
