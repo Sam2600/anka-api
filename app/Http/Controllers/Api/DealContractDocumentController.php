@@ -118,7 +118,11 @@ class DealContractDocumentController extends Controller
             'previous_analysis' => $previousAnalysisForDiff,
         ]);
 
-        $document = $analyzer->analyze($document);
+        // Pass the deal so the analyzer can verify the uploaded contract is
+        // actually for THIS deal (client name / project name / value match).
+        // Without this the AI would happily approve a wrong-customer contract
+        // and auto-fire win_deal() with mis-routed Contract + Project data.
+        $document = $analyzer->analyze($document, $deal);
 
         // Auto-fire win when Claude (or the keyword fallback) approves the contract.
         if ($document->analysis_status === 'approved' && $deal->status === 'negotiation') {

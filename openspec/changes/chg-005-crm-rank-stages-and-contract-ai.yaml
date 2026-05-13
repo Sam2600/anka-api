@@ -116,3 +116,41 @@ fixups:
         present but weaker than the agency's standard.
       - If full audit history (more than one rolling previous version) is
         needed later, switch from delete-on-replace to mark-superseded.
+
+  - id: deal-match-2026-05-13
+    summary: |
+      Added a deal_match verification step so the AI verifies the uploaded
+      contract actually belongs to the deal it's being uploaded onto. Without
+      this the system would happily approve a wrong-customer contract and
+      auto-fire win_deal(), creating misrouted Contract + Project records.
+
+      Changes:
+      - ContractAnalysisService.analyze() now accepts the parent Deal and
+        injects a "DEAL CONTEXT" section into Claude's prompt with the deal's
+        client, project name, contact, value, currency, timeline, and
+        workload description. Falls back to $document->deal when no Deal is
+        passed explicitly.
+      - New verdict section deal_match {is_match, confidence, deal_client,
+        doc_parties[], checks {client_name_match, value_alignment,
+        project_name_match, contact_match}, discrepancies[], reasoning}.
+      - isApproved() hard-blocks when deal_match.is_match=false, regardless
+        of how well-formed the rest of the contract is.
+      - Keyword fallback gained a heuristicDealMatch() that does a simple
+        case-insensitive client-name substring check (with longest-token
+        fallback for "Yazaki" matching "Myanmar Yazaki Thilawa Co.,Ltd").
+      - DealContractDocumentController passes the deal into analyze().
+      - Seeder demo verdict includes a passing deal_match block.
+
+      Also tightened the model-label badge logic in AnalysisResultCard so
+      the "fallback grading" chip only shows when model === 'keyword-fallback',
+      not when the proxy silently upgrades the model name (Claude 4.6 etc.).
+
+      Verified end-to-end: the Yazaki PDF uploaded onto a Tharaphu Insurance
+      deal returns is_match=false with confidence 0.02 and an explicit
+      "mis-routed onto the Tharaphu Insurance deal and must be replaced"
+      reasoning — approval is correctly blocked.
+    follow_up:
+      - For high-confidence mismatches (confidence < 0.1) consider auto-
+        rejecting the file before storage (don't even keep the row), to
+        reduce noise on the deal's history. For now we keep the record
+        so the salesperson can see the AI's reasoning.

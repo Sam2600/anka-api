@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\AiUsageLog;
+use App\Models\Deal;
 use App\Models\DealContractDocument;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -23,6 +24,9 @@ class ContractAnalysisService
 {
     private const CLAUDE_MODEL_DEFAULT = 'claude-3-5-sonnet-latest';
     private const CLAUDE_BASE_URL_DEFAULT = 'https://api.anthropic.com';
+    // Placeholder shown to Claude in the deal-context section when a field
+    // is null. Distinct from "" so the model can tell "no data" from "blank".
+    private const FIELD_UNSET = '(not set)';
 
     /**
      * Score weights per severity tier — used by the prompt and by the
@@ -208,8 +212,17 @@ class ContractAnalysisService
         ],
     ];
 
-    public function analyze(DealContractDocument $document): DealContractDocument
+    /**
+     * @param  Deal|null  $deal  Pass the parent deal so the AI can verify the
+     *                           document belongs to THIS deal (client name,
+     *                           project name, value, etc.). Optional so existing
+     *                           callers don't break, but a deal-match check
+     *                           only runs when supplied.
+     */
+    public function analyze(DealContractDocument $document, ?Deal $deal = null): DealContractDocument
     {
+        $deal ??= $document->deal;
+
         $document->update(['analysis_status' => 'analyzing']);
 
         try {
@@ -249,17 +262,17 @@ class ContractAnalysisService
         $apiKey = config('services.anthropic.api_key') ?? env('ANTHROPIC_API_KEY');
 
         if (! $apiKey) {
-            $verdict = $this->keywordFallback($text, $document->previous_analysis);
+            $verdict = $this->keywordFallback($text, $document->previous_analysis, $deal);
         } else {
             try {
-                $verdict = $this->callClaude($apiKey, $text, $document);
+                $verdict = $this->callClaude($apiKey, $text, $document, $deal);
             } catch (Throwable $e) {
                 Log::error('ContractAnalysis: Claude call failed, using keyword fallback', [
                     'document_id' => $document->id,
                     'error' => $e->getMessage(),
                 ]);
 
-                $verdict = $this->keywordFallback($text, $document->previous_analysis);
+                $verdict = $this->keywordFallback($text, $document->previous_analysis, $deal);
                 $verdict['note'] = 'Claude API error — used keyword fallback.';
             }
         }
@@ -278,12 +291,22 @@ class ContractAnalysisService
     }
 
     /**
-     * Approval rule: no critical or required field may be missing.
-     * Claude can advise via `approved` in the verdict, but we enforce
-     * here in PHP so a confused model can't accidentally flip a deal to S.
+     * Approval rule (enforced in PHP regardless of what Claude returned):
+     *   1. The uploaded contract must match the deal (deal_match.is_match=true).
+     *   2. No critical or required field may be missing.
+     *   3. No item in critical_failures.
+     * Claude can advise via `approved` in the verdict, but we enforce here
+     * so a confused model can't accidentally flip a deal to S.
      */
     private function isApproved(array $verdict): bool
     {
+        // Hard block: contract doesn't belong to this deal. Wrong-customer
+        // upload would create a misrouted Contract + Project otherwise.
+        $dealMatch = $verdict['deal_match'] ?? null;
+        if (is_array($dealMatch) && array_key_exists('is_match', $dealMatch) && ! $dealMatch['is_match']) {
+            return false;
+        }
+
         $grades = $verdict['field_grades'] ?? [];
         foreach ($grades as $grade) {
             $severity = $grade['severity'] ?? null;
@@ -370,7 +393,7 @@ class ContractAnalysisService
      * Build the prompt, call Anthropic, parse the JSON verdict.
      * Returns the verdict (already shape-validated) ready to persist.
      */
-    private function callClaude(string $apiKey, string $text, DealContractDocument $document): array
+    private function callClaude(string $apiKey, string $text, DealContractDocument $document, ?Deal $deal): array
     {
         // 60k chars ≈ ~15k input tokens. Leaves comfortable headroom under
         // Claude 3.5 Sonnet's 200k context window for the prompt + response.
@@ -380,9 +403,12 @@ class ContractAnalysisService
         $previous = $document->previous_analysis
             ? $this->renderPreviousVerdictForPrompt($document->previous_analysis)
             : 'N/A — this is the first upload for this deal.';
+        $dealContext = $deal
+            ? $this->renderDealContextForPrompt($deal)
+            : '(deal context unavailable — skip deal_match check; return is_match=true)';
 
         $system = $this->buildSystemPrompt();
-        $user = $this->buildUserPrompt($checklist, $textForPrompt, $previous);
+        $user = $this->buildUserPrompt($checklist, $textForPrompt, $previous, $dealContext);
 
         $baseUrl = config('services.anthropic.base_url') ?: self::CLAUDE_BASE_URL_DEFAULT;
         $model = config('services.anthropic.model') ?: self::CLAUDE_MODEL_DEFAULT;
@@ -440,7 +466,7 @@ class ContractAnalysisService
      * errors. Returns the SAME verdict shape Claude returns so the rest of
      * the pipeline (UI, approval rule, diff) doesn't branch on source.
      */
-    private function keywordFallback(string $text, ?array $previousAnalysis): array
+    private function keywordFallback(string $text, ?array $previousAnalysis, ?Deal $deal): array
     {
         $haystack = strtolower($text);
 
@@ -522,21 +548,124 @@ class ContractAnalysisService
         $overallScore = $weightTotal > 0 ? (int) round(($weightedSum / $weightTotal) * 100) : 0;
         $approved = empty($criticalFailures) && $this->countMissingRequired($grades) === 0;
 
-        $verdict = [
+        $dealMatch = $this->heuristicDealMatch($haystack, $deal);
+
+        // If the heuristic concludes the contract is for the wrong customer,
+        // override the approval flag — same rule as the Claude path.
+        $approved = $approved && $dealMatch['is_match'];
+
+        return [
             'approved' => $approved,
             'overall_score' => $overallScore,
             'detected_payment_pattern' => $this->detectPaymentPatternHeuristic($haystack),
-            'executive_summary' => $approved
-                ? 'All critical and required fields appear present (keyword fallback — no Claude available).'
-                : 'Fallback grading: '.count($criticalFailures).' critical issue(s) and '.$this->countMissingRequired($grades).' required field(s) missing.',
+            'executive_summary' => $this->fallbackExecutiveSummary(
+                $approved,
+                $dealMatch['is_match'],
+                count($criticalFailures),
+                $this->countMissingRequired($grades),
+            ),
             'field_grades' => $grades,
             'critical_failures' => $criticalFailures,
             'dispute_risks' => [],
+            'deal_match' => $dealMatch,
             'diff_vs_previous' => $this->computeDiff($grades, $previousAnalysis, $overallScore),
             'model' => 'keyword-fallback',
         ];
+    }
 
-        return $verdict;
+    /**
+     * Build the executive summary for the keyword-fallback verdict.
+     * Hoisted out of keywordFallback() so the prioritisation logic
+     * (mismatch beats missing-fields, missing-fields beats clean approval)
+     * stays readable and doesn't bloat the main method's complexity.
+     */
+    private function fallbackExecutiveSummary(
+        bool $approved,
+        bool $isDealMatch,
+        int $criticalCount,
+        int $missingRequiredCount,
+    ): string {
+        if (! $isDealMatch) {
+            return 'Fallback grading: the client name in the contract does not match the deal — likely the wrong customer\'s contract.';
+        }
+        if ($approved) {
+            return 'All critical and required fields appear present (keyword fallback — no Claude available).';
+        }
+
+        return sprintf(
+            'Fallback grading: %d critical issue(s) and %d required field(s) missing.',
+            $criticalCount,
+            $missingRequiredCount,
+        );
+    }
+
+    /**
+     * Simple deal-match heuristic for the keyword fallback path:
+     *   - If we have no deal context, skip the check (is_match=true).
+     *   - Otherwise check whether the deal's client name appears in the
+     *     document text (case-insensitive). Handles "Yazaki" vs "Myanmar
+     *     Yazaki Thilawa Co.,Ltd" by also testing the longest word in the
+     *     client name as a fallback.
+     *
+     * Returns the same shape Claude's deal_match block uses so the rest
+     * of the pipeline doesn't branch on source.
+     */
+    private function heuristicDealMatch(string $haystack, ?Deal $deal): array
+    {
+        if (! $deal || ! $deal->client) {
+            return [
+                'is_match' => true,
+                'confidence' => null,
+                'deal_client' => null,
+                'doc_parties' => [],
+                'checks' => [
+                    'client_name_match' => 'unknown',
+                    'value_alignment' => 'unknown',
+                    'project_name_match' => 'unknown',
+                    'contact_match' => 'unknown',
+                ],
+                'discrepancies' => [],
+                'reasoning' => 'No deal context provided — skipping deal-match check.',
+            ];
+        }
+
+        $client = (string) $deal->client;
+        $clientLower = strtolower($client);
+        $matched = str_contains($haystack, $clientLower);
+
+        if (! $matched) {
+            // Try the longest token of the client name. "Myanmar Yazaki
+            // Thilawa Co.,Ltd" → "thilawa" / "yazaki" — would still match a
+            // contract that abbreviates the legal name.
+            $tokens = preg_split('/[\s,\.\/]+/', $clientLower) ?: [];
+            $tokens = array_filter($tokens, fn ($t) => mb_strlen($t) >= 4);
+            usort($tokens, fn ($a, $b) => mb_strlen($b) - mb_strlen($a));
+            foreach ($tokens as $token) {
+                if (str_contains($haystack, $token)) {
+                    $matched = true;
+                    break;
+                }
+            }
+        }
+
+        return [
+            'is_match' => $matched,
+            'confidence' => $matched ? 0.6 : 0.1,
+            'deal_client' => $client,
+            'doc_parties' => [],
+            'checks' => [
+                'client_name_match' => $matched ? 'present' : 'mismatch',
+                'value_alignment' => 'unknown',
+                'project_name_match' => 'unknown',
+                'contact_match' => 'unknown',
+            ],
+            'discrepancies' => $matched
+                ? []
+                : ["Deal client \"{$client}\" was not found in the contract text (keyword fallback heuristic)."],
+            'reasoning' => $matched
+                ? 'Deal client name (or a distinctive token from it) appears in the contract text.'
+                : 'Deal client name not found in the contract — likely the wrong customer\'s contract.',
+        ];
     }
 
     private function countMissingRequired(array $grades): int
@@ -674,8 +803,41 @@ class ContractAnalysisService
             'field_grades' => $normalisedGrades,
             'critical_failures' => array_values(array_unique($criticalFailures)),
             'dispute_risks' => (array) ($verdict['dispute_risks'] ?? []),
+            'deal_match' => $this->normaliseDealMatch($verdict['deal_match'] ?? null),
             'diff_vs_previous' => $verdict['diff_vs_previous'] ?? null,
             'model' => $modelLabel,
+        ];
+    }
+
+    /**
+     * Coerce deal_match into a stable shape so the UI never has to handle
+     * partial / null pieces. is_match defaults to TRUE when the model didn't
+     * report on it — better to over-approve than to block valid uploads
+     * because the AI forgot the section.
+     */
+    private function normaliseDealMatch(?array $dealMatch): array
+    {
+        $isMatch = isset($dealMatch['is_match'])
+            ? (bool) $dealMatch['is_match']
+            : true;
+
+        $confidence = isset($dealMatch['confidence'])
+            ? max(0.0, min(1.0, (float) $dealMatch['confidence']))
+            : null;
+
+        return [
+            'is_match' => $isMatch,
+            'confidence' => $confidence,
+            'deal_client' => $dealMatch['deal_client'] ?? null,
+            'doc_parties' => array_values((array) ($dealMatch['doc_parties'] ?? [])),
+            'checks' => [
+                'client_name_match' => $dealMatch['checks']['client_name_match'] ?? 'unknown',
+                'value_alignment' => $dealMatch['checks']['value_alignment'] ?? 'unknown',
+                'project_name_match' => $dealMatch['checks']['project_name_match'] ?? 'unknown',
+                'contact_match' => $dealMatch['checks']['contact_match'] ?? 'unknown',
+            ],
+            'discrepancies' => array_values((array) ($dealMatch['discrepancies'] ?? [])),
+            'reasoning' => $dealMatch['reasoning'] ?? null,
         ];
     }
 
@@ -706,13 +868,17 @@ CRITICAL RULES:
 5. Placeholder text like "Date" or "from Date to Date" left unfilled = `missing`, NOT `present`. Always flag this in `dispute_risks`.
 6. If a field truly doesn't apply (e.g. testing_range on a managed-service contract), set status to `not_applicable` with a brief reasoning.
 7. The agency operates a single contract template — different billing patterns (monthly_recurring · milestone_based · per_phase · one_time) are all valid. Detect which pattern this contract uses and report it in `detected_payment_pattern`.
+8. DEAL MATCH IS NON-NEGOTIABLE. Use the DEAL CONTEXT section to verify the uploaded contract actually belongs to THIS deal. If the contract is for a different customer / different project, set `deal_match.is_match = false` regardless of how well-formed the rest of the contract is — uploading a Customer-B contract onto Deal-A is a mis-routing bug we must catch. Minor variations in legal-entity suffix ("Ltd" vs "Co., Ltd") are fine; entirely different company names are not.
 PROMPT;
     }
 
-    private function buildUserPrompt(string $checklist, string $documentText, string $previous): string
+    private function buildUserPrompt(string $checklist, string $documentText, string $previous, string $dealContext): string
     {
         return <<<PROMPT
-Grade the following customer-signed contract against the agency's 26-field checklist.
+Grade the following customer-signed contract against the agency's 26-field checklist AND verify it belongs to this deal.
+
+═══════ DEAL CONTEXT (verify the doc is for THIS deal) ═══════
+{$dealContext}
 
 ═══════ FIELD CHECKLIST ═══════
 {$checklist}
@@ -731,6 +897,13 @@ Grade the following customer-signed contract against the agency's 26-field check
 ═══════ SCORING ═══════
 - score per field: 0 if missing · 40-70 if partial · 80-100 if present · null acceptable for not_applicable
 - overall_score: 0-100, weighted by severity (critical=3, required=2, recommended=1). Compute and report.
+
+═══════ DEAL MATCH RULES ═══════
+- client_name_match: present (full or close variation of deal.client appears in the contract parties) · mismatch (different company) · not_found
+- value_alignment: within_5% / within_25% / large_gap / not_found (compare contract total value vs deal.estimated_value or deal.client_budget; "within X%" means the deviation is X% of the deal value)
+- project_name_match: present / partial / not_found (the deal's project name appears in the contract)
+- contact_match: present / partial / not_found (the deal's contact_name or contact_email appears anywhere in the doc)
+- is_match: TRUE only if client_name_match is `present`. Otherwise FALSE.
 
 ═══════ PREVIOUS VERDICT (for diff) ═══════
 {$previous}
@@ -767,6 +940,20 @@ Return ONLY this JSON (no markdown):
       "suggested_remediation": "actionable suggestion"
     }
   ],
+  "deal_match": {
+    "is_match": boolean,
+    "confidence": 0.0-1.0,
+    "deal_client": "the deal's client name from the DEAL CONTEXT section above",
+    "doc_parties": ["array of party names extracted from the contract document"],
+    "checks": {
+      "client_name_match": "present" | "mismatch" | "not_found",
+      "value_alignment": "within_5%" | "within_25%" | "large_gap" | "not_found",
+      "project_name_match": "present" | "partial" | "not_found",
+      "contact_match": "present" | "partial" | "not_found"
+    },
+    "discrepancies": ["array of specific concerns when is_match is false; empty array if matched"],
+    "reasoning": "1-2 sentences explaining the match decision."
+  },
   "diff_vs_previous": null OR {
     "improvements": ["short bullets describing what improved vs the previous verdict"],
     "regressions": ["what got worse"],
@@ -792,6 +979,41 @@ PROMPT;
                 $def['criterion'],
             );
         }
+
+        return implode("\n", $lines);
+    }
+
+    /**
+     * Render the deal as a compact context block for the prompt. Keep it
+     * small — every byte counts toward the input-token budget — but include
+     * everything Claude needs to detect a wrong-customer upload:
+     *   - client name (primary check)
+     *   - project / deal name (secondary check)
+     *   - contact name + email (secondary check)
+     *   - estimated value + currency (for value_alignment)
+     *   - timeline_months + workload_description (for plausibility checks).
+     */
+    private function renderDealContextForPrompt(Deal $deal): string
+    {
+        $value = $deal->client_budget ?? $deal->estimated_value;
+        $currency = $deal->tenant?->currency ?? 'USD';
+        $valueLabel = $value !== null
+            ? number_format((float) $value).' '.$currency
+            : self::FIELD_UNSET;
+
+        $description = $deal->workload_description
+            ? mb_substr(trim((string) $deal->workload_description), 0, 500)
+            : '(no description)';
+
+        $lines = [
+            'Client (deal.client):           '.($deal->client ?? self::FIELD_UNSET),
+            'Project / deal name:            '.($deal->name ?? self::FIELD_UNSET),
+            'Contact name:                   '.($deal->contact_name ?? self::FIELD_UNSET),
+            'Contact email:                  '.($deal->contact_email ?? self::FIELD_UNSET),
+            'Deal value (deal.client_budget OR deal.estimated_value): '.$valueLabel,
+            'Timeline (months):              '.($deal->timeline_months ?? self::FIELD_UNSET),
+            'Workload description:           '.$description,
+        ];
 
         return implode("\n", $lines);
     }

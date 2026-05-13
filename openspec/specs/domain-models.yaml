@@ -209,10 +209,19 @@ models:
       `previous_analysis` column before the old file + row are deleted.
       Claude consumes the snapshot to compute `diff_vs_previous`.
 
-      When the verdict has no missing critical or required fields (PHP
-      isApproved() check, not just Claude's `approved` flag), the
-      controller auto-fires win_deal() so the deal jumps straight to S
-      and the linked Contract + Project are created atomically.
+      Deal-match check: ContractAnalysisService injects the parent Deal's
+      identifying metadata (client, project name, contact, value, timeline,
+      workload description) into Claude's prompt. The verdict includes a
+      `deal_match` section. `isApproved()` hard-blocks when
+      `deal_match.is_match=false` regardless of field grades — prevents a
+      wrong-customer contract from auto-firing win_deal() with misrouted
+      Contract + Project data.
+
+      When the verdict has no missing critical or required fields AND
+      deal_match.is_match is true (PHP isApproved() check, not just
+      Claude's `approved` flag), the controller auto-fires win_deal() so
+      the deal jumps straight to S and the linked Contract + Project are
+      created atomically.
 
   - name: EstimationVersion
     file: app/Models/EstimationVersion.php

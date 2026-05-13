@@ -606,6 +606,22 @@ class DatabaseSeeder extends Seeder
                     'suggested_remediation' => 'Fill the exact trial dates before signing — otherwise the trial-period and term-length boundaries are undefined.',
                 ],
             ],
+            'deal_match' => [
+                // Demo shows a passing deal-match so the rejection is clearly
+                // attributable to missing fields (not a wrong-customer upload).
+                'is_match' => true,
+                'confidence' => 0.92,
+                'deal_client' => null,
+                'doc_parties' => ['Brycen Myanmar Ltd.', 'Customer Co.,Ltd'],
+                'checks' => [
+                    'client_name_match' => 'present',
+                    'value_alignment' => 'within_25%',
+                    'project_name_match' => 'partial',
+                    'contact_match' => 'present',
+                ],
+                'discrepancies' => [],
+                'reasoning' => 'Contract parties and project description match the deal context.',
+            ],
             'diff_vs_previous' => null,
             'model' => 'claude-3-5-sonnet-latest',
         ];
