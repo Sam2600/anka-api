@@ -37,6 +37,9 @@ return [
     'anthropic' => [
         'api_key' => env('ANTHROPIC_API_KEY'),
         'model' => env('ANTHROPIC_MODEL', 'claude-3-5-sonnet-latest'),
+        // Override when going through a proxy / reseller (e.g. vibecode-claude.online).
+        // No trailing slash — code appends "/v1/messages".
+        'base_url' => rtrim(env('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), '/'),
     ],
 
     'gemini' => [

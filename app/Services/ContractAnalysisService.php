@@ -21,7 +21,8 @@ use Throwable;
  */
 class ContractAnalysisService
 {
-    private const CLAUDE_MODEL = 'claude-3-5-sonnet-latest';
+    private const CLAUDE_MODEL_DEFAULT = 'claude-3-5-sonnet-latest';
+    private const CLAUDE_BASE_URL_DEFAULT = 'https://api.anthropic.com';
 
     /**
      * Score weights per severity tier — used by the prompt and by the
@@ -383,20 +384,34 @@ class ContractAnalysisService
         $system = $this->buildSystemPrompt();
         $user = $this->buildUserPrompt($checklist, $textForPrompt, $previous);
 
+        $baseUrl = config('services.anthropic.base_url') ?: self::CLAUDE_BASE_URL_DEFAULT;
+        $model = config('services.anthropic.model') ?: self::CLAUDE_MODEL_DEFAULT;
+
         $response = Http::timeout(90)
             ->withHeaders([
                 'x-api-key' => $apiKey,
                 'anthropic-version' => '2023-06-01',
                 'content-type' => 'application/json',
             ])
-            ->post('https://api.anthropic.com/v1/messages', [
-                'model' => self::CLAUDE_MODEL,
+            ->post($baseUrl.'/v1/messages', [
+                'model' => $model,
                 'max_tokens' => 4096,
                 'system' => $system,
                 'messages' => [
                     ['role' => 'user', 'content' => $user],
                 ],
             ]);
+
+        // Surface non-2xx responses with the proxy's error body so the log
+        // shows "401 invalid x-api-key" instead of "malformed JSON". The
+        // catch in analyze() still falls back to keyword grading.
+        if (! $response->successful()) {
+            throw new \RuntimeException(sprintf(
+                'Anthropic API returned HTTP %d: %s',
+                $response->status(),
+                substr($response->body(), 0, 300),
+            ));
+        }
 
         $body = $response->json();
 
@@ -647,6 +662,10 @@ class ContractAnalysisService
             ? max(0, min(100, (int) $verdict['overall_score']))
             : $this->computeOverallScore($normalisedGrades);
 
+        $modelLabel = $source === 'claude'
+            ? (config('services.anthropic.model') ?: self::CLAUDE_MODEL_DEFAULT)
+            : 'keyword-fallback';
+
         return [
             'approved' => (bool) ($verdict['approved'] ?? false),
             'overall_score' => $overallScore,
@@ -656,7 +675,7 @@ class ContractAnalysisService
             'critical_failures' => array_values(array_unique($criticalFailures)),
             'dispute_risks' => (array) ($verdict['dispute_risks'] ?? []),
             'diff_vs_previous' => $verdict['diff_vs_previous'] ?? null,
-            'model' => $source === 'claude' ? self::CLAUDE_MODEL : 'keyword-fallback',
+            'model' => $modelLabel,
         ];
     }
 
@@ -809,7 +828,7 @@ PROMPT;
                 'tenant_id' => $document->tenant_id,
                 'user_id' => $document->uploaded_by,
                 'feature' => 'contract_analysis',
-                'model' => self::CLAUDE_MODEL,
+                'model' => config('services.anthropic.model') ?: self::CLAUDE_MODEL_DEFAULT,
                 'input_tokens' => (int) ($usage['input_tokens'] ?? 0),
                 'output_tokens' => (int) ($usage['output_tokens'] ?? 0),
                 'estimated_cost_usd' => $this->estimateCost(
