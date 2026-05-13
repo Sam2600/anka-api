@@ -79,3 +79,40 @@ manual_steps:
   - composer update            # pull the new PHP packages
   - php artisan migrate        # apply the two new migrations
   - (frontend) npm install / npm run build  # picks up new components and queries
+
+fixups:
+  - id: rich-verdict-2026-05-13
+    summary: |
+      Replaced the REQUIRED_FIELDS_PLACEHOLDER stub with the production
+      grading pipeline based on the manager's "one contract template,
+      payment pattern detected from the doc" guidance and a sample
+      Brycen / Yazaki contract.
+
+      Changes:
+      - New migration 2026_05_13_000001_alter_deal_contract_documents_for_rich_verdicts.php
+        adds previous_analysis (jsonb), overall_score (smallint),
+        detected_payment_pattern (varchar 40).
+      - ContractAnalysisService rewritten end-to-end:
+        - FIELD_DEFINITIONS constant: 26 fields across 3 severity tiers
+          (6 critical, 15 required, 5 recommended)
+        - New rich verdict shape: {approved, overall_score, executive_summary,
+          field_grades[], critical_failures[], dispute_risks[],
+          diff_vs_previous, detected_payment_pattern}
+        - PHP-side isApproved() guard so a confused model can't accidentally
+          mark a critical-missing contract as approved
+        - normaliseVerdict() defensively backfills any field Claude forgot
+          to grade
+        - Keyword fallback rewritten to return the same shape, including
+          its own (heuristic) payment-pattern detection
+      - Controller snapshots prior analysis_result into the new row's
+        previous_analysis on every re-upload (one rolling level of history).
+      - Resource exposes overall_score, detected_payment_pattern,
+        previous_analysis at the top level.
+      - Seeder updated to produce a representative rejected verdict in the
+        new shape so the UI demo still works.
+    follow_up:
+      - When the agency provides a "preferred wording" list per clause,
+        we can wire it into the prompt so Claude flags wording that's
+        present but weaker than the agency's standard.
+      - If full audit history (more than one rolling previous version) is
+        needed later, switch from delete-on-replace to mark-superseded.

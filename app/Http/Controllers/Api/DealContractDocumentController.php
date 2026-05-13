@@ -69,6 +69,24 @@ class DealContractDocumentController extends Controller
         );
 
         $tenantId = app('tenant_id');
+
+        // Re-upload semantics (per the chg-008 plan): keep ONE rolling level of
+        // history. Snapshot the previous row's analysis_result into the new row's
+        // `previous_analysis` so Claude can compute diff_vs_previous, then delete
+        // the prior file + row. If the user wants full audit history later we'd
+        // switch this to a "mark-superseded" pattern instead.
+        $previousDocs = DealContractDocument::where('deal_id', $deal->id)->get();
+        $previousAnalysisForDiff = null;
+        foreach ($previousDocs as $prev) {
+            if ($prev->analysis_result && ! $previousAnalysisForDiff) {
+                $previousAnalysisForDiff = $prev->analysis_result;
+            }
+            if ($prev->storage_path && Storage::disk('local')->exists($prev->storage_path)) {
+                Storage::disk('local')->delete($prev->storage_path);
+            }
+            $prev->delete();
+        }
+
         $storagePath = sprintf(
             'contract-docs/%s/%s/%s.%s',
             $tenantId,
@@ -89,6 +107,7 @@ class DealContractDocumentController extends Controller
             'size_bytes' => $file->getSize(),
             'storage_path' => $storagePath,
             'analysis_status' => 'pending',
+            'previous_analysis' => $previousAnalysisForDiff,
         ]);
 
         $document = $analyzer->analyze($document);

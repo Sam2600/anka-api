@@ -22,14 +22,19 @@ class DealContractDocument extends Model
         'storage_path',
         'analysis_status',
         'analysis_result',
+        'previous_analysis',
+        'overall_score',
+        'detected_payment_pattern',
         'analyzed_at',
     ];
 
     protected $casts = [
         'id' => 'string',
         'analysis_result' => 'array',
+        'previous_analysis' => 'array',
         'analyzed_at' => 'datetime',
         'size_bytes' => 'integer',
+        'overall_score' => 'integer',
     ];
 
     public function deal()

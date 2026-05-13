@@ -253,6 +253,9 @@ tables:
       - { name: storage_path, type: string }
       - { name: analysis_status, type: string, default: "'pending'" }
       - { name: analysis_result, type: jsonb, nullable: true }
+      - { name: previous_analysis, type: jsonb, nullable: true, notes: "Snapshot of the prior verdict on re-upload, copied forward before the old row is deleted. Drives the diff_vs_previous section of the new verdict." }
+      - { name: overall_score, type: smallint, nullable: true, notes: "Surfaced from analysis_result.overall_score for fast UI access and future filtering. 0-100 weighted by severity (critical=3, required=2, recommended=1)." }
+      - { name: detected_payment_pattern, type: "varchar(40)", nullable: true, notes: "Which billing pattern Claude detected: monthly_recurring · milestone_based · per_phase · one_time · unknown." }
       - { name: analyzed_at, type: timestamp, nullable: true }
 
   - name: estimation_versions
