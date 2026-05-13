@@ -126,7 +126,7 @@ class DealController extends Controller
             'target_margin' => 'sometimes|nullable|numeric|min:0|max:100',
             'wizard_step' => 'sometimes|in:context,estimation,staffing,complete',
             'ghost_roles' => 'sometimes|array',
-            'ghost_roles.*.role_type' => 'required|string|in:frontend,backend,pm,qa,design',
+            'ghost_roles.*.role_type' => 'required|string',
             'ghost_roles.*.quantity' => 'required|integer|min:1',
             'ghost_roles.*.months' => 'required|integer|min:1',
             'ghost_roles.*.avg_monthly_salary' => 'required|numeric|min:0',
