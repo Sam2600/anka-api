@@ -612,9 +612,14 @@ class ContractAnalysisService
      */
     private function heuristicDealMatch(string $haystack, ?Deal $deal): array
     {
+        // Fail-closed: when deal context is missing we CANNOT verify the
+        // upload belongs to this deal, so we must NOT default to is_match=true.
+        // The controller normally always passes the deal, so this branch is
+        // defensive — but it must still respect the same safety rule as the
+        // Claude path's normaliseDealMatch().
         if (! $deal || ! $deal->client) {
             return [
-                'is_match' => true,
+                'is_match' => false,
                 'confidence' => null,
                 'deal_client' => null,
                 'doc_parties' => [],
@@ -624,8 +629,8 @@ class ContractAnalysisService
                     'project_name_match' => 'unknown',
                     'contact_match' => 'unknown',
                 ],
-                'discrepancies' => [],
-                'reasoning' => 'No deal context provided — skipping deal-match check.',
+                'discrepancies' => ['Deal context unavailable — cannot verify the contract belongs to this deal.'],
+                'reasoning' => 'No deal context provided to the keyword-fallback heuristic. Defaulting to NOT-MATCHED for safety; manual review required.',
             ];
         }
 
@@ -811,19 +816,43 @@ class ContractAnalysisService
 
     /**
      * Coerce deal_match into a stable shape so the UI never has to handle
-     * partial / null pieces. is_match defaults to TRUE when the model didn't
-     * report on it — better to over-approve than to block valid uploads
-     * because the AI forgot the section.
+     * partial / null pieces.
+     *
+     * SAFETY RULE — fail-closed on omission.
+     * is_match defaults to FALSE whenever the model omits the section OR
+     * the is_match key is missing/non-bool. The original "default true"
+     * behaviour was an enterprise-safety bug: a malformed / truncated /
+     * jailbroken Claude response that simply didn't return deal_match
+     * would auto-approve, auto-fire win_deal(), and create a Contract +
+     * Project pointing at the wrong customer. Never trust LLM omission.
+     *
+     * The downstream effect when defaulted to false: salesperson sees
+     * the "Wrong contract uploaded" banner with a "manual review needed"
+     * reasoning and re-uploads / contacts ops. Approval is blocked but
+     * data is correct.
      */
     private function normaliseDealMatch(?array $dealMatch): array
     {
-        $isMatch = isset($dealMatch['is_match'])
-            ? (bool) $dealMatch['is_match']
-            : true;
+        $hasIsMatchBool = isset($dealMatch['is_match']) && is_bool($dealMatch['is_match']);
+        $isMatch = $hasIsMatchBool ? (bool) $dealMatch['is_match'] : false;
 
         $confidence = isset($dealMatch['confidence'])
             ? max(0.0, min(1.0, (float) $dealMatch['confidence']))
             : null;
+
+        // When the model omitted is_match (or returned it as null / non-bool),
+        // surface that fact in the reasoning so the UI shows a clear "manual
+        // review needed" message instead of a blank red banner that leaves
+        // the salesperson guessing.
+        $reasoning = $dealMatch['reasoning'] ?? null;
+        if (! $hasIsMatchBool) {
+            $reasoning = 'AI did not return a deal-match decision — defaulting to NOT-MATCHED for safety. Manual review required before this contract can be approved.';
+        }
+
+        $discrepancies = array_values((array) ($dealMatch['discrepancies'] ?? []));
+        if (! $hasIsMatchBool && empty($discrepancies)) {
+            $discrepancies = ['AI response was missing the deal-match block. Treating as a mismatch until a human verifies.'];
+        }
 
         return [
             'is_match' => $isMatch,
@@ -836,8 +865,8 @@ class ContractAnalysisService
                 'project_name_match' => $dealMatch['checks']['project_name_match'] ?? 'unknown',
                 'contact_match' => $dealMatch['checks']['contact_match'] ?? 'unknown',
             ],
-            'discrepancies' => array_values((array) ($dealMatch['discrepancies'] ?? [])),
-            'reasoning' => $dealMatch['reasoning'] ?? null,
+            'discrepancies' => $discrepancies,
+            'reasoning' => $reasoning,
         ];
     }
 
