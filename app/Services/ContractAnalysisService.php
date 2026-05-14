@@ -413,7 +413,18 @@ class ContractAnalysisService
         $baseUrl = config('services.anthropic.base_url') ?: self::CLAUDE_BASE_URL_DEFAULT;
         $model = config('services.anthropic.model') ?: self::CLAUDE_MODEL_DEFAULT;
 
-        $response = Http::timeout(90)
+        // Timeout + retry tuned for flaky proxy fronting Anthropic. A working
+        // proxy responds in 3-8s; if it hasn't responded in 30s it's likely
+        // dropped. One retry catches transient drops without doubling the
+        // user's worst-case wait. retryWhen() limits retries to connection
+        // failures only — we do NOT retry 4xx responses (auth errors etc.).
+        $response = Http::timeout(30)
+            ->retry(2, 500, function (\Throwable $exception) {
+                // Retry on cURL connection / timeout errors only, not on
+                // HTTP-level 4xx (those will just fail again with the same
+                // reason and waste user time).
+                return $exception instanceof \Illuminate\Http\Client\ConnectionException;
+            }, throw: false)
             ->withHeaders([
                 'x-api-key' => $apiKey,
                 'anthropic-version' => '2023-06-01',

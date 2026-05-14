@@ -88,6 +88,10 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     });
     Route::middleware('permission:manage_crm')->group(function () {
         Route::post('/deals/{deal}/contract-documents', [DealContractDocumentController::class, 'store']);
+        // Re-run analysis on an existing doc — for recovering from keyword-
+        // fallback verdicts when Claude was unreachable at upload time.
+        // Requires manage_crm because it can trigger auto-win on success.
+        Route::post('/contract-documents/{contractDocument}/reanalyze', [DealContractDocumentController::class, 'reanalyze']);
         Route::delete('/contract-documents/{contractDocument}', [DealContractDocumentController::class, 'destroy']);
     });
 

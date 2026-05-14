@@ -181,6 +181,50 @@ class DealContractDocumentController extends Controller
         ], 201);
     }
 
+    /**
+     * Re-run AI analysis against an existing uploaded file. Used when the
+     * first analysis hit the keyword fallback (Claude unreachable / proxy
+     * timeout) — this lets the salesperson recover with one click instead
+     * of having to delete + re-upload the file.
+     *
+     * If the re-analysis succeeds and is approved AND the deal is still in
+     * negotiation, the existing auto-fire path runs (same as initial upload).
+     */
+    public function reanalyze(Request $request, DealContractDocument $contractDocument, ContractAnalysisService $analyzer)
+    {
+        // The analyser needs the actual file on disk to extract text.
+        // Reject early if it's missing rather than letting the service
+        // return a "failed" verdict and confusing the user.
+        if (! $contractDocument->storage_path
+            || ! Storage::disk('local')->exists($contractDocument->storage_path)) {
+            abort(422, 'The original file is no longer available. Please upload again.');
+        }
+
+        $deal = $contractDocument->deal;
+
+        $contractDocument = $analyzer->analyze($contractDocument, $deal);
+
+        // Mirror the post-upload auto-win behaviour: if the new verdict
+        // approves AND the deal is still in negotiation, fire win_deal().
+        if ($contractDocument->analysis_status === 'approved'
+            && $deal && $deal->status === 'negotiation') {
+            $winPayload = $this->autoWinDeal($deal);
+
+            return response()->json([
+                'document' => (new DealContractDocumentResource($contractDocument->load('deal')))->resolve($request),
+                'auto_won' => true,
+                'deal' => $winPayload['deal'] ?? null,
+                'contract' => $winPayload['contract'] ?? null,
+                'project' => $winPayload['project'] ?? null,
+            ]);
+        }
+
+        return response()->json([
+            'document' => (new DealContractDocumentResource($contractDocument->load('deal')))->resolve($request),
+            'auto_won' => false,
+        ]);
+    }
+
     public function destroy(DealContractDocument $contractDocument)
     {
         if ($contractDocument->storage_path && Storage::disk('local')->exists($contractDocument->storage_path)) {
