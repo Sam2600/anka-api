@@ -111,6 +111,10 @@ middleware_tiers:
           deal auto-transitions to `won` (rank S).
         routes:
           - { method: GET,    path: /deals/{deal}/contract-documents,                controller: DealContractDocumentController@index,   permission: view_crm }
+          # Tenant-wide queue (chg-010) for the /crm/contract-reviews page.
+          # Filters: status, search (matches deal name / client / filename).
+          # Eager-loads deal summary so the queue table renders without N+1.
+          - { method: GET,    path: /contract-documents,                            controller: DealContractDocumentController@indexAll, permission: view_crm }
           - { method: GET,    path: /contract-documents/{contractDocument},         controller: DealContractDocumentController@show,    permission: view_crm }
           # AI Team Builder context (added in chg-009): rich employee payload
           # with rank + past_projects (cap 3 per employee, in-flight/Completed

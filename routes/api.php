@@ -77,6 +77,9 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     // manage_crm because an approved upload auto-fires win_deal().
     Route::middleware('permission:view_crm')->group(function () {
         Route::get('/deals/{deal}/contract-documents', [DealContractDocumentController::class, 'index']);
+        // Tenant-wide list (chg-010) — feeds the /contract-reviews queue
+        // page. Filters: status, search (deal name / client / filename).
+        Route::get('/contract-documents', [DealContractDocumentController::class, 'indexAll']);
         Route::get('/contract-documents/{contractDocument}', [DealContractDocumentController::class, 'show']);
         // Rich employee + past-projects context for the AI Team Builder.
         // view_crm because the data shown (employees + past projects) is

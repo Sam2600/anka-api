@@ -38,6 +38,44 @@ class DealContractDocumentController extends Controller
         return DealContractDocumentResource::collection($docs);
     }
 
+    /**
+     * Tenant-wide contract-document list — feeds the /contract-reviews
+     * queue screen. Joins deal name + client so the table can render
+     * "for which deal?" without an extra round trip per row.
+     *
+     * Optional filters: status (pending|analyzing|approved|rejected|failed),
+     * search (matches against deal name, deal client, original filename —
+     * case-insensitive substring).
+     *
+     * Pagination: standard Laravel paginate; per_page capped at 100.
+     */
+    public function indexAll(Request $request)
+    {
+        $query = DealContractDocument::query()
+            ->with(['deal:id,name,client,status'])
+            ->orderBy('created_at', 'desc');
+
+        if ($request->filled('status')) {
+            $query->where('analysis_status', $request->input('status'));
+        }
+
+        if ($request->filled('search')) {
+            $needle = '%'.$request->input('search').'%';
+            $op = DB::getDriverName() === 'pgsql' ? 'ilike' : 'like';
+            $query->where(function ($q) use ($needle, $op) {
+                $q->where('original_filename', $op, $needle)
+                    ->orWhereHas('deal', function ($dq) use ($needle, $op) {
+                        $dq->where('name', $op, $needle)
+                            ->orWhere('client', $op, $needle);
+                    });
+            });
+        }
+
+        $perPage = min((int) ($request->input('per_page', 50)), 100);
+
+        return DealContractDocumentResource::collection($query->paginate($perPage));
+    }
+
     public function show(DealContractDocument $contractDocument)
     {
         return new DealContractDocumentResource($contractDocument);
