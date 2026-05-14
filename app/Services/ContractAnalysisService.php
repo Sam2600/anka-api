@@ -413,16 +413,21 @@ class ContractAnalysisService
         $baseUrl = config('services.anthropic.base_url') ?: self::CLAUDE_BASE_URL_DEFAULT;
         $model = config('services.anthropic.model') ?: self::CLAUDE_MODEL_DEFAULT;
 
-        // Timeout + retry tuned for flaky proxy fronting Anthropic. A working
-        // proxy responds in 3-8s; if it hasn't responded in 30s it's likely
-        // dropped. One retry catches transient drops without doubling the
-        // user's worst-case wait. retryWhen() limits retries to connection
-        // failures only — we do NOT retry 4xx responses (auth errors etc.).
-        $response = Http::timeout(30)
-            ->retry(2, 500, function (\Throwable $exception) {
-                // Retry on cURL connection / timeout errors only, not on
-                // HTTP-level 4xx (those will just fail again with the same
-                // reason and waste user time).
+        // Timeout + retry tuned for two distinct failure modes:
+        //   1. Proxy outage — "0 bytes received" connection drops. Retry
+        //      catches these when the proxy comes back.
+        //   2. Slow generation — Claude legitimately needs 30-50s to emit
+        //      the 3000-token structured verdict (26 fields × ~100 tokens +
+        //      evidence quotes + dispute risks). Cutting the timeout below
+        //      that aborts successful work.
+        // 90s gives Claude generation room; one retry on ConnectionException
+        // catches the proxy drops without making the user wait 90s twice
+        // for a genuinely-slow-but-working call.
+        $response = Http::timeout(90)
+            ->retry(2, 1000, function (\Throwable $exception) {
+                // Retry ONLY on connection failures (proxy drops). Do NOT
+                // retry on actual response timeouts — those mean Claude is
+                // working and we should let it finish on the first attempt.
                 return $exception instanceof \Illuminate\Http\Client\ConnectionException;
             }, throw: false)
             ->withHeaders([
