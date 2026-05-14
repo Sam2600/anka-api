@@ -47,4 +47,9 @@ class ProjectTaskPhaseAssignment extends Model
     {
         return $this->belongsTo(Employee::class, 'assignee_id');
     }
+
+    public function progressLogs()
+    {
+        return $this->hasMany(PhaseProgressLog::class, 'phase_assignment_id')->orderBy('log_date');
+    }
 }

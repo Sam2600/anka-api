@@ -7,11 +7,11 @@ use App\Http\Resources\ProjectTaskAssignmentResource;
 use App\Http\Resources\ProjectTaskPhaseAssignmentResource;
 use App\Http\Resources\ProjectTeamAssignmentResource;
 use App\Models\Employee;
-use App\Models\Holiday;
 use App\Models\Project;
 use App\Models\ProjectTaskAssignment;
 use App\Models\ProjectTaskPhaseAssignment;
 use App\Models\ProjectTeamAssignment;
+use App\Services\Scheduling\CalendarFactory;
 use App\Services\Scheduling\WorkingDayCalendar;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -431,7 +431,7 @@ PROMPT;
             if (! is_array($aiAssignments)) {
                 Log::error('AI AssignTasks: invalid JSON, falling back to demo', ['text' => substr($text, 0, 300)]);
 
-                return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd);
+                return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $calendar);
             }
 
             $assigneeByRowPhase = [];
@@ -457,32 +457,13 @@ PROMPT;
     }
 
     /**
-     * Build a per-request working-day calendar. Currently registers the
-     * tenant's holidays (Phase 2). Future phases will also register approved
-     * employee leave (Phase 3) and cross-project capacity blocks (Phase 4).
+     * Build a per-request working-day calendar. Thin wrapper around
+     * CalendarFactory — same factory is used by the schedule-tracking side
+     * so blocked-day rules stay in lockstep with planning.
      */
     private function buildCalendar(string $tenantId, Carbon $windowStart, Carbon $effectiveEnd): WorkingDayCalendar
     {
-        $calendar = new WorkingDayCalendar(skipWeekends: true);
-
-        Holiday::where('tenant_id', $tenantId)
-            ->where(function ($q) use ($windowStart, $effectiveEnd) {
-                $q->whereBetween('date', [$windowStart->toDateString(), $effectiveEnd->toDateString()])
-                    ->orWhere('is_recurring', true);
-            })
-            ->get()
-            ->each(function (Holiday $holiday) use ($calendar) {
-                if ($holiday->is_recurring) {
-                    $calendar->blockRecurringMonthDay(
-                        (int) $holiday->date->format('n'),
-                        (int) $holiday->date->format('j'),
-                    );
-                } else {
-                    $calendar->blockGlobalDate($holiday->date);
-                }
-            });
-
-        return $calendar;
+        return CalendarFactory::forTenant($tenantId, $windowStart, $effectiveEnd);
     }
 
     /**

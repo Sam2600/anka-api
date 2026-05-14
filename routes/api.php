@@ -12,7 +12,9 @@ use App\Http\Controllers\Api\ExchangeRateController;
 use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\MilestoneController;
 use App\Http\Controllers\Api\OrganizationController;
+use App\Http\Controllers\Api\PhaseProgressLogController;
 use App\Http\Controllers\Api\ProjectController;
+use App\Http\Controllers\Api\ScheduleTrackingController;
 use App\Http\Controllers\Api\TenantController;
 use App\Http\Controllers\Api\TimeEntryController;
 use Illuminate\Support\Facades\Route;
@@ -179,4 +181,17 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::post('/projects/{project}/assign-tasks', [AiAutoAssignController::class, 'assignTasks']);
     Route::get('/projects/{project}/task-assignments', [AiAutoAssignController::class, 'taskAssignmentsIndex']);
     Route::patch('/projects/{project}/task-phase-assignments/{phaseAssignment}', [AiAutoAssignController::class, 'updateTaskPhaseAssignment']);
+
+    // Schedule tracking — daily progress logs + project/phase variance.
+    // See SCHEDULE_TRACKING_IMPLEMENTATION_PLAN.md for the design.
+    Route::get   ('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'index']);
+    Route::post  ('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'store']);
+    Route::patch ('/phase-progress-logs/{log}',                          [PhaseProgressLogController::class, 'update']);
+    Route::delete('/phase-progress-logs/{log}',                          [PhaseProgressLogController::class, 'destroy']);
+    Route::post  ('/phase-progress-logs/{log}/unlock',                   [PhaseProgressLogController::class, 'unlock']);
+    Route::get   ('/me/schedule-tracking/today',                         [PhaseProgressLogController::class, 'today']);
+
+    Route::get('/projects/{project}/schedule-tracking',             [ScheduleTrackingController::class, 'index']);
+    Route::get('/projects/{project}/schedule-tracking/summary',     [ScheduleTrackingController::class, 'summary']);
+    Route::get('/projects/{project}/schedule-tracking/by-assignee', [ScheduleTrackingController::class, 'byAssignee']);
 });
