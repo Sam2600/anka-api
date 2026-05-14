@@ -550,6 +550,21 @@ TXT;
             );
         })->implode("\n\n");
 
+        // Customer requirements collected progressively during nego.
+        // Anything blank here is rendered as "(not yet captured)" so Claude
+        // can either skip the related clause or emit an explicit placeholder
+        // marker for the operator to fill in step 2.
+        $reqLines = [];
+        foreach ([
+            'Customer support obligations' => $deal->customer_support_obligations,
+            'Out-of-scope policy' => $deal->out_of_scope_policy,
+            'Working hours' => $deal->working_hours,
+            'Testing range' => $deal->testing_range,
+        ] as $label => $value) {
+            $reqLines[] = "- {$label}: ".($value ?: '(not yet captured)');
+        }
+        $requirementsBlock = implode("\n", $reqLines);
+
         return <<<TXT
 TEMPLATE: {$template->name} (umbrella: {$template->umbrella})
 
@@ -560,6 +575,9 @@ CUSTOMER REQUIREMENT DESCRIPTION:
 """
 {$requirementDescription}
 """
+
+CUSTOMER REQUIREMENTS (captured at nego):
+{$requirementsBlock}
 
 WIZARD ANSWERS:
 {$wizardLines}

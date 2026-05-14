@@ -309,4 +309,30 @@ class DealRankStateMachineTest extends TestCase
 
         $this->assertSame([], $errors);
     }
+
+    public function test_customer_requirements_locked_in_a_rank(): void
+    {
+        $deal = $this->makeDeal('negotiation');
+
+        $errors = $deal->lockViolations([
+            'customer_support_obligations',
+            'out_of_scope_policy',
+            'working_hours',
+            'testing_range',
+        ]);
+
+        $this->assertArrayHasKey('customer_support_obligations', $errors);
+        $this->assertArrayHasKey('out_of_scope_policy', $errors);
+        $this->assertArrayHasKey('working_hours', $errors);
+        $this->assertArrayHasKey('testing_range', $errors);
+        $this->assertStringContainsString('rank A', $errors['working_hours'][0]);
+    }
+
+    public function test_customer_requirements_editable_in_c_and_b(): void
+    {
+        $keys = ['customer_support_obligations', 'out_of_scope_policy', 'working_hours', 'testing_range'];
+
+        $this->assertSame([], $this->makeDeal('lead')->lockViolations($keys));
+        $this->assertSame([], $this->makeDeal('qualified')->lockViolations($keys));
+    }
 }

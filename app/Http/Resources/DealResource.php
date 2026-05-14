@@ -39,6 +39,14 @@ class DealResource extends JsonResource
             'ot_rate_per_hour' => $this->ot_rate_per_hour,
             'ot_included_hours_per_month' => $this->ot_included_hours_per_month,
             'ot_notes' => $this->ot_notes,
+            // Customer requirements collected progressively during nego.
+            // ④ Estimation reads them when pricing; ⑤ contract drafting renders
+            // them as clauses; missing values surface as placeholder markers
+            // in the AI output for the operator to resolve in wizard step 2.
+            'customer_support_obligations' => $this->customer_support_obligations,
+            'out_of_scope_policy' => $this->out_of_scope_policy,
+            'working_hours' => $this->working_hours,
+            'testing_range' => $this->testing_range,
             'target_margin' => $this->target_margin,
             'base_labor_cost' => $this->base_labor_cost,
             'overhead_cost' => $this->overhead_cost,

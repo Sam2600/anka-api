@@ -17,6 +17,26 @@ If those fields are missing, my menu cannot draft a contract — the `[Generate 
 
 ## What's NEW since v1
 
+**Customer requirements now captured progressively at nego** (2026-05-15).
+
+Four optional text columns on `deals` collect details that previously
+lived only in wizard step 1 of the contract drafting wizard (and only
+on the `engineer_dispatch` template variant):
+
+| Column | Used by | When to populate |
+|---|---|---|
+| `customer_support_obligations` | ④ Estimation (setup time), ⑤ Contract (§4 Requirements) | After scope conversation |
+| `out_of_scope_policy` | ⑤ Contract (§3 dispute prevention) | Often a default; customer may negotiate |
+| `working_hours` | ④ Estimation (premium-hour cost), ⑤ Contract (§7 Monitoring) | Early in nego — esp. for offshore deals |
+| `testing_range` | ④ Estimation (QA hours), ⑤ Contract scope | Late in nego, after technical scoping |
+
+These are filled progressively during nego conversations. The deal detail
+page surfaces a "Customer Requirements" checklist showing captured /
+missing state so the salesperson knows what's still needed before
+contract drafting can complete cleanly. ④ Estimation reads whatever's
+present; missing values become placeholder markers in the AI-rendered
+contract draft for the operator to resolve in wizard step 2.
+
 **OT / Overage policy is now captured at nego time** (2026-05-15, post-Phase-C).
 
 Four structured columns on `deals` replace the freeform `final_ot_policy` text as the canonical source for ⑦ Profit Calculate, ④ Estimation pricing, and ⑤ contract drafting:
