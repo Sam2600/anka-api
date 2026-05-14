@@ -7,10 +7,12 @@ use App\Http\Resources\ProjectTaskAssignmentResource;
 use App\Http\Resources\ProjectTaskPhaseAssignmentResource;
 use App\Http\Resources\ProjectTeamAssignmentResource;
 use App\Models\Employee;
+use App\Models\Holiday;
 use App\Models\Project;
 use App\Models\ProjectTaskAssignment;
 use App\Models\ProjectTaskPhaseAssignment;
 use App\Models\ProjectTeamAssignment;
+use App\Services\Scheduling\WorkingDayCalendar;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -383,10 +385,12 @@ PROMPT;
             ], 422);
         }
 
+        $calendar = $this->buildCalendar($tenantId, $windowStart, $effectiveEnd);
+
         $apiKey = config('services.anthropic.api_key') ?? env('ANTHROPIC_API_KEY');
 
         if (! $apiKey) {
-            return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd);
+            return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $calendar);
         }
 
         try {
@@ -442,14 +446,43 @@ PROMPT;
                 $assigneeByRowPhase[(int) $item['row_no']][(string) $item['phase_code']] = $item['assignee_id'];
             }
 
-            $assignments = $this->computePlannedDates($tasks, $assigneeByRowPhase, $windowStart, $effectiveEnd);
+            $assignments = $this->computePlannedDates($tasks, $assigneeByRowPhase, $windowStart, $effectiveEnd, $calendar);
 
             return $this->persistTaskAssignments($project, $tasks, $assignments, $tenantId);
         } catch (\Exception $e) {
             Log::error('AI AssignTasks error, falling back to demo', ['message' => $e->getMessage()]);
 
-            return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd);
+            return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $calendar);
         }
+    }
+
+    /**
+     * Build a per-request working-day calendar. Currently registers the
+     * tenant's holidays (Phase 2). Future phases will also register approved
+     * employee leave (Phase 3) and cross-project capacity blocks (Phase 4).
+     */
+    private function buildCalendar(string $tenantId, Carbon $windowStart, Carbon $effectiveEnd): WorkingDayCalendar
+    {
+        $calendar = new WorkingDayCalendar(skipWeekends: true);
+
+        Holiday::where('tenant_id', $tenantId)
+            ->where(function ($q) use ($windowStart, $effectiveEnd) {
+                $q->whereBetween('date', [$windowStart->toDateString(), $effectiveEnd->toDateString()])
+                    ->orWhere('is_recurring', true);
+            })
+            ->get()
+            ->each(function (Holiday $holiday) use ($calendar) {
+                if ($holiday->is_recurring) {
+                    $calendar->blockRecurringMonthDay(
+                        (int) $holiday->date->format('n'),
+                        (int) $holiday->date->format('j'),
+                    );
+                } else {
+                    $calendar->blockGlobalDate($holiday->date);
+                }
+            });
+
+        return $calendar;
     }
 
     /**
@@ -458,17 +491,24 @@ PROMPT;
      * and a per-assignee cursor (so a single engineer's tasks queue up — they
      * can't be in two places on the same day).
      *
-     * Each phase consumes ceil(hours / WORKDAY_HOURS) calendar days. Both
-     * cursors advance to the day AFTER the phase ends.
+     * Duration = ceil(hours / WORKDAY_HOURS) WORKING days. The calendar handles
+     * weekends, public holidays, and (future phases) per-employee leave —
+     * cursors advance via calendar->addWorkingDays() so planned dates never
+     * land on a non-working day.
      */
-    private function computePlannedDates(array $tasks, array $assigneeByRowPhase, Carbon $windowStart, Carbon $effectiveEnd): array
-    {
+    private function computePlannedDates(
+        array $tasks,
+        array $assigneeByRowPhase,
+        Carbon $windowStart,
+        Carbon $effectiveEnd,
+        WorkingDayCalendar $calendar
+    ): array {
         // Schedule tasks in row_no order for deterministic output.
         $orderedTasks = $tasks;
         usort($orderedTasks, fn ($a, $b) => $a['row_no'] <=> $b['row_no']);
 
         $result = [];
-        $assigneeCursors = []; // employee_id => Carbon (their next free day)
+        $assigneeCursors = []; // employee_id => Carbon (their next free working day)
 
         foreach ($orderedTasks as $t) {
             $phases = $t['phases'];
@@ -483,7 +523,8 @@ PROMPT;
                 }
 
                 $assigneeCursor = $assigneeCursors[$assigneeId] ?? $windowStart->copy();
-                $start = $taskCursor->greaterThan($assigneeCursor) ? $taskCursor->copy() : $assigneeCursor->copy();
+                $rawStart = $taskCursor->greaterThan($assigneeCursor) ? $taskCursor : $assigneeCursor;
+                $start = $calendar->nextWorkingDay($rawStart, $assigneeId);
                 if ($start->greaterThan($effectiveEnd)) {
                     $start = $effectiveEnd->copy();
                 }
@@ -491,7 +532,7 @@ PROMPT;
                 $hours     = max(0.0, (float) $phase['hours']);
                 $sliceDays = max(1, (int) ceil($hours / self::WORKDAY_HOURS));
 
-                $end = $start->copy()->addDays($sliceDays - 1);
+                $end = $calendar->addWorkingDays($start, $sliceDays - 1, $assigneeId);
                 if ($end->greaterThan($effectiveEnd)) {
                     $end = $effectiveEnd->copy();
                 }
@@ -505,9 +546,9 @@ PROMPT;
                     'planned_end'   => $end->toDateString(),
                 ];
 
-                $next = $end->copy()->addDay();
-                $taskCursor                       = $next->copy();
-                $assigneeCursors[$assigneeId]     = $next;
+                $next = $calendar->addWorkingDays($end, 1, $assigneeId);
+                $taskCursor                   = $next->copy();
+                $assigneeCursors[$assigneeId] = $next;
             }
         }
 
@@ -739,7 +780,8 @@ PROMPT;
         $teamAssignments,
         string $tenantId,
         Carbon $windowStart,
-        Carbon $effectiveEnd
+        Carbon $effectiveEnd,
+        WorkingDayCalendar $calendar
     ) {
         // Bucket team members by rank code. Missing rank falls into 'Mid'.
         $buckets = ['Junior' => [], 'Mid' => [], 'Senior' => [], 'Lead' => []];
@@ -808,7 +850,7 @@ PROMPT;
             }
         }
 
-        $assignments = $this->computePlannedDates($tasks, $assigneeByRowPhase, $windowStart, $effectiveEnd);
+        $assignments = $this->computePlannedDates($tasks, $assigneeByRowPhase, $windowStart, $effectiveEnd, $calendar);
 
         return $this->persistTaskAssignments($project, $tasks, $assignments, $tenantId);
     }
