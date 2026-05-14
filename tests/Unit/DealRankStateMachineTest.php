@@ -242,4 +242,71 @@ class DealRankStateMachineTest extends TestCase
 
         $deal->drop('redundant call');
     }
+
+    public function test_overtime_absorbed_for_absorbed_model(): void
+    {
+        $deal = $this->makeDeal('negotiation', 'active', [
+            'ot_policy_model' => 'absorbed_by_provider',
+        ]);
+
+        $this->assertTrue($deal->isOvertimeAbsorbed());
+    }
+
+    public function test_overtime_absorbed_for_capped_model(): void
+    {
+        // Capped model partially absorbs the first N hours/month — counts as
+        // absorbed for the purposes of ⑦ Profit Calculate's "should I do the
+        // math?" check.
+        $deal = $this->makeDeal('qualified', 'active', [
+            'ot_policy_model' => 'capped_then_customer_pays',
+        ]);
+
+        $this->assertTrue($deal->isOvertimeAbsorbed());
+    }
+
+    public function test_overtime_not_absorbed_when_customer_pays(): void
+    {
+        $deal = $this->makeDeal('qualified', 'active', [
+            'ot_policy_model' => 'customer_pays_per_hour',
+        ]);
+
+        $this->assertFalse($deal->isOvertimeAbsorbed());
+    }
+
+    public function test_overtime_not_absorbed_when_no_ot_allowed(): void
+    {
+        $deal = $this->makeDeal('qualified', 'active', [
+            'ot_policy_model' => 'no_overtime_allowed',
+        ]);
+
+        $this->assertFalse($deal->isOvertimeAbsorbed());
+    }
+
+    public function test_overtime_not_absorbed_when_model_unset(): void
+    {
+        $deal = $this->makeDeal('qualified', 'active');
+
+        $this->assertFalse($deal->isOvertimeAbsorbed());
+    }
+
+    public function test_ot_fields_locked_in_a_rank(): void
+    {
+        $deal = $this->makeDeal('negotiation');
+
+        $errors = $deal->lockViolations(['ot_policy_model', 'ot_rate_per_hour', 'ot_included_hours_per_month', 'ot_notes']);
+
+        $this->assertArrayHasKey('ot_policy_model', $errors);
+        $this->assertArrayHasKey('ot_rate_per_hour', $errors);
+        $this->assertArrayHasKey('ot_included_hours_per_month', $errors);
+        $this->assertArrayHasKey('ot_notes', $errors);
+    }
+
+    public function test_ot_fields_editable_in_b_rank(): void
+    {
+        $deal = $this->makeDeal('qualified');
+
+        $errors = $deal->lockViolations(['ot_policy_model', 'ot_rate_per_hour', 'ot_notes']);
+
+        $this->assertSame([], $errors);
+    }
 }

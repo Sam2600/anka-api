@@ -423,6 +423,45 @@ class ContractDraftService
         return $output;
     }
 
+    /**
+     * Build a human-readable OT/overage clause from the structured nego
+     * fields, falling back to Estimation's freeform `final_ot_policy`
+     * notes when the structured model isn't set. Empty → flag for TODO.
+     */
+    private function renderOtContext(Deal $deal): string
+    {
+        $currency = $deal->final_currency ?? 'USD';
+        $model = $deal->ot_policy_model;
+        $rate = $deal->ot_rate_per_hour;
+        $capped = $deal->ot_included_hours_per_month;
+        $notes = $deal->ot_notes;
+        $estimationNotes = $deal->final_ot_policy;
+
+        $structured = match ($model) {
+            'customer_pays_per_hour' => $rate !== null
+                ? sprintf('Customer pays for all overtime at %s %s/hour.', $currency, number_format((float) $rate, 2))
+                : 'Customer pays for all overtime (rate not specified — flag as TODO).',
+            'capped_then_customer_pays' => sprintf(
+                'First %s hours/month of overtime are included; beyond that, customer pays at %s.',
+                $capped ?? '(TODO: hours)',
+                $rate !== null ? "{$currency} ".number_format((float) $rate, 2).'/hour' : '(TODO: rate)',
+            ),
+            'absorbed_by_provider' => 'Provider absorbs all overtime cost — no overage billing to customer.',
+            'no_overtime_allowed' => 'No overtime work permitted under this contract.',
+            default => '',
+        };
+
+        $parts = array_filter([
+            $structured,
+            $notes ? "Notes from nego: {$notes}" : null,
+            $estimationNotes ? "Estimation notes: {$estimationNotes}" : null,
+        ]);
+
+        return empty($parts)
+            ? '(not specified — flag as TODO)'
+            : implode(' ', $parts);
+    }
+
     private function buildSystemPrompt(): string
     {
         return <<<'TXT'
@@ -464,6 +503,12 @@ TXT;
             ? $deal->workload_description
             : '(no Requirement Description provided)';
 
+        // Render the OT/overage section from the structured nego-time
+        // fields. The freeform final_ot_policy (Estimation's notes layer)
+        // is appended when present. ⑦ Profit Calculate reads the same
+        // structured fields to decide whether to subtract OT from profit.
+        $otContext = $this->renderOtContext($deal);
+
         $dealContext = sprintf(
             "Customer: %s\nProject name: %s\nClient budget: %s %s\nTimeline: %d months\nContract length: %d months\nTeam: %s\nMonthly fee: %s %s\nInstallation fee: %s\nOT/overage policy: %s\nSupport hours/month: %d\nCurrency: %s",
             $deal->client ?? '(unknown)',
@@ -478,7 +523,7 @@ TXT;
             $deal->final_installation_fee !== null
                 ? $deal->final_currency.' '.number_format((float) $deal->final_installation_fee, 2)
                 : '(none)',
-            $deal->final_ot_policy ?: '(not specified — flag as TODO)',
+            $otContext,
             $deal->final_support_hours_per_month ?? self::DEFAULT_SUPPORT_HOURS,
             $deal->final_currency ?? 'USD',
         );

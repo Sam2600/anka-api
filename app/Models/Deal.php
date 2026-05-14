@@ -39,6 +39,10 @@ class Deal extends Model
         'workload_description',
         'timeline_months',
         'client_budget',
+        'ot_policy_model',
+        'ot_rate_per_hour',
+        'ot_included_hours_per_month',
+        'ot_notes',
         'final_monthly_fee',
         'final_installation_fee',
         'final_contract_months',
@@ -48,6 +52,18 @@ class Deal extends Model
         'final_currency',
         'final_confirmed_at',
         'suggested_template_variant',
+    ];
+
+    public const OT_POLICY_MODELS = [
+        // Customer is billed for every overtime hour worked (typical SES).
+        'customer_pays_per_hour',
+        // First N hours/month are absorbed by Provider; beyond that customer pays.
+        // Matches the Yazaki contract pattern ("12 hrs/mo support, then per-hour").
+        'capped_then_customer_pays',
+        // Provider eats the OT cost. ⑦ Profit Calculate must subtract it.
+        'absorbed_by_provider',
+        // Contract forbids OT entirely (rare; usually a flag for fixed-scope work).
+        'no_overtime_allowed',
     ];
 
     public const REQUIRED_ESTIMATION_FIELDS = [
@@ -77,6 +93,10 @@ class Deal extends Model
         'timeline_months',
         'workload_hours',
         'workload_description',
+        'ot_policy_model',
+        'ot_rate_per_hour',
+        'ot_included_hours_per_month',
+        'ot_notes',
         'target_margin',
         'base_labor_cost',
         'overhead_cost',
@@ -112,6 +132,8 @@ class Deal extends Model
         'buffer_cost' => 'float',
         'total_estimated_cost' => 'float',
         'estimated_gross_profit' => 'float',
+        'ot_rate_per_hour' => 'float',
+        'ot_included_hours_per_month' => 'integer',
         'final_monthly_fee' => 'float',
         'final_installation_fee' => 'float',
         'final_contract_months' => 'integer',
@@ -214,6 +236,24 @@ class Deal extends Model
             self::REQUIRED_ESTIMATION_FIELDS,
             fn (string $field) => blank($this->{$field})
         ));
+    }
+
+    /**
+     * True when the agency absorbs the OT cost. ⑦ Profit Calculate
+     * subtracts the actual overtime hours × the engineer's cost rate
+     * from the deal's profit when this returns true.
+     *
+     * Note: 'capped_then_customer_pays' counts as partially absorbed
+     * (first N hours per month are absorbed). Profit Calculate handles
+     * the calculation; this helper just reports whether ANY portion is
+     * absorbed so callers can decide whether to do the math.
+     */
+    public function isOvertimeAbsorbed(): bool
+    {
+        return in_array($this->ot_policy_model, [
+            'absorbed_by_provider',
+            'capped_then_customer_pays',
+        ], true);
     }
 
     /**

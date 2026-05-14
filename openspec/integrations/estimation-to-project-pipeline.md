@@ -15,6 +15,23 @@ If those fields are missing, my menu cannot draft a contract — the `[Generate 
 
 ---
 
+## What's NEW since v1
+
+**OT / Overage policy is now captured at nego time** (2026-05-15, post-Phase-C).
+
+Four structured columns on `deals` replace the freeform `final_ot_policy` text as the canonical source for ⑦ Profit Calculate, ④ Estimation pricing, and ⑤ contract drafting:
+
+| Column | Type | Set by |
+|---|---|---|
+| `ot_policy_model` | enum: `customer_pays_per_hour` / `capped_then_customer_pays` / `absorbed_by_provider` / `no_overtime_allowed` | **Nego** (this menu) |
+| `ot_rate_per_hour` | decimal nullable | **Nego** — required when model = customer_pays or capped |
+| `ot_included_hours_per_month` | int nullable | **Nego** — required when model = capped |
+| `ot_notes` | text nullable | **Nego** — freeform clarifications |
+
+Your menu **reads** these to price the deal accurately. An `absorbed_by_provider` deal needs more buffer in the cost calc than a `customer_pays_per_hour` deal because the agency eats the OT. The existing `final_ot_policy` field stays as a freeform notes layer where your menu can add Estimation-specific guidance — both are passed to the AI contract drafting prompt, with the structured fields rendered as a precise clause and your notes appended.
+
+`Deal::isOvertimeAbsorbed()` returns true when the model is `absorbed_by_provider` or `capped_then_customer_pays` — Profit Calculate uses this to decide whether to subtract OT cost from project profit.
+
 ## Required fields you must populate
 
 Write these to the `deals` table when the customer **confirms** the estimate (not when calc starts — only when the customer says "yes, go to contract").
