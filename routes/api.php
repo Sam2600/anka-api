@@ -6,7 +6,9 @@ use App\Http\Controllers\Api\AiUsageController;
 use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ContractController;
+use App\Http\Controllers\Api\ContractTemplateController;
 use App\Http\Controllers\Api\DealContractDocumentController;
+use App\Http\Controllers\Api\DealContractDraftController;
 use App\Http\Controllers\Api\DealController;
 use App\Http\Controllers\Api\EstimationVersionController;
 use App\Http\Controllers\Api\ExchangeRateController;
@@ -93,6 +95,35 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         // Requires manage_crm because it can trigger auto-win on success.
         Route::post('/contract-documents/{contractDocument}/reanalyze', [DealContractDocumentController::class, 'reanalyze']);
         Route::delete('/contract-documents/{contractDocument}', [DealContractDocumentController::class, 'destroy']);
+    });
+
+    // ── AI Contract Drafting (Project Pipeline ⑤ Contract Generation) ──
+    // chg-011 Phase C. Wizard surface for generating English SES contracts
+    // from the Yazaki-modelled template variants. Generates A→S via
+    // ContractDraftService::markSigned (counter-signed PDF upload).
+    Route::middleware('permission:view_crm')->group(function () {
+        Route::get('/contract-templates', [ContractTemplateController::class, 'index'])
+            ->name('contract-templates.index');
+        Route::get('/contract-templates/{contractTemplate}', [ContractTemplateController::class, 'show'])
+            ->name('contract-templates.show');
+        Route::get('/deals/{deal}/contract-drafts', [DealContractDraftController::class, 'index']);
+        Route::get('/contract-drafts/{contractDraft}', [DealContractDraftController::class, 'show'])
+            ->name('contract-drafts.show');
+    });
+    Route::middleware('permission:manage_crm')->group(function () {
+        // Start generation — fires B→A on first successful Claude call.
+        Route::post('/deals/{deal}/contract-drafts', [DealContractDraftController::class, 'store']);
+        // Per-section edit (wizard step 2).
+        Route::patch('/contract-drafts/{contractDraft}/sections/{sectionKey}', [DealContractDraftController::class, 'updateSection']);
+        // Re-run AI for a single section with updated wizard inputs.
+        Route::post('/contract-drafts/{contractDraft}/regenerate-section', [DealContractDraftController::class, 'regenerateSection']);
+        Route::post('/contract-drafts/{contractDraft}/finalise', [DealContractDraftController::class, 'finalise']);
+        // Email send. send_contract_draft is manager-only; manage_crm fallback
+        // for tenants that haven't seeded the new permission yet.
+        Route::post('/contract-drafts/{contractDraft}/send', [DealContractDraftController::class, 'send']);
+        // Counter-signed PDF upload — fires A→S via win_deal().
+        Route::post('/contract-drafts/{contractDraft}/mark-signed', [DealContractDraftController::class, 'markSigned']);
+        Route::delete('/contract-drafts/{contractDraft}', [DealContractDraftController::class, 'destroy']);
     });
 
     // Estimation Versions — reads require view_crm; writes require manage_crm
