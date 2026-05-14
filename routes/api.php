@@ -175,8 +175,8 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::delete('/projects/{project}/team/{assignment}', [AiAutoAssignController::class, 'destroy']);
     Route::post('/projects/{project}/auto-assign', [AiAutoAssignController::class, 'autoAssign']);
 
-    // Project Task Assignments (xlsx-driven AI task allocation)
+    // Project Task Assignments (xlsx-driven AI task allocation, per-phase)
     Route::post('/projects/{project}/assign-tasks', [AiAutoAssignController::class, 'assignTasks']);
     Route::get('/projects/{project}/task-assignments', [AiAutoAssignController::class, 'taskAssignmentsIndex']);
-    Route::patch('/projects/{project}/task-assignments/{assignment}', [AiAutoAssignController::class, 'updateTaskAssignment']);
+    Route::patch('/projects/{project}/task-phase-assignments/{phaseAssignment}', [AiAutoAssignController::class, 'updateTaskPhaseAssignment']);
 });

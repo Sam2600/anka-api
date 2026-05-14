@@ -11,7 +11,7 @@ class ProjectController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Project::query();
+        $query = Project::query()->with('contract.deal');
 
         if ($request->filled('contract_id')) {
             $query->where('contract_id', $request->contract_id);
@@ -26,6 +26,7 @@ class ProjectController extends Controller
 
     public function show(Project $project)
     {
+        $project->load('contract.deal');
         return new ProjectResource($project);
     }
 
