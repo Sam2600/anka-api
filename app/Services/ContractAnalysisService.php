@@ -914,6 +914,7 @@ CRITICAL RULES:
 6. If a field truly doesn't apply (e.g. testing_range on a managed-service contract), set status to `not_applicable` with a brief reasoning.
 7. The agency operates a single contract template — different billing patterns (monthly_recurring · milestone_based · per_phase · one_time) are all valid. Detect which pattern this contract uses and report it in `detected_payment_pattern`.
 8. DEAL MATCH IS NON-NEGOTIABLE. Use the DEAL CONTEXT section to verify the uploaded contract actually belongs to THIS deal. If the contract is for a different customer / different project, set `deal_match.is_match = false` regardless of how well-formed the rest of the contract is — uploading a Customer-B contract onto Deal-A is a mis-routing bug we must catch. Minor variations in legal-entity suffix ("Ltd" vs "Co., Ltd") are fine; entirely different company names are not.
+9. USE HUMAN-READABLE LABELS in any free-text user-facing string (executive_summary, reasoning, suggested_fix, suggested_remediation, dispute_risks[].concern, AND every entry in diff_vs_previous.improvements / regressions / still_missing). NEVER use the snake_case field keys (e.g. "customer_signature", "deal_match", "payment_terms") in those strings. Use the human label from the FIELD CHECKLIST instead — e.g. "Customer signature", "Deal match", "Payment terms". Field keys may ONLY appear in the structured `field` and `critical_failures[]` slots, never in human-facing text. The frontend will display these strings verbatim to non-technical salespeople.
 PROMPT;
     }
 
