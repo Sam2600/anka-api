@@ -215,4 +215,53 @@ class Deal extends Model
             fn (string $field) => blank($this->{$field})
         ));
     }
+
+    /**
+     * Mark this deal Dropped. Captures the rank at the moment of drop
+     * (analytics: "dropped at C" vs "dropped at A after burning estimation
+     * effort"). Throws DomainException for callers that violate the
+     * preconditions; HTTP layer translates to 422.
+     */
+    public function drop(string $reason): void
+    {
+        if (! $this->canBeDropped()) {
+            throw new \DomainException(
+                $this->isDropped()
+                    ? 'Deal is already dropped.'
+                    : "Deal at rank {$this->rank} cannot be dropped."
+            );
+        }
+
+        $this->update([
+            'lifecycle_status' => 'dropped',
+            'dropped_at_stage' => $this->status,
+            'dropped_at' => now(),
+            'loss_reason' => $reason,
+            'win_probability' => 0,
+        ]);
+    }
+
+    /**
+     * Returns the field-level errors a request would hit if it tried to
+     * write any of the given keys while the deal is locked. Empty array
+     * when the deal isn't locked or no request keys collide. Used by
+     * DealController::update() to produce 422 errors.
+     *
+     * @param  array<string,mixed>  $requestKeys  array_keys() of the incoming payload
+     * @return array<string,array<string>>
+     */
+    public function lockViolations(array $requestKeys): array
+    {
+        if (! $this->isLocked()) {
+            return [];
+        }
+
+        $blocked = array_intersect($requestKeys, $this->lockedFields());
+        $message = "This field is locked because the deal is at rank {$this->rank}. "
+            . 'To change scope, drop this deal and start a new one.';
+
+        return collect($blocked)
+            ->mapWithKeys(fn (string $key) => [$key => [$message]])
+            ->all();
+    }
 }

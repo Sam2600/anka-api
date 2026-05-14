@@ -190,4 +190,56 @@ class DealRankStateMachineTest extends TestCase
         $this->assertSame(80, Deal::RANK_PROBABILITY['A']);
         $this->assertSame(100, Deal::RANK_PROBABILITY['S']);
     }
+
+    public function test_lock_violations_empty_when_unlocked(): void
+    {
+        $deal = $this->makeDeal('lead');
+
+        $this->assertSame([], $deal->lockViolations(['workload_description', 'final_monthly_fee']));
+    }
+
+    public function test_lock_violations_lists_blocked_fields_in_a(): void
+    {
+        $deal = $this->makeDeal('negotiation');
+
+        $errors = $deal->lockViolations(['name', 'workload_description', 'final_monthly_fee', 'contact_phone']);
+
+        // Non-locked fields pass through; locked fields are flagged.
+        $this->assertArrayNotHasKey('name', $errors);
+        $this->assertArrayNotHasKey('contact_phone', $errors);
+        $this->assertArrayHasKey('workload_description', $errors);
+        $this->assertArrayHasKey('final_monthly_fee', $errors);
+        $this->assertStringContainsString('rank A', $errors['workload_description'][0]);
+    }
+
+    public function test_lock_violations_lists_blocked_fields_in_s(): void
+    {
+        $deal = $this->makeDeal('won');
+
+        $errors = $deal->lockViolations(['timeline_months', 'client_budget']);
+
+        $this->assertArrayHasKey('timeline_months', $errors);
+        $this->assertArrayHasKey('client_budget', $errors);
+        $this->assertStringContainsString('rank S', $errors['timeline_months'][0]);
+    }
+
+    public function test_drop_refuses_won_deal(): void
+    {
+        $deal = $this->makeDeal('won');
+
+        $this->expectException(\DomainException::class);
+        $this->expectExceptionMessage('rank S cannot be dropped');
+
+        $deal->drop('customer cancelled');
+    }
+
+    public function test_drop_refuses_already_dropped_deal(): void
+    {
+        $deal = $this->makeDeal('qualified', 'dropped');
+
+        $this->expectException(\DomainException::class);
+        $this->expectExceptionMessage('already dropped');
+
+        $deal->drop('redundant call');
+    }
 }

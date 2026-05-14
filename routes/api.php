@@ -69,9 +69,13 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         Route::put('/deals/{deal}', [DealController::class, 'update']);
         Route::patch('/deals/{deal}', [DealController::class, 'update']);
         Route::delete('/deals/{deal}', [DealController::class, 'destroy']);
-        Route::patch('/deals/{deal}/stage', [DealController::class, 'updateStage']);
-        Route::post('/deals/{deal}/win', [DealController::class, 'win']);
-        Route::post('/deals/{deal}/lose', [DealController::class, 'lose']);
+        // chg-011 Phase B-breaking: removed PATCH /deals/{deal}/stage,
+        // POST /deals/{deal}/win, POST /deals/{deal}/lose. Rank changes
+        // now fire only from event triggers — Estimation flips C→B,
+        // ContractDraftService flips B→A on draft generation and A→S on
+        // counter-signed PDF upload. The Drop endpoint replaces /lose
+        // and uses the orthogonal lifecycle_status flag.
+        Route::post('/deals/{deal}/drop', [DealController::class, 'drop']);
     });
 
     // Customer contract documents (uploaded while deal is in Negotiation / A-rank).
