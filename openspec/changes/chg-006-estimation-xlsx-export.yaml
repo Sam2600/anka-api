@@ -1,0 +1,219 @@
+id: chg-006-estimation-xlsx-export
+name: Estimation XLSX export — auto-generate per version, pre/post-win storage
+status: proposed
+created: 2026-05-13
+owners: [claude.max@brycenmyanmar.com.mm]
+
+why: |
+  Sales engineers currently maintain estimation calculations both inside Anka
+  (Deal + estimation_resources + deal_overheads) and in a separately maintained
+  reference Excel workbook with five tightly formatted sheets (全体工数,
+  Web_Function List, Web_Manhour_Detail, Milestone, 人の山積). The reference
+  workbook contains complex inter-sheet formulas, multiplier ratios per
+  development phase, and team-stacking logic that the sales team relies on for
+  agency-to-client deliverables. Today nobody can produce that workbook from
+  the Anka data — they hand-rebuild it after each estimation change.
+
+  This change makes Anka the source of truth: every saved EstimationVersion
+  automatically produces a pixel-perfect copy of the reference workbook with
+  the version's data filled in, stored on the server and downloadable from the
+  UI. Because EstimationVersion is already an immutable JSONB snapshot, the
+  XLSX is naturally versioned 1:1 with version_number.
+
+what:
+  - composer.json
+    - Add `phpoffice/phpspreadsheet` (^4.0). The reference template uses
+      multi-row merged headers, custom column widths, conditional fills, and
+      cross-sheet formula references that require cell-level control; the
+      Maatwebsite/Excel facade abstracts those away. We use PhpSpreadsheet
+      directly via IOFactory::load() so the existing
+      `storage/app/templates/estimation_template.xlsx` is preserved
+      byte-for-byte and only data cells / data rows are mutated.
+
+  - Migration 2026_05_13_000001_add_xlsx_path_to_estimation_versions.php
+    - Adds nullable VARCHAR `xlsx_path` to `estimation_versions`.
+    - Stores the Storage::disk('local') path to the generated workbook for
+      that version. Null until first generation succeeds (so old versions
+      created before this migration can be lazily back-filled on first
+      download).
+
+  - app/Services/EstimationXlsxService.php (NEW)
+    - generateAndStore(EstimationVersion $version): string
+        Loads `storage/app/templates/estimation_template.xlsx` via
+        `\PhpOffice\PhpSpreadsheet\IOFactory::load()`. For each of the five
+        sheets, replaces only data values / data rows — never recreates the
+        worksheet, never touches merged cell ranges, column widths, fills,
+        borders, or fonts. Saves to:
+          - `deals/{deal_id}/estimation_v{n}.xlsx` if the deal has no
+            project yet (status != 'won' or no Project row exists), OR
+          - `projects/{project_number}/{project_number}_estimation_v{n}.xlsx`
+            if the deal has been won and a Project exists.
+        Returns the relative storage path and persists it onto the version
+        via `xlsx_path`.
+
+    - migrateToProject(Deal $deal, Project $project): void
+        Called immediately after `win_deal()` succeeds. For every version of
+        the won deal, moves the file from `deals/{deal_id}/` to
+        `projects/{project_number}/`, renames it to
+        `{project_number}_estimation_v{n}.xlsx`, and updates
+        `estimation_versions.xlsx_path`. Wrapped in DB::transaction so a
+        partial move rolls back the path updates. Storage move uses
+        `Storage::move()` which is atomic on the local disk.
+
+    Constants & layout map (read once from the template, kept here for
+    forward compatibility):
+      - Sheet 1 "全体工数": data placeholder cells (B4..B10) for
+        rough-estimate hours, requirement study hours, environment setup
+        hours, total per-person hours/days/months. The web-development hours
+        cell (B6, exact cell tbd by reading template) keeps the cross-sheet
+        formula `=Web_Manhour_Detail!$AG${total_row}` — service only mutates
+        the data cells, never the formula cell.
+      - Sheet 2 "Web_Function List": header row 1; data rows from row 2 down.
+        Service clears existing template-sample data rows (rows 2..N), then
+        for each EstimationResource on the version inserts a row with
+        (No, Function ID, Function Name, Explanation, Category) — Function ID
+        and Category are derived (No incrementing, ID = `F{NNN}`, Category
+        defaults to "Web" until the data model carries a real value).
+      - Sheet 3 "Web_Manhour_Detail": rows 1–4 (group labels, multiplier row,
+        header row) are preserved exactly as-is. Phase multiplier constants
+        (e.g. コードレビュー = 0.1, Prototype = 0.15, ER図 = 0.05 …) are read
+        from row 2 of the template at load time, NOT hard-coded in PHP, so
+        the template can be re-tuned without redeploying. For each feature,
+        inserts a data row where column D (`開発工数(h)`) is the literal
+        EstimationResource.hours value and every downstream phase column is
+        an Excel formula `=$D{row}*{multiplier-cell-ref}`. Total column is
+        `=SUM(D{row}:AF{row})` (final range determined dynamically from
+        header row). Bottom summary rows: 1人(Hr) = SUM per column,
+        1人(Days) = `=Hr/8`, 1人(Months) = `=Days/20`, weighted team total
+        rows (Leader+3 Developer+UIUX) preserved from template with their
+        formulas; only the per-feature data rows are inserted.
+      - Sheet 4 "Milestone": phase-name rows preserved from template.
+        Month×week column headers are regenerated based on Deal.timeline_months
+        starting from Deal.expected_close_date (fallback: today). Default
+        cell contents stay blank — this sheet is for manual schedule planning
+        after export.
+      - Sheet 5 "人の山積": preserves template header structure. Member rows
+        are derived from EstimationResource.role_id grouped by role, plus
+        DealHardAssignment.employee_id (real assignments). Monthly columns
+        mirror Sheet 4's month range. All allocation cells default to 0 and
+        the SubTotal formula `=SUM(C{row}:N{row})` (range determined from
+        header) and Total row `=SUM(member rows)` are preserved from the
+        template.
+
+    Recalc: calls `$spreadsheet->getCalculationEngine()->clearCalculationCache()`
+    before saving so formulas hold their values when opened in Excel without
+    a re-eval prompt.
+
+  - app/Http/Controllers/Api/EstimationVersionController.php
+    - store(): after the existing version-creation logic (line ~33–101),
+      call `EstimationXlsxService::generateAndStore($version)` and update
+      `xlsx_path`. Wrapped in try/catch — XLSX failure does NOT block the
+      version save (the version is still useful without the export), it is
+      logged at warning level and the response still returns 201. Future
+      downloads will lazy-generate.
+    - downloadXlsx(string $id): NEW. Loads the version through the
+      tenant-scoped query (so cross-tenant access yields 404, not 403, to
+      avoid leaking existence), regenerates on the fly if xlsx_path is null
+      or `Storage::missing($version->xlsx_path)`, then returns
+      `Storage::disk('local')->download($path, basename($path))`.
+
+  - app/Http/Controllers/Api/DealController.php
+    - win(): after `win_deal()` succeeds and the Contract/Project rows are
+      hydrated, call `EstimationXlsxService::migrateToProject($deal, $project)`.
+      Same SQLite-fallback branch (the PHP re-implementation of win_deal)
+      also calls migrateToProject. Migration runs OUTSIDE the win_deal
+      DB::transaction — if the file move fails we want the win to stick
+      and the file move to be retryable, not roll the win back.
+
+  - routes/api.php
+    - Inside the tenant-scoped group, alongside the existing estimation-
+      versions routes:
+        GET /estimation-versions/{id}/download/xlsx
+          → EstimationVersionController@downloadXlsx
+          middleware: permission:view_crm (same gate as the version GET)
+
+  - app/Http/Resources/EstimationVersionResource.php (NEW or update)
+    - Adds `xlsx_path` and `xlsx_available` (boolean: `!is_null(xlsx_path)
+      && Storage::disk('local')->exists(xlsx_path)`) to the response so the
+      frontend can decide whether to enable/disable the export button per row.
+
+  - openspec/specs/api-contracts.yaml
+    - Adds the new GET route under the tenant-scoped CRM block.
+
+  - openspec/specs/domain-models.yaml
+    - Adds `xlsx_path: string|null` to EstimationVersion fields.
+
+  - openspec/specs/business-logic.yaml
+    - Documents the auto-generation rule (every POST estimation-version
+      attempts XLSX generation; failure is logged not raised), the
+      pre-win → post-win file migration rule (win_deal triggers move from
+      deals/{id}/ to projects/{number}/), and the lazy regeneration rule
+      on download.
+
+  - tests/Feature/EstimationXlsxExportTest.php (NEW)
+    - Saving a version creates a file at the expected deals/{deal_id}/ path
+      and sets xlsx_path.
+    - Winning a deal moves all version files into projects/{number}/.
+    - Download endpoint returns 200 with the correct Content-Type and
+      Content-Disposition.
+    - Cross-tenant download returns 404.
+    - Lazy regeneration triggers when xlsx_path is null.
+    - Tests stub the template file with a minimal fixture; full sheet-content
+      assertions are NOT in scope for v1 (template-faithfulness is verified
+      manually against the reference workbook).
+
+placeholders:
+  - The phase-multiplier ratios in Sheet 3 row 2 will be read from the
+    template at runtime. If the customer ever needs the ratios editable per
+    tenant, expose them as a `estimation_phase_multipliers` config table —
+    out of scope for v1.
+  - Sheet 2 "Category" column currently defaults to "Web" because
+    EstimationResource has no category field. If the sales team wants
+    per-resource category, add `estimation_resources.category` (varchar)
+    in a follow-up change.
+  - Sheet 4 Milestone start date falls back to today when
+    Deal.expected_close_date is null. Acceptable for v1 since the cells are
+    blank schedule slots filled in manually.
+
+risk: |
+  - Reference template integrity: any future hand-edit of
+    `storage/app/templates/estimation_template.xlsx` that adds/removes rows
+    or shifts merged ranges will break the row-insertion logic. Service
+    keeps a `TEMPLATE_VERSION_HASH` constant — if the loaded template's
+    SHA-256 doesn't match, log a warning but still attempt generation.
+  - PhpSpreadsheet memory: large estimations (>200 features) with the
+    full formula calculation cache can spike memory above 256 MB. Set
+    `ini_set('memory_limit', '512M')` inside generateAndStore. Acceptable
+    short-term; revisit if estimations grow beyond that.
+  - The post-win migrateToProject runs outside the SP transaction. If the
+    server crashes between win_deal commit and the file move, files stay
+    under `deals/{id}/` and `xlsx_path` is stale. The downloadXlsx lazy
+    regeneration path covers this — it will re-emit under the correct path
+    on next request.
+  - Cross-tenant safety: downloadXlsx relies on the EstimationVersion
+    BelongsToTenant scope. A super-admin call without X-Tenant-ID would
+    bypass it, but super-admin tooling never hits this endpoint.
+
+rollback: |
+  - Migration rollback drops `estimation_versions.xlsx_path`.
+  - Generated files under `storage/app/deals/` and `storage/app/projects/`
+    can be left in place (they take negligible disk; no PII outside what's
+    already in the deal). If full cleanup is required, a one-line
+    `Storage::deleteDirectory()` call covers each prefix.
+  - Reverting the controller change removes the auto-generation call;
+    versions then save without an XLSX, as before.
+
+manual_steps:
+  - composer require phpoffice/phpspreadsheet
+  - php artisan migrate
+  - Verify `storage/app/templates/estimation_template.xlsx` exists on each
+    environment (production, staging) — copy from repo or upload manually.
+    Service will fall back to a plain workbook if the template is missing,
+    but downloads will not match the reference layout.
+  - (frontend) npm install && npm run dev — picks up the new query hook and
+    button. See anka-frontend chg-009-estimation-xlsx-export.
+
+affected_specs:
+  - api-contracts
+  - domain-models
+  - business-logic

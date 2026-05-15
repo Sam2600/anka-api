@@ -7,7 +7,6 @@ use App\Models\CapacityRole;
 use App\Models\CompanySetting;
 use App\Models\Contract;
 use App\Models\Deal;
-use App\Models\DealContractDocument;
 use App\Models\DealGhostRole;
 use App\Models\DealHardAssignment;
 use App\Models\DealOverhead;
@@ -21,6 +20,7 @@ use App\Models\Invoice;
 use App\Models\Milestone;
 use App\Models\Project;
 use App\Models\ProjectTeamAssignment;
+use App\Models\Rank;
 use App\Models\Role;
 use App\Models\Skill;
 use App\Models\Tenant;
@@ -75,6 +75,7 @@ class DatabaseSeeder extends Seeder
             'users',
             'employees',
             'skills',
+            'ranks',
             'capacity_roles',
             'roles',
             'departments',
@@ -114,10 +115,11 @@ class DatabaseSeeder extends Seeder
         ]);
 
         $capacityRoles = $this->createCapacityRoles($tenant);
+        $ranks = $this->createRanks($tenant);
         $departments = $this->createDepartments($tenant);
         $roles = $this->createRoles($tenant, $departments, $blueprint['role_rates']);
         $skills = $this->createSkills($tenant, $blueprint['skills']);
-        $employees = $this->createEmployees($tenant, $blueprint['employees'], $departments, $roles, $capacityRoles, $skills);
+        $employees = $this->createEmployees($tenant, $blueprint['employees'], $departments, $roles, $capacityRoles, $ranks, $skills);
         $users = $this->createUsers($tenant, $blueprint['users'], $employees);
 
         $this->finishDepartments($departments, $employees);
@@ -146,6 +148,65 @@ class DatabaseSeeder extends Seeder
         }
 
         return $roles;
+    }
+
+    /**
+     * Seniority ranks per tenant. Levels are chosen with gaps so tenants
+     * can add custom ranks ("Principal" 35, "Staff" 45) without bumping
+     * every other rank's level. Higher = more senior.
+     */
+    private function createRanks(Tenant $tenant): array
+    {
+        $ranks = [];
+
+        foreach ([
+            ['code' => 'Junior', 'name' => 'Junior',           'level' => 10],
+            ['code' => 'Mid',    'name' => 'Mid-Level',        'level' => 20],
+            ['code' => 'Senior', 'name' => 'Senior',           'level' => 30],
+            ['code' => 'Lead',   'name' => 'Lead / Tech Lead', 'level' => 40],
+        ] as $row) {
+            $ranks[$row['code']] = Rank::create([
+                'tenant_id' => $tenant->id,
+                'code' => $row['code'],
+                'name' => $row['name'],
+                'level' => $row['level'],
+            ]);
+        }
+
+        return $ranks;
+    }
+
+    /**
+     * Heuristic rank assignment from a seeded employee's role title.
+     * Mirrors the AI prompt's pre-existing keyword logic so the seeded
+     * data exercises the same seniority taxonomy. Returns the rank code
+     * key ('Lead', 'Senior', 'Mid', 'Junior') for the supplied ranks
+     * map; returns null when no keywords match (employee stays unranked).
+     */
+    private function deriveRankCode(?string $roleTitle): string
+    {
+        $title = strtolower((string) $roleTitle);
+        if ($title === '') {
+            return 'Mid';
+        }
+
+        foreach (['lead', 'head', 'principal', 'master', 'manager', 'director', 'architect'] as $kw) {
+            if (str_contains($title, $kw)) {
+                return 'Lead';
+            }
+        }
+        foreach (['senior'] as $kw) {
+            if (str_contains($title, $kw)) {
+                return 'Senior';
+            }
+        }
+        foreach (['junior', 'intern', 'associate', 'trainee'] as $kw) {
+            if (str_contains($title, $kw)) {
+                return 'Junior';
+            }
+        }
+
+        return 'Mid';
     }
 
     private function createDepartments(Tenant $tenant): array
@@ -213,12 +274,14 @@ class DatabaseSeeder extends Seeder
         array $departments,
         array $roles,
         array $capacityRoles,
+        array $ranks,
         array $skills
     ): array {
         $employees = [];
 
         foreach ($employeeRows as $row) {
             $role = $roles[$row['role']];
+            $rankCode = $this->deriveRankCode($row['role']);
             $employee = Employee::create([
                 'tenant_id' => $tenant->id,
                 'department_id' => $departments[$row['department']]->id,
@@ -228,6 +291,7 @@ class DatabaseSeeder extends Seeder
                 'role_name' => $row['role'],
                 'capacity_role' => $row['capacity'],
                 'capacity_role_id' => $capacityRoles[$row['capacity']]->id,
+                'rank_id' => $ranks[$rankCode]->id,
                 'monthly_salary' => $row['salary'],
                 'workable_hours' => $row['hours'],
                 'status' => $row['status'] ?? 'Active',
@@ -306,6 +370,7 @@ class DatabaseSeeder extends Seeder
             'overhead_percentage' => $settings['overhead_percentage'],
             'buffer_percentage' => $settings['buffer_percentage'],
             'yearly_fixed_cost' => $settings['yearly_fixed_cost'],
+            'annual_initial_budget' => $settings['annual_initial_budget'] ?? 1_000_000_000,
             'employer_tax_percentage' => $settings['employer_tax_percentage'],
             'benefits_percentage' => $settings['benefits_percentage'],
             'cost_to_bill_ratio' => $settings['cost_to_bill_ratio'],
@@ -441,92 +506,12 @@ class DatabaseSeeder extends Seeder
             'created_at' => Carbon::parse($row['expected_close'])->subDays(14),
         ]);
 
-        // Seed demo contract documents for deals in the A-rank (negotiation)
-        // stage so the new contract-AI gate UI has data on first load.
-        // The actual file isn't materialised — only the metadata + analysis
-        // verdict. Re-running the analyser on these rows would 404 because
-        // storage_path is fictional, which is fine for demo purposes.
-        if ($deal->status === 'negotiation') {
-            $this->seedDemoContractDocuments($tenant, $deal, $admin);
-        }
-
         return $deal;
     }
 
-    /**
-     * Demo `deal_contract_documents` rows. Uses a small status rotation
-     * keyed by deal id so different negotiation deals show different AI
-     * verdicts (rejected / pending / failed) across the demo dataset.
-     *
-     * `approved` is intentionally NOT seeded here — in production an
-     * `approved` analysis auto-fires win_deal() so the deal would have
-     * already left `negotiation`. Seeding that combination would model an
-     * impossible state.
-     */
-    private function seedDemoContractDocuments(Tenant $tenant, Deal $deal, User $admin): void
-    {
-        // Pick a status from a deterministic rotation based on the deal's UUID
-        // so re-seeding produces the same demo layout.
-        $bucket = hexdec(substr(str_replace('-', '', $deal->id), 0, 4)) % 3;
-        $scenario = ['rejected', 'pending', 'failed'][$bucket];
-
-        $base = [
-            'tenant_id' => $tenant->id,
-            'deal_id' => $deal->id,
-            'uploaded_by' => $admin->id,
-            'mime_type' => 'application/pdf',
-            'extension' => 'pdf',
-            'storage_path' => sprintf('contract-docs/%s/%s/demo-seed.pdf', $tenant->id, $deal->id),
-        ];
-
-        if ($scenario === 'rejected') {
-            DealContractDocument::create($base + [
-                'original_filename' => Str::slug($deal->client).'-draft-contract.pdf',
-                'size_bytes' => 412_300,
-                'analysis_status' => 'rejected',
-                'analysis_result' => [
-                    'approved' => false,
-                    'missing_fields' => ['payment_terms', 'effective_date'],
-                    'reasoning' => 'Draft contract includes scope and signatures, but no payment schedule or commencement date — both required before this deal can move to Won.',
-                    'required_fields' => ['client_name', 'contract_value', 'payment_terms', 'effective_date', 'signatures', 'scope_of_work'],
-                    'model' => 'claude-3-5-sonnet-latest',
-                ],
-                'analyzed_at' => now()->subDays(2),
-                'created_at' => now()->subDays(2),
-                'updated_at' => now()->subDays(2),
-            ]);
-
-            return;
-        }
-
-        if ($scenario === 'failed') {
-            DealContractDocument::create($base + [
-                'original_filename' => Str::slug($deal->client).'-scanned-contract.pdf',
-                'size_bytes' => 1_240_500,
-                'analysis_status' => 'failed',
-                'analysis_result' => [
-                    'error' => 'Document contained no extractable text.',
-                    'suggestion' => 'The file appears to be image-only (scanned). Re-export as a text-based PDF or DOCX and try again.',
-                ],
-                'analyzed_at' => now()->subHours(20),
-                'created_at' => now()->subHours(20),
-                'updated_at' => now()->subHours(20),
-            ]);
-
-            return;
-        }
-
-        // pending — represents a doc uploaded mid-day, analysis still queued / in flight.
-        DealContractDocument::create($base + [
-            'original_filename' => Str::slug($deal->client).'-signed-contract.pdf',
-            'size_bytes' => 287_900,
-            'analysis_status' => 'pending',
-            'analysis_result' => null,
-            'analyzed_at' => null,
-            'created_at' => now()->subMinutes(5),
-            'updated_at' => now()->subMinutes(5),
-        ]);
-    }
+    // seedDemoContractDocuments + demoRejectedVerdict removed — the
+    // contract-document analysis path retired when AI contract drafting
+    // took over the A→S gate (mark-signed inside the draft wizard).
 
     private function createDelivery(Tenant $tenant, Deal $deal, array $row, array $employees, User $admin): void
     {

@@ -107,6 +107,19 @@ tables:
       - { name: department, type: string }
       - { name: rate, type: decimal }
 
+  - name: ranks
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: name, type: "varchar(100)" }
+      - { name: code, type: "varchar(50)" }
+      - { name: level, type: integer, default: 0 }
+    unique: [tenant_id, code]
+    notes: |
+      Seniority tiers per tenant; seeded defaults Junior(10), Mid(20),
+      Senior(30), Lead(40). Soft-deleted. employees.rank_id is FK
+      ON DELETE SET NULL so dropping a rank doesn't orphan employees.
+
   - name: employees
     key_columns:
       - { name: id, type: UUID PK }
@@ -118,6 +131,7 @@ tables:
       - { name: role_name, type: string }
       - { name: capacity_role, type: string, nullable: true }
       - { name: capacity_role_id, type: UUID, nullable: true, fk: capacity_roles.id }
+      - { name: rank_id, type: UUID, nullable: true, fk: ranks.id, on_delete: SET NULL }
       - { name: monthly_salary, type: decimal }
       - { name: workable_hours, type: integer }
       - { name: cost_per_hour, type: decimal, generated: "monthly_salary / workable_hours" }
@@ -253,6 +267,9 @@ tables:
       - { name: storage_path, type: string }
       - { name: analysis_status, type: string, default: "'pending'" }
       - { name: analysis_result, type: jsonb, nullable: true }
+      - { name: previous_analysis, type: jsonb, nullable: true, notes: "Snapshot of the prior verdict on re-upload, copied forward before the old row is deleted. Drives the diff_vs_previous section of the new verdict." }
+      - { name: overall_score, type: smallint, nullable: true, notes: "Surfaced from analysis_result.overall_score for fast UI access and future filtering. 0-100 weighted by severity (critical=3, required=2, recommended=1)." }
+      - { name: detected_payment_pattern, type: "varchar(40)", nullable: true, notes: "Which billing pattern Claude detected: monthly_recurring · milestone_based · per_phase · one_time · unknown." }
       - { name: analyzed_at, type: timestamp, nullable: true }
 
   - name: estimation_versions
