@@ -413,7 +413,23 @@ class ContractAnalysisService
         $baseUrl = config('services.anthropic.base_url') ?: self::CLAUDE_BASE_URL_DEFAULT;
         $model = config('services.anthropic.model') ?: self::CLAUDE_MODEL_DEFAULT;
 
+        // Timeout + retry tuned for two distinct failure modes:
+        //   1. Proxy outage — "0 bytes received" connection drops. Retry
+        //      catches these when the proxy comes back.
+        //   2. Slow generation — Claude legitimately needs 30-50s to emit
+        //      the 3000-token structured verdict (26 fields × ~100 tokens +
+        //      evidence quotes + dispute risks). Cutting the timeout below
+        //      that aborts successful work.
+        // 90s gives Claude generation room; one retry on ConnectionException
+        // catches the proxy drops without making the user wait 90s twice
+        // for a genuinely-slow-but-working call.
         $response = Http::timeout(90)
+            ->retry(2, 1000, function (\Throwable $exception) {
+                // Retry ONLY on connection failures (proxy drops). Do NOT
+                // retry on actual response timeouts — those mean Claude is
+                // working and we should let it finish on the first attempt.
+                return $exception instanceof \Illuminate\Http\Client\ConnectionException;
+            }, throw: false)
             ->withHeaders([
                 'x-api-key' => $apiKey,
                 'anthropic-version' => '2023-06-01',
@@ -612,9 +628,14 @@ class ContractAnalysisService
      */
     private function heuristicDealMatch(string $haystack, ?Deal $deal): array
     {
+        // Fail-closed: when deal context is missing we CANNOT verify the
+        // upload belongs to this deal, so we must NOT default to is_match=true.
+        // The controller normally always passes the deal, so this branch is
+        // defensive — but it must still respect the same safety rule as the
+        // Claude path's normaliseDealMatch().
         if (! $deal || ! $deal->client) {
             return [
-                'is_match' => true,
+                'is_match' => false,
                 'confidence' => null,
                 'deal_client' => null,
                 'doc_parties' => [],
@@ -624,8 +645,8 @@ class ContractAnalysisService
                     'project_name_match' => 'unknown',
                     'contact_match' => 'unknown',
                 ],
-                'discrepancies' => [],
-                'reasoning' => 'No deal context provided — skipping deal-match check.',
+                'discrepancies' => ['Deal context unavailable — cannot verify the contract belongs to this deal.'],
+                'reasoning' => 'No deal context provided to the keyword-fallback heuristic. Defaulting to NOT-MATCHED for safety; manual review required.',
             ];
         }
 
@@ -811,19 +832,43 @@ class ContractAnalysisService
 
     /**
      * Coerce deal_match into a stable shape so the UI never has to handle
-     * partial / null pieces. is_match defaults to TRUE when the model didn't
-     * report on it — better to over-approve than to block valid uploads
-     * because the AI forgot the section.
+     * partial / null pieces.
+     *
+     * SAFETY RULE — fail-closed on omission.
+     * is_match defaults to FALSE whenever the model omits the section OR
+     * the is_match key is missing/non-bool. The original "default true"
+     * behaviour was an enterprise-safety bug: a malformed / truncated /
+     * jailbroken Claude response that simply didn't return deal_match
+     * would auto-approve, auto-fire win_deal(), and create a Contract +
+     * Project pointing at the wrong customer. Never trust LLM omission.
+     *
+     * The downstream effect when defaulted to false: salesperson sees
+     * the "Wrong contract uploaded" banner with a "manual review needed"
+     * reasoning and re-uploads / contacts ops. Approval is blocked but
+     * data is correct.
      */
     private function normaliseDealMatch(?array $dealMatch): array
     {
-        $isMatch = isset($dealMatch['is_match'])
-            ? (bool) $dealMatch['is_match']
-            : true;
+        $hasIsMatchBool = isset($dealMatch['is_match']) && is_bool($dealMatch['is_match']);
+        $isMatch = $hasIsMatchBool ? (bool) $dealMatch['is_match'] : false;
 
         $confidence = isset($dealMatch['confidence'])
             ? max(0.0, min(1.0, (float) $dealMatch['confidence']))
             : null;
+
+        // When the model omitted is_match (or returned it as null / non-bool),
+        // surface that fact in the reasoning so the UI shows a clear "manual
+        // review needed" message instead of a blank red banner that leaves
+        // the salesperson guessing.
+        $reasoning = $dealMatch['reasoning'] ?? null;
+        if (! $hasIsMatchBool) {
+            $reasoning = 'AI did not return a deal-match decision — defaulting to NOT-MATCHED for safety. Manual review required before this contract can be approved.';
+        }
+
+        $discrepancies = array_values((array) ($dealMatch['discrepancies'] ?? []));
+        if (! $hasIsMatchBool && empty($discrepancies)) {
+            $discrepancies = ['AI response was missing the deal-match block. Treating as a mismatch until a human verifies.'];
+        }
 
         return [
             'is_match' => $isMatch,
@@ -836,8 +881,8 @@ class ContractAnalysisService
                 'project_name_match' => $dealMatch['checks']['project_name_match'] ?? 'unknown',
                 'contact_match' => $dealMatch['checks']['contact_match'] ?? 'unknown',
             ],
-            'discrepancies' => array_values((array) ($dealMatch['discrepancies'] ?? [])),
-            'reasoning' => $dealMatch['reasoning'] ?? null,
+            'discrepancies' => $discrepancies,
+            'reasoning' => $reasoning,
         ];
     }
 
@@ -869,6 +914,7 @@ CRITICAL RULES:
 6. If a field truly doesn't apply (e.g. testing_range on a managed-service contract), set status to `not_applicable` with a brief reasoning.
 7. The agency operates a single contract template — different billing patterns (monthly_recurring · milestone_based · per_phase · one_time) are all valid. Detect which pattern this contract uses and report it in `detected_payment_pattern`.
 8. DEAL MATCH IS NON-NEGOTIABLE. Use the DEAL CONTEXT section to verify the uploaded contract actually belongs to THIS deal. If the contract is for a different customer / different project, set `deal_match.is_match = false` regardless of how well-formed the rest of the contract is — uploading a Customer-B contract onto Deal-A is a mis-routing bug we must catch. Minor variations in legal-entity suffix ("Ltd" vs "Co., Ltd") are fine; entirely different company names are not.
+9. USE HUMAN-READABLE LABELS in any free-text user-facing string (executive_summary, reasoning, suggested_fix, suggested_remediation, dispute_risks[].concern, AND every entry in diff_vs_previous.improvements / regressions / still_missing). NEVER use the snake_case field keys (e.g. "customer_signature", "deal_match", "payment_terms") in those strings. Use the human label from the FIELD CHECKLIST instead — e.g. "Customer signature", "Deal match", "Payment terms". Field keys may ONLY appear in the structured `field` and `critical_failures[]` slots, never in human-facing text. The frontend will display these strings verbatim to non-technical salespeople.
 PROMPT;
     }
 

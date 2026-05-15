@@ -149,7 +149,7 @@ class OrganizationController extends Controller
     public function indexEmployees()
     {
         return EmployeeResource::collection(
-            Employee::with(['department', 'user', 'capacityRole', 'skills'])->orderBy('created_at')->get()
+            Employee::with(['department', 'user', 'capacityRole', 'rank', 'skills'])->orderBy('created_at')->get()
         );
     }
 
@@ -169,6 +169,11 @@ class OrganizationController extends Controller
             'job_role_id'    => 'nullable|uuid|exists:roles,id',
             'capacity_role'  => 'nullable|string|max:50',
             'capacity_role_id' => 'nullable|uuid|exists:capacity_roles,id',
+            'rank_id'        => [
+                'nullable', 'uuid',
+                Rule::exists('ranks', 'id')
+                    ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
+            ],
             'monthly_salary' => 'required|numeric|min:0',
             'workable_hours' => 'required|integer|min:1|max:744',
             'status'         => 'required|in:Active,On Leave,Terminated',
@@ -182,7 +187,8 @@ class OrganizationController extends Controller
         $employee = DB::transaction(function () use ($request, $tenantId) {
             $employee = new Employee($request->only([
                 'name', 'role', 'role_name', 'department_id', 'job_role_id',
-                'capacity_role', 'capacity_role_id', 'monthly_salary', 'workable_hours', 'status',
+                'capacity_role', 'capacity_role_id', 'rank_id',
+                'monthly_salary', 'workable_hours', 'status',
             ]));
             if ($request->filled('id')) {
                 $employee->id = $request->input('id');
@@ -213,7 +219,7 @@ class OrganizationController extends Controller
         });
 
         return new EmployeeResource(
-            $employee->fresh()->load(['department', 'user', 'capacityRole', 'skills'])
+            $employee->fresh()->load(['department', 'user', 'capacityRole', 'rank', 'skills'])
         );
     }
 
@@ -235,6 +241,11 @@ class OrganizationController extends Controller
             'job_role_id'    => 'sometimes|nullable|uuid|exists:roles,id',
             'capacity_role'  => 'sometimes|nullable|string|max:50',
             'capacity_role_id' => 'sometimes|nullable|uuid|exists:capacity_roles,id',
+            'rank_id'        => [
+                'sometimes', 'nullable', 'uuid',
+                Rule::exists('ranks', 'id')
+                    ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
+            ],
             'monthly_salary' => 'sometimes|required|numeric|min:0',
             'workable_hours' => 'sometimes|required|integer|min:1|max:744',
             'status'         => 'sometimes|required|in:Active,On Leave,Terminated',
@@ -251,7 +262,8 @@ class OrganizationController extends Controller
         DB::transaction(function () use ($request, $employee, $linkedUser) {
             $employee->update($request->only([
                 'name', 'role', 'role_name', 'department_id', 'job_role_id',
-                'capacity_role', 'capacity_role_id', 'monthly_salary', 'workable_hours', 'status',
+                'capacity_role', 'capacity_role_id', 'rank_id',
+                'monthly_salary', 'workable_hours', 'status',
             ]));
 
             if ($request->has('skills')) {
@@ -295,7 +307,7 @@ class OrganizationController extends Controller
         });
 
         return new EmployeeResource(
-            $employee->fresh()->load(['department', 'user', 'capacityRole', 'skills'])
+            $employee->fresh()->load(['department', 'user', 'capacityRole', 'rank', 'skills'])
         );
     }
 

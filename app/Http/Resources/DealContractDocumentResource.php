@@ -28,6 +28,15 @@ class DealContractDocumentResource extends JsonResource
             // Claude consumes it to produce diff_vs_previous; the UI can also
             // render a "previous vs current" comparison if/when we add one.
             'previous_analysis' => $this->previous_analysis,
+            // Lightweight deal summary — only included when the parent deal
+            // relationship is eager-loaded. Used by the /contract-reviews
+            // queue table to show "for which deal?" without an extra fetch.
+            'deal' => $this->whenLoaded('deal', fn () => $this->deal ? [
+                'id' => $this->deal->id,
+                'name' => $this->deal->name,
+                'client' => $this->deal->client,
+                'status' => $this->deal->status,
+            ] : null),
             'analyzed_at' => $this->analyzed_at?->toIso8601String(),
             'created_at' => $this->created_at?->toIso8601String(),
             'updated_at' => $this->updated_at?->toIso8601String(),

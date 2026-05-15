@@ -107,6 +107,19 @@ tables:
       - { name: department, type: string }
       - { name: rate, type: decimal }
 
+  - name: ranks
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: name, type: "varchar(100)" }
+      - { name: code, type: "varchar(50)" }
+      - { name: level, type: integer, default: 0 }
+    unique: [tenant_id, code]
+    notes: |
+      Seniority tiers per tenant; seeded defaults Junior(10), Mid(20),
+      Senior(30), Lead(40). Soft-deleted. employees.rank_id is FK
+      ON DELETE SET NULL so dropping a rank doesn't orphan employees.
+
   - name: employees
     key_columns:
       - { name: id, type: UUID PK }
@@ -118,6 +131,7 @@ tables:
       - { name: role_name, type: string }
       - { name: capacity_role, type: string, nullable: true }
       - { name: capacity_role_id, type: UUID, nullable: true, fk: capacity_roles.id }
+      - { name: rank_id, type: UUID, nullable: true, fk: ranks.id, on_delete: SET NULL }
       - { name: monthly_salary, type: decimal }
       - { name: workable_hours, type: integer }
       - { name: cost_per_hour, type: decimal, generated: "monthly_salary / workable_hours" }
