@@ -13,6 +13,7 @@ class CompanySettingResource extends JsonResource
             'overhead_percentage'             => $this->overhead_percentage,
             'buffer_percentage'               => $this->buffer_percentage,
             'yearly_fixed_cost'               => $this->yearly_fixed_cost,
+            'annual_initial_budget'           => $this->annual_initial_budget,
             'employer_tax_percentage'         => $this->employer_tax_percentage,
             'benefits_percentage'             => $this->benefits_percentage,
             'cost_to_bill_ratio'              => $this->cost_to_bill_ratio,

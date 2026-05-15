@@ -371,6 +371,7 @@ class DatabaseSeeder extends Seeder
             'overhead_percentage' => $settings['overhead_percentage'],
             'buffer_percentage' => $settings['buffer_percentage'],
             'yearly_fixed_cost' => $settings['yearly_fixed_cost'],
+            'annual_initial_budget' => $settings['annual_initial_budget'] ?? 1_000_000_000,
             'employer_tax_percentage' => $settings['employer_tax_percentage'],
             'benefits_percentage' => $settings['benefits_percentage'],
             'cost_to_bill_ratio' => $settings['cost_to_bill_ratio'],

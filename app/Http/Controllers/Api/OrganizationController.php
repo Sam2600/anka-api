@@ -448,12 +448,17 @@ class OrganizationController extends Controller
             'overhead_percentage'             => 'required|numeric|min:0|max:100',
             'buffer_percentage'               => 'required|numeric|min:0|max:100',
             'yearly_fixed_cost'               => 'required|numeric|min:0',
+            'annual_initial_budget'           => 'sometimes|numeric|min:0',
             'employer_tax_percentage'         => 'required|numeric|min:0|max:100',
             'benefits_percentage'             => 'required|numeric|min:0|max:100',
             'cost_to_bill_ratio'              => 'sometimes|numeric|min:0|max:1',
             'default_monthly_capacity_hours'  => 'sometimes|integer|min:1|max:744',
             'fallback_hourly_cost'            => 'sometimes|numeric|min:0',
         ]);
+
+        if (! array_key_exists('annual_initial_budget', $validated)) {
+            $validated['annual_initial_budget'] = 1_000_000_000;
+        }
 
         $tenantId = app('tenant_id');
         $settings = CompanySetting::first();
