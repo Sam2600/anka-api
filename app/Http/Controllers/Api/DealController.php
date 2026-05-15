@@ -17,7 +17,10 @@ class DealController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Deal::with(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads']);
+        $query = Deal::with(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads'])
+            ->withExists(['contract_drafts as has_sent_contract_draft' => function ($q) {
+                $q->whereIn('status', ['sent_to_customer', 'signed']);
+            }]);
 
         if ($request->filled('status')) {
             $query->where('status', $request->status);
@@ -107,6 +110,9 @@ class DealController extends Controller
 
     public function show(Deal $deal)
     {
+        $deal->loadExists(['contract_drafts as has_sent_contract_draft' => function ($q) {
+            $q->whereIn('status', ['sent_to_customer', 'signed']);
+        }]);
         return new DealResource($deal->load(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads']));
     }
 

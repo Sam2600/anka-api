@@ -65,6 +65,7 @@ class DealResource extends JsonResource
             'suggested_template_variant' => $this->suggested_template_variant,
             'win_reason' => $this->win_reason,
             'loss_reason' => $this->loss_reason,
+            'has_sent_contract_draft' => (bool) ($this->has_sent_contract_draft ?? false),
             'ghost_roles' => $this->whenLoaded('ghost_roles', fn () => $this->ghost_roles->map(fn ($gr) => [
                 'id' => $gr->id,
                 'role_type' => $gr->role_type,

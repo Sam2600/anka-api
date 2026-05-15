@@ -212,6 +212,11 @@ class Deal extends Model
             && $this->status !== 'lost';
     }
 
+    public function contract_drafts(): \Illuminate\Database\Eloquent\Relations\HasMany
+    {
+        return $this->hasMany(\App\Models\DealContractDraft::class, 'deal_id');
+    }
+
     public function canTransitionTo(string $newStatus): bool
     {
         if ($this->isDropped()) {
