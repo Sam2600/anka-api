@@ -7,7 +7,6 @@ use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ContractController;
 use App\Http\Controllers\Api\ContractTemplateController;
-use App\Http\Controllers\Api\DealContractDocumentController;
 use App\Http\Controllers\Api\DealContractDraftController;
 use App\Http\Controllers\Api\DealController;
 use App\Http\Controllers\Api\EstimationVersionController;
@@ -78,27 +77,11 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         Route::post('/deals/{deal}/drop', [DealController::class, 'drop']);
     });
 
-    // Customer contract documents (uploaded while deal is in Negotiation / A-rank).
-    // Reads with view_crm so a Sales user can see analysis results; writes with
-    // manage_crm because an approved upload auto-fires win_deal().
+    // Rich employee + past-projects context for the AI Team Builder.
+    // view_crm because the data shown (employees + past projects) is
+    // already visible to anyone with CRM-read access via other endpoints.
     Route::middleware('permission:view_crm')->group(function () {
-        Route::get('/deals/{deal}/contract-documents', [DealContractDocumentController::class, 'index']);
-        // Tenant-wide list (chg-010) — feeds the /contract-reviews queue
-        // page. Filters: status, search (deal name / client / filename).
-        Route::get('/contract-documents', [DealContractDocumentController::class, 'indexAll']);
-        Route::get('/contract-documents/{contractDocument}', [DealContractDocumentController::class, 'show']);
-        // Rich employee + past-projects context for the AI Team Builder.
-        // view_crm because the data shown (employees + past projects) is
-        // already visible to anyone with CRM-read access via other endpoints.
         Route::get('/deals/{deal}/ai-team-builder-context', [AiTeamBuilderContextController::class, 'show']);
-    });
-    Route::middleware('permission:manage_crm')->group(function () {
-        Route::post('/deals/{deal}/contract-documents', [DealContractDocumentController::class, 'store']);
-        // Re-run analysis on an existing doc — for recovering from keyword-
-        // fallback verdicts when Claude was unreachable at upload time.
-        // Requires manage_crm because it can trigger auto-win on success.
-        Route::post('/contract-documents/{contractDocument}/reanalyze', [DealContractDocumentController::class, 'reanalyze']);
-        Route::delete('/contract-documents/{contractDocument}', [DealContractDocumentController::class, 'destroy']);
     });
 
     // ── AI Contract Drafting (Project Pipeline ⑤ Contract Generation) ──
