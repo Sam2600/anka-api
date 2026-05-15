@@ -86,6 +86,7 @@ class DealResource extends JsonResource
                 'id' => $er->id,
                 'feature_name' => $er->feature_name,
                 'role_id' => $er->role_id,
+                'employee_id' => $er->employee_id,
                 'hours' => $er->hours,
             ])
             ),
