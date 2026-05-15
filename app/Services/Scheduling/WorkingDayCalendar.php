@@ -109,4 +109,26 @@ class WorkingDayCalendar
 
         return $cursor;
     }
+
+    /**
+     * Inclusive count of working days in the [$start, $end] range. Both ends
+     * are counted if they are themselves working days. Returns 0 when end < start.
+     */
+    public function workingDaysBetween(Carbon $start, Carbon $end, ?string $employeeId = null): int
+    {
+        if ($end->lessThan($start)) {
+            return 0;
+        }
+        $cursor = $start->copy()->startOfDay();
+        $stop   = $end->copy()->startOfDay();
+        $count  = 0;
+        while ($cursor->lessThanOrEqualTo($stop)) {
+            if ($this->isWorkingDay($cursor, $employeeId)) {
+                $count++;
+            }
+            $cursor->addDay();
+        }
+
+        return $count;
+    }
 }

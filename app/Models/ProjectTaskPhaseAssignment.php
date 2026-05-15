@@ -20,6 +20,7 @@ class ProjectTaskPhaseAssignment extends Model
         'phase_name',
         'phase_order',
         'estimated_hours',
+        'start_day_hours',
         'assignee_id',
         'assignment_source',
         'planned_start',
@@ -32,6 +33,7 @@ class ProjectTaskPhaseAssignment extends Model
     protected $casts = [
         'phase_order'     => 'integer',
         'estimated_hours' => 'float',
+        'start_day_hours' => 'float',
         'planned_start'   => 'date',
         'planned_end'     => 'date',
         'actual_start'    => 'date',

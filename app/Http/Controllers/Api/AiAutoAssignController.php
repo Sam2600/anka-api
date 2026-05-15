@@ -2,15 +2,19 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\InvalidAiScheduleException;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\ProjectTaskAssignmentResource;
 use App\Http\Resources\ProjectTaskPhaseAssignmentResource;
 use App\Http\Resources\ProjectTeamAssignmentResource;
 use App\Models\Employee;
+use App\Models\Holiday;
 use App\Models\Project;
 use App\Models\ProjectTaskAssignment;
 use App\Models\ProjectTaskPhaseAssignment;
 use App\Models\ProjectTeamAssignment;
+use App\Services\Scheduling\AiSchedulePayload;
+use App\Services\Scheduling\AiScheduleValidator;
 use App\Services\Scheduling\CalendarFactory;
 use App\Services\Scheduling\WorkingDayCalendar;
 use Illuminate\Http\Request;
@@ -356,6 +360,7 @@ PROMPT;
         $sheet = $this->readEstimateSheet();
         $tasks = $sheet['tasks'];
         $activePhases = $sheet['active_phases'];
+        $rawSheet = $sheet['raw_markdown'] ?? '';
 
         if (empty($tasks)) {
             return response()->json([
@@ -385,75 +390,175 @@ PROMPT;
             ], 422);
         }
 
-        $calendar = $this->buildCalendar($tenantId, $windowStart, $effectiveEnd);
+        $fallbackCalendar = $this->buildCalendar($tenantId, $windowStart, $effectiveEnd);
 
         $apiKey = config('services.anthropic.api_key') ?? env('ANTHROPIC_API_KEY');
 
         if (! $apiKey) {
-            return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $calendar);
+            return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $fallbackCalendar);
         }
+
+        $teamMembers = $teamAssignments->map(fn ($a) => [
+            'id'             => $a->employee_id,
+            'name'           => optional($a->employee)->name,
+            'rank_code'      => optional(optional($a->employee)->rank)->code,
+            'rank_name'      => optional(optional($a->employee)->rank)->name,
+            'capacity_role'  => optional(optional($a->employee)->capacityRole)->code
+                ?? optional($a->employee)->capacity_role,
+            'workable_hours' => optional($a->employee)->workable_hours,
+            'cost_per_hour'  => optional($a->employee)->cost_per_hour,
+        ])->values()->toArray();
+        $teamIds = $teamAssignments->pluck('employee_id')->all();
+
+        $dbHolidays = $this->dbHolidaysForPrompt($tenantId, $windowStart, $effectiveEnd);
+        $prompt = $this->buildAssignTasksPrompt($project, $tasks, $activePhases, $teamMembers, $windowStart, $effectiveEnd, $dbHolidays, $rawSheet);
+
+        $retriesLeft  = (int) config('services.anthropic.schedule_retries', 2);
+        $maxTokens    = (int) config('services.anthropic.schedule_max_tokens', 16384);
+        $model        = config('services.anthropic.schedule_model', 'claude-3-5-sonnet-latest');
+        $conversation = [['role' => 'user', 'content' => $prompt]];
 
         try {
-            $teamMembers = $teamAssignments->map(fn ($a) => [
-                'id'             => $a->employee_id,
-                'name'           => optional($a->employee)->name,
-                'rank_code'      => optional(optional($a->employee)->rank)->code,
-                'rank_name'      => optional(optional($a->employee)->rank)->name,
-                'capacity_role'  => optional(optional($a->employee)->capacityRole)->code
-                    ?? optional($a->employee)->capacity_role,
-                'workable_hours' => optional($a->employee)->workable_hours,
-                'cost_per_hour'  => optional($a->employee)->cost_per_hour,
-            ])->values()->toArray();
+            while (true) {
+                $response = Http::withHeaders([
+                    'x-api-key'         => $apiKey,
+                    'anthropic-version' => '2023-06-01',
+                    'content-type'      => 'application/json',
+                ])->post('https://api.anthropic.com/v1/messages', [
+                    'model'      => $model,
+                    'max_tokens' => $maxTokens,
+                    'system'     => 'You are an experienced IT delivery manager scheduling feature work across engineers. Return ONLY a JSON object matching the schema in the user message — no markdown fences, no commentary.',
+                    'messages'   => $conversation,
+                ]);
 
-            $prompt = $this->buildAssignTasksPrompt($project, $tasks, $activePhases, $teamMembers, $windowStart, $effectiveEnd);
+                $body = $response->json();
+                $text = trim($body['content'][0]['text'] ?? '');
 
-            $response = Http::withHeaders([
-                'x-api-key'         => $apiKey,
-                'anthropic-version' => '2023-06-01',
-                'content-type'      => 'application/json',
-            ])->post('https://api.anthropic.com/v1/messages', [
-                'model'      => 'claude-3-5-sonnet-latest',
-                'max_tokens' => 8192,
-                'system'     => 'You are an experienced IT delivery manager assigning feature work to engineers. Return ONLY a JSON array — no markdown, no explanation.',
-                'messages'   => [
-                    ['role' => 'user', 'content' => $prompt],
-                ],
-            ]);
+                try {
+                    $payload = AiSchedulePayload::fromRaw($text);
+                } catch (InvalidAiScheduleException $e) {
+                    Log::error('AI Schedule: unparseable payload, falling back', [
+                        'error'   => $e->getMessage(),
+                        'preview' => substr($text, 0, 300),
+                    ]);
 
-            $body = $response->json();
-            $text = trim($body['content'][0]['text'] ?? '');
-            if (str_starts_with($text, '```')) {
-                $text = preg_replace('/^```(?:json)?\s*/i', '', $text);
-                $text = preg_replace('/\s*```$/', '', $text);
-            }
-
-            $aiAssignments = json_decode($text, true);
-            if (! is_array($aiAssignments)) {
-                Log::error('AI AssignTasks: invalid JSON, falling back to demo', ['text' => substr($text, 0, 300)]);
-
-                return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $calendar);
-            }
-
-            $assigneeByRowPhase = [];
-            $validTeamIds = $teamAssignments->pluck('employee_id')->all();
-            foreach ($aiAssignments as $item) {
-                if (! isset($item['row_no'], $item['phase_code'], $item['assignee_id'])) {
-                    continue;
+                    return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $fallbackCalendar);
                 }
-                if (! in_array($item['assignee_id'], $validTeamIds, true)) {
-                    continue;
+
+                $calendar   = $this->buildCalendarFromAi($payload, $tenantId, $windowStart, $effectiveEnd);
+                $violations = (new AiScheduleValidator)->validate($payload, $tasks, $teamIds, $calendar, $windowStart, $effectiveEnd);
+
+                if (empty($violations)) {
+                    return $this->persistAiAssignments($project, $tasks, $payload, $tenantId, $windowStart, $effectiveEnd, $calendar);
                 }
-                $assigneeByRowPhase[(int) $item['row_no']][(string) $item['phase_code']] = $item['assignee_id'];
+
+                if ($retriesLeft <= 0) {
+                    Log::warning('AI Schedule: exhausted retries, falling back', [
+                        'violation_count' => count($violations),
+                        'first_violation' => $violations[0]['code'] ?? null,
+                    ]);
+
+                    return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $fallbackCalendar);
+                }
+
+                $conversation[] = ['role' => 'assistant', 'content' => $text];
+                $conversation[] = ['role' => 'user', 'content' => $this->buildRetryPrompt($violations)];
+                $retriesLeft--;
             }
-
-            $assignments = $this->computePlannedDates($tasks, $assigneeByRowPhase, $windowStart, $effectiveEnd, $calendar);
-
-            return $this->persistTaskAssignments($project, $tasks, $assignments, $tenantId);
         } catch (\Exception $e) {
-            Log::error('AI AssignTasks error, falling back to demo', ['message' => $e->getMessage()]);
+            Log::error('AI Schedule: exception, falling back to demo', ['message' => $e->getMessage()]);
 
-            return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $calendar);
+            return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $fallbackCalendar);
         }
+    }
+
+    /**
+     * Merge DB holidays (the source of truth) with any extra calendar entries
+     * Claude proposed in its response. AI can only ADD blocks — never remove
+     * a DB-confirmed closure.
+     */
+    private function buildCalendarFromAi(AiSchedulePayload $payload, string $tenantId, Carbon $windowStart, Carbon $effectiveEnd): WorkingDayCalendar
+    {
+        $calendar = CalendarFactory::forTenant($tenantId, $windowStart, $effectiveEnd);
+
+        foreach ($payload->recurringHolidays as $entry) {
+            $calendar->blockRecurringMonthDay($entry['month'], $entry['day']);
+        }
+        foreach ($payload->blockedDates as $entry) {
+            $calendar->blockGlobalDate($entry['date']);
+        }
+
+        return $calendar;
+    }
+
+    /**
+     * Snapshot of DB-stored holidays used to prime Claude — so AI knows which
+     * dates are already on the books and only needs to contribute extras it
+     * knows about (national holidays absent from the table, project-specific
+     * closures, etc.).
+     */
+    private function dbHolidaysForPrompt(string $tenantId, Carbon $windowStart, Carbon $effectiveEnd): array
+    {
+        return Holiday::where('tenant_id', $tenantId)
+            ->where(function ($q) use ($windowStart, $effectiveEnd) {
+                $q->whereBetween('date', [$windowStart->toDateString(), $effectiveEnd->toDateString()])
+                    ->orWhere('is_recurring', true);
+            })
+            ->get()
+            ->map(fn (Holiday $h) => [
+                'date'         => $h->date?->toDateString(),
+                'name'         => $h->name,
+                'is_recurring' => (bool) $h->is_recurring,
+            ])
+            ->values()
+            ->toArray();
+    }
+
+    /**
+     * Take Claude's assignee picks and compute dates deterministically via
+     * computePlannedDates() — hour-packing applies uniformly to both AI and
+     * demo paths. Claude's planned_start/planned_end are intentionally ignored
+     * here; they're still validated against the schema by AiScheduleValidator
+     * (for assignee-rule + window checks) but the dates we actually persist
+     * come from the deterministic scheduler.
+     */
+    private function persistAiAssignments(
+        Project $project,
+        array $tasks,
+        AiSchedulePayload $payload,
+        string $tenantId,
+        Carbon $windowStart,
+        Carbon $effectiveEnd,
+        WorkingDayCalendar $calendar
+    ) {
+        $assigneeByRowPhase = [];
+        foreach ($payload->assignmentsByRowPhase as $rowNo => $byPhase) {
+            foreach ($byPhase as $phaseCode => $entry) {
+                $assigneeByRowPhase[$rowNo][$phaseCode] = $entry['assignee_id'];
+            }
+        }
+
+        $assignments = $this->computePlannedDates($tasks, $assigneeByRowPhase, $windowStart, $effectiveEnd, $calendar);
+
+        return $this->persistTaskAssignments($project, $tasks, $assignments, $tenantId);
+    }
+
+    /**
+     * Build the corrective follow-up sent back to Claude after validation fails.
+     * Lists violations with their codes/context so AI can target the exact
+     * issues. Asks for the full corrected JSON in the same schema — easier for
+     * AI to produce than a diff and easier for us to re-validate.
+     */
+    private function buildRetryPrompt(array $violations): string
+    {
+        $lines = ["Your previous response failed validation. Fix the following ".count($violations)." problem(s) and resend the COMPLETE corrected JSON object in the same schema:\n"];
+        foreach ($violations as $i => $v) {
+            $idx = $i + 1;
+            $lines[] = "{$idx}. [{$v['code']}] {$v['message']}";
+        }
+        $lines[] = "\nReturn ONLY the corrected JSON object. No markdown fences, no explanation, no commentary.";
+
+        return implode("\n", $lines);
     }
 
     /**
@@ -467,15 +572,26 @@ PROMPT;
     }
 
     /**
-     * Compute planned_start / planned_end for every (task, phase) pair using
-     * two cursors: a per-task cursor (so phases within a task run sequentially)
-     * and a per-assignee cursor (so a single engineer's tasks queue up — they
-     * can't be in two places on the same day).
+     * Hour-packed scheduler. Each phase consumes from its assignee's daily
+     * 8-hour budget. Phases that fit today's remaining budget land atomically
+     * on a single day; phases that don't fit split across days (today gets the
+     * remainder, full middle days = 8h, last day = remainder of remainder).
      *
-     * Duration = ceil(hours / WORKDAY_HOURS) WORKING days. The calendar handles
-     * weekends, public holidays, and (future phases) per-employee leave —
-     * cursors advance via calendar->addWorkingDays() so planned dates never
-     * land on a non-working day.
+     * Cursor model:
+     *  - Task cursor (per task)        — DATE ONLY. Phase N+1's planned_start
+     *    must be >= phase N's planned_end. We don't track task-level hours
+     *    because different assignees of the same task use their own day budgets
+     *    independently.
+     *  - Assignee cursor (per engineer) — { date, hours_used_on_date }. When an
+     *    engineer's next phase lands on the same day their cursor is parked on,
+     *    that day's remaining budget = 8 − hours_used_on_date.
+     *
+     * Each entry in the returned [row_no][phase_code] map carries:
+     *  - assignee_id
+     *  - planned_start, planned_end (ISO date strings)
+     *  - start_day_hours (hours allocated to planned_start specifically — used
+     *    by VarianceCalculator to reconstruct the per-day plan for multi-day
+     *    phases without storing a per-day child table).
      */
     private function computePlannedDates(
         array $tasks,
@@ -484,18 +600,20 @@ PROMPT;
         Carbon $effectiveEnd,
         WorkingDayCalendar $calendar
     ): array {
-        // Schedule tasks in row_no order for deterministic output.
         $orderedTasks = $tasks;
         usort($orderedTasks, fn ($a, $b) => $a['row_no'] <=> $b['row_no']);
 
         $result = [];
-        $assigneeCursors = []; // employee_id => Carbon (their next free working day)
+        /** @var array<string, array{date: Carbon, hours_used: float}> */
+        $assigneeCursors = [];
+        $epsilon      = 0.001;
+        $workdayHours = (float) self::WORKDAY_HOURS;
 
         foreach ($orderedTasks as $t) {
             $phases = $t['phases'];
             usort($phases, fn ($a, $b) => $a['order'] <=> $b['order']);
 
-            $taskCursor = $windowStart->copy();
+            $taskCursorDate = $windowStart->copy();
 
             foreach ($phases as $phase) {
                 $assigneeId = $assigneeByRowPhase[$t['row_no']][$phase['code']] ?? null;
@@ -503,33 +621,95 @@ PROMPT;
                     continue;
                 }
 
-                $assigneeCursor = $assigneeCursors[$assigneeId] ?? $windowStart->copy();
-                $rawStart = $taskCursor->greaterThan($assigneeCursor) ? $taskCursor : $assigneeCursor;
-                $start = $calendar->nextWorkingDay($rawStart, $assigneeId);
-                if ($start->greaterThan($effectiveEnd)) {
-                    $start = $effectiveEnd->copy();
+                $hours = max(0.0, (float) $phase['hours']);
+
+                $assigneeCursor = $assigneeCursors[$assigneeId] ?? [
+                    'date'       => $windowStart->copy(),
+                    'hours_used' => 0.0,
+                ];
+
+                $rawDate = $taskCursorDate->greaterThan($assigneeCursor['date'])
+                    ? $taskCursorDate->copy()
+                    : $assigneeCursor['date']->copy();
+                $candidate = $calendar->nextWorkingDay($rawDate, $assigneeId);
+                if ($candidate->greaterThan($effectiveEnd)) {
+                    $candidate = $effectiveEnd->copy();
                 }
 
-                $hours     = max(0.0, (float) $phase['hours']);
-                $sliceDays = max(1, (int) ceil($hours / self::WORKDAY_HOURS));
-
-                $end = $calendar->addWorkingDays($start, $sliceDays - 1, $assigneeId);
-                if ($end->greaterThan($effectiveEnd)) {
-                    $end = $effectiveEnd->copy();
+                // Skip past days the assignee has fully booked (cursor parked
+                // on a day with hours_used == 8 after a previous placement).
+                $safety = 0;
+                while ($safety++ < 365) {
+                    $assigneeUsedToday = $candidate->equalTo($assigneeCursor['date'])
+                        ? $assigneeCursor['hours_used']
+                        : 0.0;
+                    if ($workdayHours - $assigneeUsedToday > $epsilon) {
+                        break;
+                    }
+                    $next = $calendar->nextWorkingDay($candidate->copy()->addDay(), $assigneeId);
+                    if ($next->greaterThan($effectiveEnd)) {
+                        $candidate = $effectiveEnd->copy();
+                        break;
+                    }
+                    $candidate = $next;
                 }
+
+                $assigneeUsedToday = $candidate->equalTo($assigneeCursor['date'])
+                    ? $assigneeCursor['hours_used']
+                    : 0.0;
+                $remainingToday = max(0.0, $workdayHours - $assigneeUsedToday);
+
+                if ($hours <= $remainingToday + $epsilon || $hours <= $epsilon) {
+                    // Atomic same-day placement — fits in today's budget.
+                    $start                = $candidate->copy();
+                    $end                  = $candidate->copy();
+                    $startDayHours        = $hours;
+                    $newAssigneeHoursUsed = $assigneeUsedToday + $hours;
+                } else {
+                    // Split across days. Day 1 gets today's remainder; the rest
+                    // spills across full 8h middle days plus a remainder on
+                    // the last day.
+                    $start         = $candidate->copy();
+                    $startDayHours = $remainingToday;
+
+                    $leftover       = $hours - $remainingToday;
+                    $fullMiddleDays = (int) floor(($leftover + $epsilon) / $workdayHours);
+                    $lastDayHours   = $leftover - ($fullMiddleDays * $workdayHours);
+                    if ($lastDayHours <= $epsilon) {
+                        $lastDayHours = 0.0;
+                    }
+
+                    $extraDays = $fullMiddleDays + ($lastDayHours > 0 ? 1 : 0);
+                    $end = $extraDays > 0
+                        ? $calendar->addWorkingDays($start, $extraDays, $assigneeId)
+                        : $start->copy();
+
+                    if ($end->greaterThan($effectiveEnd)) {
+                        $end = $effectiveEnd->copy();
+                    }
+
+                    // If the last day is a "full" day (remainder absorbed into
+                    // middle days), mark cursor as fully used so the next phase
+                    // rolls to the day after.
+                    $newAssigneeHoursUsed = $lastDayHours > 0 ? $lastDayHours : $workdayHours;
+                }
+
                 if ($end->lessThan($start)) {
                     $end = $start->copy();
                 }
 
                 $result[$t['row_no']][$phase['code']] = [
-                    'assignee_id'   => $assigneeId,
-                    'planned_start' => $start->toDateString(),
-                    'planned_end'   => $end->toDateString(),
+                    'assignee_id'     => $assigneeId,
+                    'planned_start'   => $start->toDateString(),
+                    'planned_end'     => $end->toDateString(),
+                    'start_day_hours' => round($startDayHours, 2),
                 ];
 
-                $next = $calendar->addWorkingDays($end, 1, $assigneeId);
-                $taskCursor                   = $next->copy();
-                $assigneeCursors[$assigneeId] = $next;
+                $assigneeCursors[$assigneeId] = [
+                    'date'       => $end->copy(),
+                    'hours_used' => $newAssigneeHoursUsed,
+                ];
+                $taskCursorDate = $end->copy();
             }
         }
 
@@ -583,20 +763,22 @@ PROMPT;
         if (! file_exists($path)) {
             Log::error('Estimate.xlsx not found at '.$path);
 
-            return ['tasks' => [], 'active_phases' => []];
+            return ['tasks' => [], 'active_phases' => [], 'raw_markdown' => ''];
         }
 
         $spreadsheet = IOFactory::load($path);
         if (! in_array('Web_Manhour_Detail', $spreadsheet->getSheetNames(), true)) {
             Log::error('Web_Manhour_Detail sheet not found in Estimate.xlsx');
 
-            return ['tasks' => [], 'active_phases' => []];
+            return ['tasks' => [], 'active_phases' => [], 'raw_markdown' => ''];
         }
 
         $sheet = $spreadsheet->getSheetByName('Web_Manhour_Detail');
         $tasks = [];
         $rowNo = 0;
         $activePhaseCodes = [];
+
+        $rawMarkdown = $this->renderSheetAsMarkdown($sheet);
 
         // Data rows start at row 5; we read A:AE (cols 1..31).
         // A=機能ID, B=機能名称, C=Status, AE=Total(h). Per-phase hour columns: see PHASE_DEFS.
@@ -666,7 +848,75 @@ PROMPT;
             }
         }
 
-        return ['tasks' => $tasks, 'active_phases' => $activePhases];
+        return ['tasks' => $tasks, 'active_phases' => $activePhases, 'raw_markdown' => $rawMarkdown];
+    }
+
+    /**
+     * Render the Web_Manhour_Detail sheet (cols A..AE) as a markdown table so
+     * Claude can read the source xlsx directly — not just our parsed JSON
+     * summary. Row 1 becomes the header; data starts at row 5 (rows 2-4 are
+     * sub-headers/spacers we skip). Capped at 150 data rows to bound prompt size.
+     */
+    private function renderSheetAsMarkdown(\PhpOffice\PhpSpreadsheet\Worksheet\Worksheet $sheet, int $maxDataRows = 150): string
+    {
+        $highestRow = $sheet->getHighestRow();
+        if ($highestRow < 1) {
+            return '';
+        }
+
+        $headerCells = $sheet->rangeToArray('A1:AE1', null, true, false)[0] ?? [];
+        $headers = array_map(
+            fn ($c) => $this->mdEscape($c),
+            $headerCells,
+        );
+        // Default placeholder for empty header cells so the table stays well-formed.
+        $headers = array_map(fn ($h, $i) => $h !== '' ? $h : 'Col'.($i + 1), $headers, array_keys($headers));
+
+        $lines   = [];
+        $lines[] = '| '.implode(' | ', $headers).' |';
+        $lines[] = '|'.str_repeat(' --- |', count($headers));
+
+        $dataStart = 5;
+        $dataEnd   = min($highestRow, $dataStart + $maxDataRows - 1);
+        $included  = 0;
+        $skipped   = 0;
+
+        for ($r = $dataStart; $r <= $dataEnd; $r++) {
+            $cells = $sheet->rangeToArray('A'.$r.':AE'.$r, null, true, false)[0] ?? [];
+            // Skip fully-empty rows so the table doesn't fill with noise.
+            $isEmpty = true;
+            foreach ($cells as $c) {
+                if ($c !== null && $c !== '') {
+                    $isEmpty = false;
+                    break;
+                }
+            }
+            if ($isEmpty) {
+                $skipped++;
+                continue;
+            }
+            $lines[] = '| '.implode(' | ', array_map(fn ($c) => $this->mdEscape($c), $cells)).' |';
+            $included++;
+        }
+
+        if ($highestRow > $dataEnd) {
+            $remaining = $highestRow - $dataEnd;
+            $lines[] = "_… {$remaining} more row(s) truncated to keep prompt size bounded; the PARSED TASKS JSON below contains every non-empty row._";
+        }
+
+        return implode("\n", $lines);
+    }
+
+    private function mdEscape($value): string
+    {
+        if ($value === null) {
+            return '';
+        }
+        $s = is_string($value) ? $value : (string) $value;
+        // Pipes break markdown table cells; newlines collapse rows.
+        $s = str_replace(['|', "\r\n", "\n", "\r"], ['\\|', ' ', ' ', ' '], $s);
+
+        return trim($s);
     }
 
     private function buildAssignTasksPrompt(
@@ -675,7 +925,9 @@ PROMPT;
         array $activePhases,
         array $teamMembers,
         Carbon $windowStart,
-        Carbon $effectiveEnd
+        Carbon $effectiveEnd,
+        array $dbHolidays = [],
+        string $rawSheet = ''
     ): string {
         $projectName = $project->name;
         $client      = $project->client ?? 'N/A';
@@ -683,26 +935,71 @@ PROMPT;
         $endStr      = $effectiveEnd->toDateString();
         $buffer      = self::PROJECT_END_BUFFER_DAYS;
         $rawEnd      = $project->effectiveEndDate()->toDateString();
+        $defaultHpd  = self::WORKDAY_HOURS;
+        $teamSize    = count($teamMembers);
+
+        $rawSheetBlock = $rawSheet !== ''
+            ? "RAW SHEET CONTENT (your direct view of Estimate.xlsx, sheet `Web_Manhour_Detail` — sanity-check the PARSED TASKS array below against this. If you notice something the parse missed, prefer what's in the sheet):\n\n".$rawSheet."\n\n"
+            : '';
 
         return "Project: {$projectName}\n".
             "Client: {$client}\n".
             "Project window: {$startStr} → {$rawEnd} (raw end). All work must finish on or before {$endStr} ({$buffer}-day buffer before the raw end).\n\n".
             "ACTIVE PHASES (phases that have estimated hours in this project):\n".
             $this->jsonEncode($activePhases)."\n\n".
-            "TEAM MEMBERS (existing project team — assign only from this list):\n".
+            "TEAM MEMBERS (existing project team — assign only from this list. Team size: {$teamSize}):\n".
             $this->jsonEncode($teamMembers)."\n\n".
-            "TASKS (one entry per function; phases array carries per-phase estimated hours):\n".
+            $rawSheetBlock.
+            "PARSED TASKS (extracted from the sheet above; phases array carries per-phase estimated hours and ordering):\n".
             $this->jsonEncode($tasks)."\n\n".
-            "Your job is to pick the BEST team member for every (task, phase) pair. You do NOT need to set dates — the backend will schedule them automatically using a sequential queue (each engineer's tasks run back-to-back, each phase consumes ceil(hours/".self::WORKDAY_HOURS.") calendar days, phases within a task run head-to-tail in this order: 要件定義 → 基本全体設計 → 基本設計 → 詳細設計 → Development → 単体テスト → 結合テスト → 総合テスト — design comes before development because you can't code without a detail spec).\n\n".
-            "Instructions:\n".
-            "- Act as an experienced IT delivery manager.\n".
-            "- For EACH task and for EACH phase that appears in that task's phases array, return ONE entry: {row_no, phase_code, assignee_id}.\n".
-            "- ASSIGNEE rules:\n".
-            "  * DESIGN phases (phase_code in {requirement, system_arch, basic_doc, detail_doc}): ALWAYS pick a member whose rank_code is 'Lead'. Fallback: Senior → Mid → any.\n".
-            "  * EXECUTION phases (phase_code in {development, unit_test, combine_test, system_test}): map by the TASK's difficulty — 簡単→'Junior', 普通→'Mid', 難しい→'Senior'. Fallback chain: 簡単→Mid→Senior→Lead, 普通→Senior→Junior→Lead, 難しい→Lead→Mid→Junior.\n".
-            "  * SPREAD WORKLOAD AGGRESSIVELY across qualifying members. Each phase you assign to a person extends their personal schedule by ceil(hours/".self::WORKDAY_HOURS.") days — piling work on one engineer pushes their later tasks far into the future and risks blowing past {$endStr}. If two Seniors qualify, alternate between them.\n".
-            "- Return ONLY a JSON array of objects: [{\"row_no\": <int>, \"phase_code\": \"<string>\", \"assignee_id\": \"<uuid from TEAM MEMBERS>\"}, ...].\n".
-            "- One entry per (row_no × phase). Do not include phases that are not in the task's phases array. No markdown, no extra keys, no dates.";
+            "DB-CONFIRMED HOLIDAYS (always non-working — your `calendar` field can ADD more but cannot remove these):\n".
+            $this->jsonEncode($dbHolidays)."\n\n".
+            "You are the delivery manager. Schedule EVERY (task, phase) pair: pick the right person, pick the planned_start and planned_end dates, and tell us about any holidays or capacity constraints we should know about.\n\n".
+            "OUTPUT SCHEMA — return ONLY this JSON object (no markdown fences, no commentary, no extra keys):\n".
+            "{\n".
+            "  \"calendar\": {\n".
+            "    \"skip_weekends\": true,\n".
+            "    \"recurring_holidays\": [{\"month\": 1, \"day\": 1, \"reason\": \"New Year\"}],\n".
+            "    \"blocked_dates\":      [{\"date\": \"YYYY-MM-DD\", \"reason\": \"Memorial Day\"}]\n".
+            "  },\n".
+            "  \"capacity\": [\n".
+            "    {\"employee_id\": \"<uuid>\", \"hours_per_day\": 4, \"reason\": \"shared with Project Y\"}\n".
+            "  ],\n".
+            "  \"assignments\": [\n".
+            "    {\"row_no\": <int>, \"phase_code\": \"<string>\", \"assignee_id\": \"<uuid from TEAM MEMBERS>\",\n".
+            "     \"planned_start\": \"YYYY-MM-DD\", \"planned_end\": \"YYYY-MM-DD\"}\n".
+            "  ]\n".
+            "}\n\n".
+            "ASSIGNEE RULES (who):\n".
+            "- DESIGN phases (phase_code in {requirement, system_arch, basic_doc, detail_doc}): pick rank_code='Lead'. Fallback: Senior → Mid → any.\n".
+            "- EXECUTION phases (phase_code in {development, unit_test, combine_test, system_test}): map by the TASK's difficulty — 簡単→'Junior', 普通→'Mid', 難しい→'Senior'. Fallback chain: 簡単→Mid→Senior→Lead, 普通→Senior→Junior→Lead, 難しい→Lead→Mid→Junior.\n".
+            "- When multiple team members qualify for a phase, rotate through them — don't pile everything on one person.\n\n".
+            "PARALLELISM REQUIREMENT — CRITICAL:\n".
+            "- The team has {$teamSize} engineers. On most working days in the project window, MULTIPLE engineers should have active work simultaneously. A schedule where only 1 person is active on most days is a FAILURE.\n".
+            "- Different TASKS are INDEPENDENT — they can (and should) run in parallel across different engineers.\n".
+            "- WITHIN a single task, phases run sequentially (requirement → ... → system_test) because each phase depends on the previous one.\n".
+            "- ACROSS tasks, hand off as soon as a phase completes — DO NOT wait for all design to finish before any development starts. Example: while Lead Alice is doing Task 5's detail_doc, Dev Bob should already be developing Task 1 (whose detail_doc finished earlier), Dev Carol should be unit-testing Task 2, etc.\n".
+            "- Anti-pattern to AVOID: serializing all design phases of all tasks on the Lead before any execution work begins. Instead, after the Lead finishes Task 1's detail_doc, Task 1 immediately enters Development (different person) while the Lead moves to Task 2's requirement.\n".
+            "- Concretely: pick mid-window date {$startStr} + (window_days / 2). On that date, ideally at least min({$teamSize}, count_of_in_flight_tasks) engineers should have a phase that overlaps that date. If you find your schedule has fewer, you're serializing too much — interleave tasks.\n\n".
+            "DATE RULES (when):\n".
+            "- All planned_start and planned_end values MUST fall within [{$startStr}, {$endStr}] inclusive.\n".
+            "- Default capacity is {$defaultHpd} hours per day per engineer. Use the `capacity` array to override an individual when you have a reason (e.g. shared with another project).\n".
+            "- For each phase, planned_end − planned_start should give approximately ceil(estimated_hours / hours_per_day) WORKING days (weekends + holidays excluded). The backend tolerates ±50% but stay close to the estimate.\n".
+            "- Within a single task, phases run head-to-tail in `order` ascending: 要件定義(1) → 基本全体設計(2) → 基本設計(3) → 詳細設計(4) → Development(5) → 単体テスト(6) → 結合テスト(7) → 総合テスト(8). A phase's planned_start must be ≥ the previous phase's planned_start in the same task.\n".
+            "- A single assignee cannot have overlapping date ranges across phases. If Sam owns row 1 phase A from May 15..18, Sam's next phase (any task) must start May 19 or later.\n".
+            "- planned_start and planned_end must both be working days (skip Saturdays, Sundays, and any blocked date listed in DB-CONFIRMED HOLIDAYS or in the `calendar` you return).\n\n".
+            "CALENDAR FIELD:\n".
+            "- `recurring_holidays`: month/day entries that repeat every year (e.g. New Year, national days). The DB list above is the existing set — only add holidays that AREN'T already covered.\n".
+            "- `blocked_dates`: one-off ISO dates (national observances tied to a specific year, client closures, etc.). Reason is optional but helpful.\n".
+            "- Leave the arrays empty if you have nothing to add. Never remove or override DB-confirmed holidays.\n\n".
+            "CAPACITY FIELD:\n".
+            "- Optional. Include an entry only when you intentionally want hours_per_day < {$defaultHpd} for someone (or > if surge capacity makes sense). Otherwise omit them and they default to {$defaultHpd}.\n\n".
+            "Final reminders:\n".
+            "- Every (row_no × phase_code) appearing in PARSED TASKS must appear in `assignments`. No duplicates.\n".
+            "- assignee_id must be one of the uuids in TEAM MEMBERS.\n".
+            "- All dates ISO format `YYYY-MM-DD`.\n".
+            "- Maximize parallelism — multiple engineers active on most working days.\n".
+            "- Return ONLY the JSON object — no prose, no fences.";
     }
 
     private function persistTaskAssignments(Project $project, array $tasks, array $assignments, string $tenantId)
@@ -731,9 +1028,10 @@ PROMPT;
                         'phase_name'         => $phase['name'],
                         'phase_order'        => $phase['order'],
                         'estimated_hours'    => $phase['hours'],
-                        'assignee_id'        => is_array($entry) ? ($entry['assignee_id']   ?? null) : $entry,
-                        'planned_start'      => is_array($entry) ? ($entry['planned_start'] ?? null) : null,
-                        'planned_end'        => is_array($entry) ? ($entry['planned_end']   ?? null) : null,
+                        'start_day_hours'    => is_array($entry) ? ($entry['start_day_hours'] ?? null) : null,
+                        'assignee_id'        => is_array($entry) ? ($entry['assignee_id']     ?? null) : $entry,
+                        'planned_start'      => is_array($entry) ? ($entry['planned_start']   ?? null) : null,
+                        'planned_end'        => is_array($entry) ? ($entry['planned_end']     ?? null) : null,
                         'assignment_source'  => 'ai',
                         'status'             => '未着手',
                     ]);

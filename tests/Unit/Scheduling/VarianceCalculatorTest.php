@@ -89,8 +89,11 @@ class VarianceCalculatorTest extends TestCase
 
         $this->assertSame('completed_early', $r['schedule_state']);
         $this->assertEqualsWithDelta(1.0, $r['variance_hours'], 0.01);
-        // |+1| / 8 = 12.5% → slipping bucket (positive but >10% — semantically "very early")
-        $this->assertSame('slipping', $r['health']);
+        // Positive variance = ahead of plan. PMs don't need a warning badge for
+        // delivering more than planned, so health stays on_track regardless of
+        // magnitude. (Previously this was 'slipping' because the classifier used
+        // abs(variance) — fixed in the asymmetric-health change.)
+        $this->assertSame('on_track', $r['health']);
     }
 
     public function test_pattern_1_4_recovery_eats_today(): void
@@ -166,6 +169,56 @@ class VarianceCalculatorTest extends TestCase
 
         $this->assertEqualsWithDelta(0.0, $rollup['variance_hours'], 0.01);
         $this->assertSame('on_track', $rollup['health']);
+    }
+
+    public function test_multi_day_phase_uses_start_day_hours_for_today_line(): void
+    {
+        // 17h phase split across Tue 2h + Wed 8h + Thu 7h (matches Pattern D
+        // canonical scenario for T3 development). At EOD Wed, expected
+        // progress should be 2 + 8 = 10h — NOT the old linear (2/3)*17 = 11.33h.
+        $phase = $this->makePhase([
+            'estimated_hours' => 17,
+            'start_day_hours' => 2,
+            'planned_start'   => '2026-06-02', // Tue
+            'planned_end'     => '2026-06-04', // Thu
+        ]);
+
+        // As-of Tue (day 1) → expected = start_day_hours = 2h.
+        $rTue = $this->calc('2026-06-02')->forPhase($phase);
+        $this->assertEqualsWithDelta(2.0, $rTue['expected_progress_hours'], 0.01);
+
+        // As-of Wed (day 2 of 3) → expected = 2 + 8 = 10h.
+        $rWed = $this->calc('2026-06-03')->forPhase($phase);
+        $this->assertEqualsWithDelta(10.0, $rWed['expected_progress_hours'], 0.01);
+
+        // As-of Thu (planned_end) → expected = 17h.
+        $rThu = $this->calc('2026-06-04')->forPhase($phase);
+        $this->assertEqualsWithDelta(17.0, $rThu['expected_progress_hours'], 0.01);
+    }
+
+    public function test_legacy_phase_with_null_start_day_hours_remains_back_compatible(): void
+    {
+        // A single-day legacy row from before the hour-packing change.
+        // start_day_hours is NULL — the reconstruction must still produce the
+        // same expected_progress as the old linear-prorating code did:
+        //   asOf < planned_start  → 0
+        //   asOf >= planned_end   → estimated
+        $phase = $this->makePhase(
+            [
+                'estimated_hours' => 8,
+                'planned_start'   => '2026-05-15',
+                'planned_end'     => '2026-05-15',
+                // start_day_hours intentionally omitted → NULL
+            ],
+            [['progress_hours' => 8, 'used_hours' => 8]],
+        );
+        $phase->actual_end = '2026-05-15';
+
+        $r = $this->calc('2026-05-15')->forPhase($phase);
+
+        // Single-day, asOf == planned_end → expected = estimated.
+        $this->assertEqualsWithDelta(8.0, $r['expected_progress_hours'], 0.01);
+        $this->assertSame('completed_on_time', $r['schedule_state']);
     }
 
     public function test_pattern_1_6_cross_developer_offset(): void

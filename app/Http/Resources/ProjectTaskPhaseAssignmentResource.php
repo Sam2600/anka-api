@@ -16,6 +16,7 @@ class ProjectTaskPhaseAssignmentResource extends JsonResource
             'phase_name'         => $this->phase_name,
             'phase_order'        => $this->phase_order,
             'estimated_hours'    => $this->estimated_hours,
+            'start_day_hours'    => $this->start_day_hours !== null ? (float) $this->start_day_hours : null,
             'assignee_id'        => $this->assignee_id,
             'assignee_name'      => optional($this->assignee)->name,
             'assignee_rank_id'   => optional($this->assignee)->rank_id,

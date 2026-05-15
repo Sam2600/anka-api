@@ -21,6 +21,9 @@ class VarianceCalculator
     public const HEALTH_ON_TRACK_PCT = 0.03;   // ≤ 3 %
     public const HEALTH_AT_RISK_PCT  = 0.10;   // ≤ 10 %
 
+    /** Matches AiAutoAssignController::WORKDAY_HOURS. */
+    private const WORKDAY_HOURS = 8.0;
+
     public function __construct(
         private WorkingDayCalendar $calendar,
         private ?Carbon $asOf = null,
@@ -139,6 +142,24 @@ class VarianceCalculator
         ];
     }
 
+    /**
+     * Expected cumulative plan delivered by `$this->asOf` for a phase.
+     *
+     * For single-day atomic phases this is 0 (before start) or `$estimated`
+     * (on/after planned_end). For multi-day phases that were hour-packed (so
+     * day 1 may carry only a partial slice rather than 8h), we reconstruct the
+     * per-day plan from `start_day_hours + planned_start + planned_end +
+     * estimated_hours + working calendar`:
+     *
+     *   day 1        = start_day_hours
+     *   middle days  = 8h each
+     *   last day     = estimated − start_day_hours − (middle_days × 8h)
+     *
+     * Legacy rows (start_day_hours = NULL) come from the old "one phase = one
+     * working day" scheduler; we treat them as `min(estimated, 8h)` on day 1
+     * which matches the old linear-prorating behavior for single-day phases
+     * and is a safe default for any multi-day legacy rows.
+     */
     private function expectedProgressForPhase(ProjectTaskPhaseAssignment $phase, float $estimated): float
     {
         if ($estimated <= 0 || $phase->planned_start === null || $phase->planned_end === null) {
@@ -152,17 +173,44 @@ class VarianceCalculator
             return 0.0;
         }
         if ($this->asOf->greaterThanOrEqualTo($end)) {
-            return $estimated; // by the planned end we expect 100%
-        }
-
-        $totalWorkingDays = $this->countWorkingDays($start, $end);
-        $elapsedWorkingDays = $this->countWorkingDays($start, $this->asOf);
-
-        if ($totalWorkingDays <= 0) {
             return $estimated;
         }
 
-        return $estimated * ($elapsedWorkingDays / $totalWorkingDays);
+        $totalWorkingDays = $this->countWorkingDays($start, $end);
+        if ($totalWorkingDays <= 1) {
+            // Single-day phase that's "in flight" today (asOf == planned_start
+            // < planned_end). For atomic same-day phases this branch isn't hit
+            // because asOf >= planned_end is true; reaching here implies a
+            // very short window — default to full estimated as the conservative
+            // expectation.
+            return $estimated;
+        }
+
+        $startDayHours = $phase->start_day_hours !== null
+            ? (float) $phase->start_day_hours
+            : min($estimated, self::WORKDAY_HOURS);
+
+        $elapsedWorkingDays = $this->countWorkingDays($start, $this->asOf);
+        if ($elapsedWorkingDays <= 0) {
+            return 0.0;
+        }
+
+        if ($elapsedWorkingDays === 1) {
+            return $startDayHours;
+        }
+
+        // Reconstruct middle-day plan.
+        $middleDaysCount = $totalWorkingDays - 2;
+
+        if ($elapsedWorkingDays <= $middleDaysCount + 1) {
+            return $startDayHours + ($elapsedWorkingDays - 1) * self::WORKDAY_HOURS;
+        }
+
+        // asOf has reached the last day — by definition expected ~= estimated
+        // (we already short-circuited asOf >= planned_end above, so this branch
+        // is the edge where asOf == planned_end's working day predecessor and
+        // calendar arithmetic landed us here).
+        return $estimated;
     }
 
     private function countWorkingDays(Carbon $from, Carbon $to): int
@@ -186,6 +234,13 @@ class VarianceCalculator
     private function classifyHealth(float $variance, float $estimated, string $state): string
     {
         if ($estimated <= 0 || $state === 'pending') {
+            return 'on_track';
+        }
+
+        // Positive variance = ahead of plan. PMs don't need a warning badge for
+        // "delivered more than planned" — that's not a risk. Only negative
+        // variance gets graded into at_risk / slipping tiers.
+        if ($variance >= 0) {
             return 'on_track';
         }
 
