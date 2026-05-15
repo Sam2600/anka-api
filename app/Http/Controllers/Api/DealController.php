@@ -17,7 +17,18 @@ class DealController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Deal::with(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads']);
+        $query = Deal::with(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads'])
+            ->withExists(['contract_drafts as has_sent_contract_draft' => function ($q) {
+                $q->whereIn('status', ['sent_to_customer', 'signed']);
+            }])
+            ->addSelect([
+                '*',
+                'active_contract_draft_id' => \App\Models\DealContractDraft::select('id')
+                    ->whereColumn('deal_id', 'deals.id')
+                    ->whereNotIn('status', ['superseded'])
+                    ->orderByDesc('created_at')
+                    ->limit(1),
+            ]);
 
         if ($request->filled('status')) {
             $query->where('status', $request->status);
@@ -107,6 +118,13 @@ class DealController extends Controller
 
     public function show(Deal $deal)
     {
+        $deal->loadExists(['contract_drafts as has_sent_contract_draft' => function ($q) {
+            $q->whereIn('status', ['sent_to_customer', 'signed']);
+        }]);
+        $deal->active_contract_draft_id = $deal->contract_drafts()
+            ->whereNotIn('status', ['superseded'])
+            ->orderByDesc('created_at')
+            ->value('id');
         return new DealResource($deal->load(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads']));
     }
 
@@ -121,9 +139,10 @@ class DealController extends Controller
         }
 
         // Status field-level rules: enforce forward-only state-machine when
-        // the status changes. Only Estimation is allowed to flip C→B; the
-        // contract-drafting service flips B→A and A→S internally. Other
-        // transitions are 422.
+        // the status changes. Only Estimation is allowed to flip C→B; B→A
+        // fires automatically below when the Estimation handoff is complete
+        // (final_confirmed_at + all REQUIRED_ESTIMATION_FIELDS); A→S only via
+        // signed contract upload. Other transitions are 422.
         $newStatus = $request->input('status');
         if ($newStatus !== null && $newStatus !== $deal->status) {
             if (! $deal->canTransitionTo($newStatus)) {
@@ -208,6 +227,25 @@ class DealController extends Controller
             ]));
 
             $this->replaceDealChildren($deal, $request);
+
+            // B → A auto-advance on Estimation handoff completion.
+            // When a deal at 'qualified' has all REQUIRED_ESTIMATION_FIELDS
+            // filled (the last write to land is typically final_confirmed_at),
+            // flip status to 'negotiation' and bump win_probability to A's
+            // rank value. This is the single trigger for the rank flip;
+            // contract drafting no longer mutates the deal status.
+            $deal->refresh();
+            if (
+                $deal->status === 'qualified'
+                && ! $deal->isDropped()
+                && empty($deal->missingEstimationFields())
+                && $deal->canTransitionTo('negotiation')
+            ) {
+                $deal->update([
+                    'status' => 'negotiation',
+                    'win_probability' => Deal::RANK_PROBABILITY['A'],
+                ]);
+            }
         });
 
         return new DealResource($deal->load(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads']));

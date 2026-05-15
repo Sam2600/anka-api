@@ -32,9 +32,8 @@ class DealContractDraftResource extends JsonResource
             'signed_pdf_path' => $this->signed_pdf_path,
             'generated_by_user_id' => $this->generated_by_user_id,
             'finalized_by_user_id' => $this->finalized_by_user_id,
-            // Lightweight deal summary when eager-loaded — same pattern as
-            // DealContractDocumentResource. Lets the wizard avoid a separate
-            // fetch for breadcrumb / context display.
+            // Lightweight deal summary when eager-loaded — lets the wizard
+            // avoid a separate fetch for breadcrumb / context display.
             'deal' => $this->whenLoaded('deal', fn () => $this->deal ? [
                 'id' => $this->deal->id,
                 'name' => $this->deal->name,

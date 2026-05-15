@@ -9,7 +9,6 @@ use App\Models\Deal;
 use App\Models\DealContractDraft;
 use App\Services\ContractDraftService;
 use Illuminate\Http\Request;
-use Illuminate\Validation\Rule;
 
 /**
  * REST surface for AI-generated contract drafts.
@@ -129,8 +128,8 @@ class DealContractDraftController extends Controller
             $request->user(),
         );
 
-        // Match the shape returned by DealContractDocumentController so the
-        // frontend can reuse its UploadResponse handler.
+        // Response shape: { document, auto_won, contract } so the frontend
+        // can branch cleanly on auto_won and route to the new contract.
         return response()->json([
             'document' => (new DealContractDraftResource($result['document']->load(['deal', 'template'])))->resolve($request),
             'auto_won' => $result['auto_won'],
