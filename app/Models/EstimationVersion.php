@@ -24,6 +24,7 @@ class EstimationVersion extends Model
         'notes',
         'created_by',
         'created_at',
+        'xlsx_path',
     ];
 
     protected $casts = [

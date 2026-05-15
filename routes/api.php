@@ -87,9 +87,11 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::middleware('permission:view_crm')->group(function () {
         Route::get('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'index']);
         Route::get('/estimation-versions/{id}', [EstimationVersionController::class, 'show']);
+        Route::get('/estimation-versions/{id}/download/xlsx', [EstimationVersionController::class, 'downloadXlsx']);
     });
     Route::middleware('permission:manage_crm')->group(function () {
         Route::post('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'store']);
+        Route::post('/deals/{deal}/estimation-versions/ai-draft', [EstimationVersionController::class, 'aiDraft']);
         Route::post('/estimation-versions/{id}/restore', [EstimationVersionController::class, 'restore']);
     });
 

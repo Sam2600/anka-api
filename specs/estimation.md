@@ -131,6 +131,67 @@ Child arrays use **replace-all semantics** — all existing rows are deleted and
 
 ---
 
+## AI Generation (chg-007)
+
+A Claude-powered draft endpoint produces a per-sheet JSON payload from the Deal context. **AI output is preview-only — it does NOT persist** to `estimation_versions`, `estimation_resources`, or `deal_overheads`. The frontend loads the draft into the Estimation Simulator's editable state; the user reviews/adjusts and clicks Save, which uses the normal `POST /deals/{deal}/estimation-versions` path.
+
+### Endpoint
+```
+POST /api/deals/{deal}/estimation-versions/ai-draft
+```
+- Middleware: `auth:sanctum`, `tenant`, `permission:manage_crm`
+- Validates the deal has `workload_description` OR at least one `deal_contract_documents` row; otherwise 422.
+- Returns 200 with the per-sheet JSON in `data`, 503 on AI failure, 404 on cross-tenant deal lookup.
+
+### Service: `app/Services/EstimationAiService.php`
+- Model: Claude `claude-3-5-sonnet-latest` (same provider/key as `ContractAnalysisService` from chg-005).
+- Prompt template lives in `resources/prompts/estimation_generation.txt` — editable without redeploy.
+- Logs every call (success + failure) to `ai_usage_logs` with `feature='estimation_generation'`.
+
+### Prompt inputs
+| Input | Source | Notes |
+|---|---|---|
+| Deal fields | `deals` row | `workload_description`, `client_budget`, `timeline_months`, `client`, `target_margin`, `expected_close_date` |
+| Contract document text | `deal_contract_documents.extracted_text` (chg-005) | Joined for `analysis_status IN ('approved','pending')`. Truncated to ~50k chars. |
+| Org roles + rates | `roles` (tenant-scoped) | Tells Claude real role names with real costs |
+| Few-shot won deals | `deals.status='won'`, latest 2–3 by `updated_at` | Includes each one's latest `EstimationVersion.resources`. Skipped if tenant has <2 won deals. |
+
+### Output schema (Claude must echo verbatim)
+```json
+{
+  "sheet1_summary": {
+    "rough_estimate_hours": 0, "requirement_study_hours": 0,
+    "web_development_hours": 0, "environment_setup_hours": 0,
+    "total_hours_per_person": 0, "total_days_per_person": 0,
+    "total_months_per_person": 0
+  },
+  "sheet2_features": [
+    { "function_id": "F001", "name": "...", "explanation": "...", "category": "Web" }
+  ],
+  "sheet3_manhours": [
+    { "function_id": "F001", "dev_hours": 16 }
+  ],
+  "sheet4_milestone": {
+    "start_month": "YYYY-MM", "total_months": 0,
+    "phase_durations": { /* per-phase month counts */ }
+  },
+  "sheet5_team_stack": [
+    { "role": "Backend Developer", "count": 2, "monthly_allocation": [1.0, 1.0, 0.5] }
+  ],
+  "reasoning": "...", "confidence": "high"
+}
+```
+
+### Validation rules
+- `sheet2_features[*].function_id` and `sheet3_manhours[*].function_id` must match 1:1; mismatched response → 422 with retry-once preamble before failing.
+- `sheet5_team_stack[*].monthly_allocation.length` should equal `sheet4_milestone.total_months` (clamped/padded if off-by-one; rejected if >2x off).
+- AI never proposes phase multipliers — those stay as Excel formulas in the chg-006 XLSX writer. AI only proposes `dev_hours` per feature in sheet3.
+
+### Why preview-only
+Versions in `estimation_versions` are immutable snapshots tied to the chg-006 XLSX export. Auto-saving every AI draft would pollute version history. The user explicitly saves the version they want, which then triggers the existing XLSX generation pipeline.
+
+---
+
 ## What is Missing (Not Implemented)
 
 - No separate `estimations` table with its own lifecycle.
@@ -139,3 +200,5 @@ Child arrays use **replace-all semantics** — all existing rows are deleted and
 - No `POST /estimations` endpoint.
 - No client-facing estimation document (PDF, shareable link, approval workflow).
 - No "Estimation Approved" trigger that creates a Contract — Contract creation is tied to Deal win status only.
+- AI prompt opt-out per tenant (`tenants.ai_estimation_enabled`) — proposed in chg-007 risk section, not implemented in v1.
+- Semantic few-shot retrieval (embeddings-based "most similar past deal") — current implementation uses recency.

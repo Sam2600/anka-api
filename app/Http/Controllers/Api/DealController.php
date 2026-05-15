@@ -8,15 +8,18 @@ use App\Http\Resources\DealResource;
 use App\Http\Resources\ProjectResource;
 use App\Models\Contract;
 use App\Models\Deal;
+use App\Models\Employee;
 use App\Models\Project;
 use App\Models\ProjectTeamAssignment;
-use App\Models\Employee;
+use App\Services\EstimationXlsxService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use Throwable;
 
 class DealController extends Controller
 {
@@ -179,11 +182,11 @@ class DealController extends Controller
         // 5 stages now (qualified merges the old proposal stage).
         // Frontend rank labels: lead→C, qualified→B, negotiation→A, won→S, lost→D.
         $stageProbabilities = [
-            'lead'        => 10,
-            'qualified'   => 40,
+            'lead' => 10,
+            'qualified' => 40,
             'negotiation' => 75,
-            'won'         => 100,
-            'lost'        => 0,
+            'won' => 100,
+            'lost' => 0,
         ];
 
         $probability = $request->has('win_probability')
@@ -291,6 +294,23 @@ class DealController extends Controller
         $contract = Contract::where('deal_id', $deal->id)->first();
         $project = Project::where('contract_id', $contract?->id)->first();
 
+        // Move any existing estimation XLSX files from the deal-scoped path
+        // (storage/app/deals/{id}/) to the project-scoped path
+        // (storage/app/projects/{number}/). Runs OUTSIDE the win_deal
+        // transaction — if the move fails the win still sticks, and the
+        // download endpoint will lazy-regenerate at the right path.
+        if ($project) {
+            try {
+                app(EstimationXlsxService::class)->migrateToProject($deal, $project);
+            } catch (Throwable $e) {
+                Log::warning('DealController@win: estimation XLSX migration failed', [
+                    'deal_id' => $deal->id,
+                    'project_id' => $project->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
         // Return flat (no `data` wrapper) so businessStore.winDeal() can access
         // data.deal / data.contract / data.project directly from the axios response body.
         return response()->json([
@@ -370,7 +390,7 @@ class DealController extends Controller
 
         foreach ($assignments as $index => $a) {
             $employeeId = $a['employee_id'] ?? null;
-            $hours      = (float) ($a['allocated_hours'] ?? 0);
+            $hours = (float) ($a['allocated_hours'] ?? 0);
             if (! $employeeId || $hours <= 0) {
                 continue;
             }
@@ -402,13 +422,13 @@ class DealController extends Controller
                 ->sum(DB::raw('CAST(dha.allocated_hours AS REAL) / COALESCE(NULLIF(d.timeline_months, 0), 1)'));
 
             $totalMonthly = $thisDealMonthly + $otherMonthly;
-            $capacity     = (float) ($employee->workable_hours ?? 0);
+            $capacity = (float) ($employee->workable_hours ?? 0);
 
             if ($capacity > 0 && $totalMonthly > $capacity) {
                 $over = round($totalMonthly - $capacity, 1);
                 $errors["hard_assignments.{$index}.allocated_hours"] = [
                     "{$employee->name} would be over-allocated by {$over} h/month "
-                    . "({$totalMonthly} requested vs {$capacity} capacity, including other open deals).",
+                    ."({$totalMonthly} requested vs {$capacity} capacity, including other open deals).",
                 ];
             }
         }

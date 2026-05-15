@@ -2,27 +2,28 @@
 
 namespace App\Models;
 
+use App\Traits\BelongsToTenant;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use App\Traits\BelongsToTenant;
 
 // Rows are deleted and re-inserted as a complete set on every deal estimation update.
 class EstimationResource extends Model
 {
-    use HasFactory, HasUuids, BelongsToTenant;
+    use BelongsToTenant, HasFactory, HasUuids;
 
     protected $fillable = [
         'tenant_id',
         'deal_id',
         'job_role_id',
         'role_id',
+        'employee_id',
         'feature_name',
         'hours',
     ];
 
     protected $casts = [
-        'id'    => 'string',
+        'id' => 'string',
         'hours' => 'float',
     ];
 
@@ -34,5 +35,10 @@ class EstimationResource extends Model
     public function role()
     {
         return $this->belongsTo(Role::class, 'job_role_id');
+    }
+
+    public function employee()
+    {
+        return $this->belongsTo(Employee::class);
     }
 }
