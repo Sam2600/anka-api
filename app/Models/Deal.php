@@ -230,7 +230,7 @@ class Deal extends Model
 
     public function isContractEligible(): bool
     {
-        if ($this->status !== 'qualified' || $this->isDropped()) {
+        if ($this->status !== 'negotiation' || $this->isDropped()) {
             return false;
         }
 

@@ -81,12 +81,10 @@ class ContractDraftService
                 'generated_by_user_id' => $generatedBy?->id,
             ]);
 
-            // B → A: first draft generated. Honour the forward-only state
-            // machine — refuse silently if the deal isn't transitionable.
-            // Subsequent regenerations won't re-fire (already at A).
-            if ($deal->canTransitionTo('negotiation')) {
-                $deal->update(['status' => 'negotiation', 'win_probability' => Deal::RANK_PROBABILITY['A']]);
-            }
+            // No rank flip here — the deal must already be at A (negotiation)
+            // by the time this runs. B → A is owned by the Estimation handoff
+            // (DealController::update auto-flips when final_confirmed_at is
+            // written and all REQUIRED_ESTIMATION_FIELDS are complete).
 
             return $draft;
         });
@@ -291,10 +289,11 @@ class ContractDraftService
             ]);
         }
 
-        if ($deal->status !== 'qualified') {
+        if ($deal->status !== 'negotiation') {
             throw ValidationException::withMessages([
                 'deal.status' => [
-                    'Contract drafting requires the deal to be at rank B (qualified). Current rank: '.$deal->rank,
+                    'Contract drafting requires the deal to be at rank A (negotiation). Current rank: '.$deal->rank
+                    .'. Complete the Estimation handoff (sets final_confirmed_at + final_* fields) to advance the deal to A.',
                 ],
             ]);
         }
