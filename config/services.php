@@ -31,9 +31,8 @@ return [
     ],
 
     // Anthropic / Claude — used by the AI team-builder (AiAutoAssignController)
-    // and the contract-document gate (ContractAnalysisService). Without a key
-    // both features silently fall back to deterministic heuristics, so the
-    // UI shows "fallback grading" badges and no Claude reasoning.
+    // and AI contract drafting (ContractDraftService). Without a key both
+    // features silently fall back to deterministic heuristics.
     'anthropic' => [
         'api_key' => env('ANTHROPIC_API_KEY'),
         'model' => env('ANTHROPIC_MODEL', 'claude-3-5-sonnet-latest'),

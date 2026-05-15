@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\ContractTemplate;
 use App\Models\Deal;
 use App\Models\DealContractDraft;
+use App\Models\Tenant;
 use App\Models\User;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\UploadedFile;
@@ -27,9 +28,8 @@ use Throwable;
  * gaps the AI couldn't fill confidently are left as `{{TODO: …}}` tokens
  * the salesperson resolves in wizard step 2.
  *
- * Resilience mirrors ContractAnalysisService: 90s timeout, retry on
- * ConnectionException only (don't retry response-timeouts — Claude is
- * working, let it finish).
+ * Resilience: 90s timeout, retry on ConnectionException only — don't
+ * retry response-timeouts because Claude is working, let it finish.
  */
 class ContractDraftService
 {
@@ -80,12 +80,10 @@ class ContractDraftService
                 'generated_by_user_id' => $generatedBy?->id,
             ]);
 
-            // B → A: first draft generated. Honour the forward-only state
-            // machine — refuse silently if the deal isn't transitionable.
-            // Subsequent regenerations won't re-fire (already at A).
-            if ($deal->canTransitionTo('negotiation')) {
-                $deal->update(['status' => 'negotiation', 'win_probability' => Deal::RANK_PROBABILITY['A']]);
-            }
+            // No rank flip here — the deal must already be at A (negotiation)
+            // by the time this runs. B → A is owned by the Estimation handoff
+            // (DealController::update auto-flips when final_confirmed_at is
+            // written and all REQUIRED_ESTIMATION_FIELDS are complete).
 
             return $draft;
         });
@@ -290,10 +288,11 @@ class ContractDraftService
             ]);
         }
 
-        if ($deal->status !== 'qualified') {
+        if ($deal->status !== 'negotiation') {
             throw ValidationException::withMessages([
                 'deal.status' => [
-                    'Contract drafting requires the deal to be at rank B (qualified). Current rank: '.$deal->rank,
+                    'Contract drafting requires the deal to be at rank A (negotiation). Current rank: '.$deal->rank
+                    .'. Complete the Estimation handoff (sets final_confirmed_at + final_* fields) to advance the deal to A.',
                 ],
             ]);
         }
@@ -465,31 +464,61 @@ class ContractDraftService
     private function buildSystemPrompt(): string
     {
         return <<<'TXT'
-You are a contract drafting assistant for an agency that signs SES-style
-service agreements with corporate customers. You will produce English-
-language contract sections based on a template definition, a customer's
-project requirements (the deal's Requirement Description), and
-operator-provided answers from a structured wizard.
+You are an expert contract drafting assistant for an IT services agency operating
+in the Japan/APAC market that signs SES-style (System Engineering Service)
+agreements with corporate customers.
 
-Critical rules:
-1. Output strict JSON. The top-level object's keys are the section keys
-   the user prompt lists; each value is a STRING containing the section's
-   full rendered content. No prose outside the JSON object.
-2. For any specific detail you cannot confidently fill from the inputs,
-   emit the literal string "{{TODO: <what you need>}}" inline. Do not
-   invent specifics (version numbers, exact thresholds, names, dates).
-3. Use formal contract English. Prefer active voice. Use numbered or
-   lettered lists where the template's output_format says bulleted_*.
-   For bulleted_pair sections, format as two clearly-labelled lists
-   (e.g., "Provider:\n  - …\n\nUser:\n  - …").
-4. Do NOT include the section title in your output — the renderer adds it.
-5. Never include snake_case field keys, internal variable names, or
-   technical jargon in human-facing text. The customer reads this.
-6. Slot tokens of the form {{some_name}} that already appear in the
-   prompt's fixed_text examples are filled by the renderer later — do
-   not duplicate them in your output unless explicitly requested.
-7. Keep each section concise — sufficient legal detail, no padding. A
-   reviewer should be able to skim a section and grasp the obligation.
+Your task is to produce specific, legally precise contract sections based on:
+- The TEMPLATE TYPE and service context
+- The DEAL CONTEXT (fees, timeline, team, OT policy, support hours)
+- The CUSTOMER REQUIREMENT DESCRIPTION (free-form project brief)
+- The CUSTOMER REQUIREMENTS (structured nego-time obligations — binding inputs)
+- The WIZARD ANSWERS (operator-provided specifics per section)
+
+OUTPUT RULES (absolute):
+1. Return ONLY a strict JSON object — no markdown fences, no prose outside the
+   object. Keys are section.key strings; values are the rendered section content
+   as plain strings.
+2. For any specific you cannot confidently fill from the provided inputs, emit
+   the literal token "{{TODO: <what is needed>}}" at that point. Never invent
+   dollar amounts, thresholds, version numbers, proper names, or dates that are
+   not stated in the inputs.
+3. Formal, precise contract English. Use "shall" for binding obligations, "will"
+   for expected behaviour, "may" for permissions. Attribute every obligation to
+   a named party — no passive-voice ambiguity about who is responsible.
+4. Do NOT include the section title in your output — the renderer prepends it.
+5. Never expose internal field names (snake_case keys), placeholder syntax, or
+   system identifiers in human-readable text. The customer reads this directly.
+6. Slot tokens of the form {{slot_name}} in fixed_text examples are filled by
+   the renderer later — do not emit them in AI-written sections unless the
+   section prompt explicitly instructs you to (ai_with_slots sections only).
+7. Keep each section tight: sufficient legal precision, zero filler. Each clause
+   must state a concrete obligation, entitlement, or constraint.
+
+OUTPUT FORMAT RULES (by output_format value in the section spec):
+- paragraph: continuous prose. For definitions, opening descriptions, narrative
+  obligations.
+- bulleted_simple: a numbered or bulleted list. Each item is one self-contained
+  obligation or precondition.
+- bulleted_pair: exactly TWO labelled sections. Label them "Provider:" and
+  "User:" on their own lines, each followed by "- " bullet items. Each list
+  must contain at least three items. Separate the two blocks with a blank line.
+- table: a markdown table with a header row and a | --- | separator row.
+  At minimum 2 columns. Populate from wizard answers and deal context; mark
+  unknown cells as {{TODO: what is needed}}.
+
+CUSTOMER REQUIREMENTS RULE:
+The prompt includes a CUSTOMER REQUIREMENTS block capturing support obligations,
+out-of-scope policy, working hours, and testing range — gathered during
+negotiation. These are BINDING INPUTS. If a field is populated, its content
+must appear verbatim or paraphrased into the relevant section (scope_of_work,
+requirements, monitoring). Do not silently ignore a populated field.
+
+JAPAN/APAC CONTEXT:
+Payment terms default to 30 days unless the wizard specifies otherwise. Dispute
+resolution defaults to the courts of the provider's registered location unless
+a governing law is specified. Maintain formal, deferential tone in
+customer-facing clauses — avoid adversarial or aggressive language.
 TXT;
     }
 
@@ -503,42 +532,44 @@ TXT;
             ? $deal->workload_description
             : '(no Requirement Description provided)';
 
-        // Render the OT/overage section from the structured nego-time
-        // fields. The freeform final_ot_policy (Estimation's notes layer)
-        // is appended when present. ⑦ Profit Calculate reads the same
-        // structured fields to decide whether to subtract OT from profit.
         $otContext = $this->renderOtContext($deal);
 
-        $dealContext = sprintf(
-            "Customer: %s\nProject name: %s\nClient budget: %s %s\nTimeline: %d months\nContract length: %d months\nTeam: %s\nMonthly fee: %s %s\nInstallation fee: %s\nOT/overage policy: %s\nSupport hours/month: %d\nCurrency: %s",
-            $deal->client ?? '(unknown)',
-            $deal->name ?? '(unnamed)',
-            $deal->final_currency ?? 'USD',
-            number_format((float) ($deal->client_budget ?? 0), 2),
-            $deal->timeline_months ?? 0,
-            $deal->final_contract_months ?? 0,
-            $deal->final_team_summary ?? '(team not summarised)',
-            $deal->final_currency ?? 'USD',
-            number_format((float) ($deal->final_monthly_fee ?? 0), 2),
-            $deal->final_installation_fee !== null
-                ? $deal->final_currency.' '.number_format((float) $deal->final_installation_fee, 2)
-                : '(none)',
-            $otContext,
-            $deal->final_support_hours_per_month ?? self::DEFAULT_SUPPORT_HOURS,
-            $deal->final_currency ?? 'USD',
-        );
+        $providerName = Tenant::find($deal->tenant_id)?->name ?? 'Provider';
+        $currency = $deal->final_currency ?? 'USD';
 
+        $dealContext = implode("\n", [
+            "Provider (agency): {$providerName}",
+            'Customer company: '.($deal->client ?? '(unknown)'),
+            'Customer contact name: '.($deal->contact_name ?? '(not specified)'),
+            'Project / deal name: '.($deal->name ?? '(unnamed)'),
+            'Timeline: '.($deal->timeline_months ?? 0).' months',
+            'Contract length: '.($deal->final_contract_months ?? 0).' months',
+            'Team composition: '.($deal->final_team_summary ?? '(team not summarised)'),
+            'Monthly service fee: '.$currency.' '.number_format((float) ($deal->final_monthly_fee ?? 0), 2),
+            'One-time installation / onboarding fee: '.(
+                $deal->final_installation_fee !== null
+                    ? $currency.' '.number_format((float) $deal->final_installation_fee, 2)
+                    : '(none)'
+            ),
+            'OT / overage policy: '.$otContext,
+            'Support hours per month: '.($deal->final_support_hours_per_month ?? self::DEFAULT_SUPPORT_HOURS),
+            'Invoicing currency: '.$currency,
+        ]);
+
+        // Build label lookup: question key → human-readable label.
+        $labelMap = $this->buildWizardLabelMap($template);
         $wizardLines = empty($wizardInputs)
             ? '(no wizard answers provided)'
             : collect($wizardInputs)
-                ->map(fn ($v, $k) => "- {$k}: ".(is_scalar($v) ? (string) $v : json_encode($v)))
+                ->map(fn ($v, $k) => '- '.($labelMap[$k] ?? $k).': '.(is_scalar($v) ? (string) $v : json_encode($v)))
                 ->implode("\n");
 
-        $sectionSpecs = collect($aiSections)->map(function ($section) {
-            $questions = empty($section['wizard_questions'] ?? [])
+        $sectionSpecs = collect($aiSections)->map(function ($section) use ($labelMap) {
+            $questionKeys = collect($section['wizard_questions'] ?? [])->pluck('key');
+            $questions = $questionKeys->isEmpty()
                 ? ''
-                : "\n   Operator answers for this section: see WIZARD ANSWERS above; relevant keys: "
-                    . collect($section['wizard_questions'])->pluck('key')->implode(', ');
+                : "\n   Wizard answers relevant to this section: "
+                    .$questionKeys->map(fn ($k) => ($labelMap[$k] ?? $k))->implode(', ');
 
             return sprintf(
                 "- key: %s\n   title: %s\n   output_format: %s\n   prompt: %s%s",
@@ -550,10 +581,9 @@ TXT;
             );
         })->implode("\n\n");
 
-        // Customer requirements collected progressively during nego.
-        // Anything blank here is rendered as "(not yet captured)" so Claude
-        // can either skip the related clause or emit an explicit placeholder
-        // marker for the operator to fill in step 2.
+        // Customer requirements gathered progressively during negotiation.
+        // Populated fields are BINDING — Claude must incorporate them.
+        // Empty fields are skipped rather than surfaced as noise.
         $reqLines = [];
         foreach ([
             'Customer support obligations' => $deal->customer_support_obligations,
@@ -561,12 +591,17 @@ TXT;
             'Working hours' => $deal->working_hours,
             'Testing range' => $deal->testing_range,
         ] as $label => $value) {
-            $reqLines[] = "- {$label}: ".($value ?: '(not yet captured)');
+            $reqLines[] = $value
+                ? "- {$label}: {$value}"
+                : "- {$label}: (not captured — omit this clause if not applicable)";
         }
         $requirementsBlock = implode("\n", $reqLines);
 
+        $variantContext = $this->templateVariantContext($template);
+
         return <<<TXT
-TEMPLATE: {$template->name} (umbrella: {$template->umbrella})
+TEMPLATE: {$template->name}
+SERVICE TYPE: {$variantContext}
 
 DEAL CONTEXT:
 {$dealContext}
@@ -576,23 +611,60 @@ CUSTOMER REQUIREMENT DESCRIPTION:
 {$requirementDescription}
 """
 
-CUSTOMER REQUIREMENTS (captured at nego):
+CUSTOMER REQUIREMENTS (captured at negotiation — binding inputs):
 {$requirementsBlock}
 
 WIZARD ANSWERS:
 {$wizardLines}
 
-SECTIONS TO PRODUCE (return one JSON key per section.key below):
+SECTIONS TO PRODUCE (return one JSON key per section listed below):
 
 {$sectionSpecs}
 
-Return ONLY a JSON object. Example shape (with your actual section keys):
-{
-  "description_of_services": "Provider will deliver …",
-  "scope_of_work": "Provider:\\n- Initial: …\\n- Monthly: …\\n\\nUser:\\n- Initial: …",
-  ...
-}
+Return ONLY the JSON object. No commentary before or after.
 TXT;
+    }
+
+    /** Maps every wizard question key in the template to its human-readable label. */
+    private function buildWizardLabelMap(ContractTemplate $template): array
+    {
+        $map = [];
+        foreach ($template->sections ?? [] as $section) {
+            foreach ($section['wizard_questions'] ?? [] as $q) {
+                if (! empty($q['key']) && ! empty($q['label'])) {
+                    $map[$q['key']] = $q['label'];
+                }
+            }
+        }
+        return $map;
+    }
+
+    /** Describes the commercial and risk context of each template variant. */
+    private function templateVariantContext(ContractTemplate $template): string
+    {
+        return match ($template->slug) {
+            'cloud_backup' =>
+                'Cloud Backup Service — Provider remotely manages a cloud-based backup solution '
+                . "for the customer's on-premises or cloud servers. Commercial scope: one-time "
+                . 'installation and setup; recurring monthly fee covering cloud storage and '
+                . 'monitoring; defined support hours. Key risk areas: data sovereignty, retention '
+                . 'policy, restore-time SLA, and access controls.',
+            'managed_hosting' =>
+                'Managed Hosting / Cloud Operations — Provider operates and monitors the '
+                . "customer's cloud infrastructure 24/7 against an agreed SLA. Commercial scope: "
+                . 'onboarding fee; monthly retainer for SLA-backed service; cloud-platform costs '
+                . 'passed through at cost. Key risk areas: SLA definitions, incident-response '
+                . 'times, change-management authority, and liability caps.',
+            'engineer_dispatch' =>
+                'Engineer Dispatch (SES) — Provider assigns specialist engineers to the '
+                . "customer's project at a fixed monthly capacity. Commercial scope: monthly "
+                . 'retainer per engineer; overtime / out-of-scope billing per OT policy. '
+                . 'Key risk areas: IP ownership of work product, scope creep, substitute '
+                . 'engineers, and confidentiality of customer systems.',
+            default =>
+                'SES-umbrella service agreement — use DEAL CONTEXT and REQUIREMENT DESCRIPTION '
+                . 'to infer the service type and obligations.',
+        };
     }
 
     /**
@@ -713,7 +785,7 @@ TXT;
 
     /**
      * Invoke the win_deal() Postgres stored procedure, or the PHP fallback
-     * for SQLite tests. Mirrors DealContractDocumentController::autoWinDeal.
+     * for SQLite tests.
      */
     private function fireWinDeal(Deal $deal): void
     {
