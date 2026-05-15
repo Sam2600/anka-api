@@ -22,7 +22,9 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 use PhpOffice\PhpSpreadsheet\IOFactory;
+use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
 class AiAutoAssignController extends Controller
 {
@@ -323,19 +325,30 @@ PROMPT;
 
     // ── Task-level AI assignment (Estimate.xlsx → per-phase assignee) ─────────
 
-    // Phases are scheduled in `order` ascending within each task. Design phases come
-    // first (requirements → system arch → basic doc → detail doc), then Development,
-    // then the three test phases. Excel column mappings stay unchanged — only the
-    // scheduling order differs.
-    private const PHASE_DEFS = [
-        ['code' => 'requirement',  'name' => '要件定義',      'cols' => [6, 7],                            'is_execution' => false, 'order' => 1],
-        ['code' => 'system_arch',  'name' => '基本全体設計',  'cols' => [8, 9, 10, 11, 12, 13, 14, 15],    'is_execution' => false, 'order' => 2],
-        ['code' => 'basic_doc',    'name' => '基本設計',      'cols' => [16, 17],                          'is_execution' => false, 'order' => 3],
-        ['code' => 'detail_doc',   'name' => '詳細設計',      'cols' => [18, 19],                          'is_execution' => false, 'order' => 4],
-        ['code' => 'development',  'name' => 'Development',  'cols' => [4, 5],                            'is_execution' => true,  'order' => 5],
-        ['code' => 'unit_test',    'name' => '単体テスト',    'cols' => [20, 21, 22],                      'is_execution' => true,  'order' => 6],
-        ['code' => 'combine_test', 'name' => '結合テスト',    'cols' => [23, 24, 25],                      'is_execution' => true,  'order' => 7],
-        ['code' => 'system_test',  'name' => '総合テスト',    'cols' => [26],                              'is_execution' => true,  'order' => 8],
+    // Canonical phase catalog keyed by the Japanese label that appears in row 3
+    // of the Web_Manhour_Detail sheet. Column ranges are NOT fixed here — they
+    // are detected per file by `detectPhasesFromSheet()` because different
+    // projects may ship Estimate.xlsx files with different phase subsets and
+    // column layouts. `development` has no row-3 header (its hours always live
+    // at cols 4–5: 開発工数 + コードレビュー) and is injected separately.
+    private const PHASE_CATALOG = [
+        '要件定義'     => ['code' => 'requirement',  'order' => 1, 'is_execution' => false],
+        '基本全体設計' => ['code' => 'system_arch',  'order' => 2, 'is_execution' => false],
+        '基本設計'     => ['code' => 'basic_doc',    'order' => 3, 'is_execution' => false],
+        '詳細設計'     => ['code' => 'detail_doc',   'order' => 4, 'is_execution' => false],
+        '単体テスト'   => ['code' => 'unit_test',    'order' => 6, 'is_execution' => true],
+        '結合テスト'   => ['code' => 'combine_test', 'order' => 7, 'is_execution' => true],
+        '総合テスト'   => ['code' => 'system_test',  'order' => 8, 'is_execution' => true],
+    ];
+
+    // Row-4 column labels that mark project-wide overhead columns (Test Data,
+    // Manual, Risk, Management) which sit between the last phase's columns and
+    // the Total column. These are NEVER counted as phase hours — when the
+    // detector walks a phase's column range it stops at the first column whose
+    // row-4 label matches any of these keywords.
+    private const NON_PHASE_LABEL_KEYWORDS = [
+        'テストデータ', 'マニュアル', 'リスク', '管理工数',
+        'Test Data', 'Manual', 'Risk', 'Management', 'Total',
     ];
 
     // Tasks must finish at least this many days before the project's end_date.
@@ -776,27 +789,49 @@ PROMPT;
         $sheet = $spreadsheet->getSheetByName('Web_Manhour_Detail');
         $tasks = [];
         $rowNo = 0;
-        $activePhaseCodes = [];
 
         $rawMarkdown = $this->renderSheetAsMarkdown($sheet);
 
-        // Data rows start at row 5; we read A:AE (cols 1..31).
-        // A=機能ID, B=機能名称, C=Status, AE=Total(h). Per-phase hour columns: see PHASE_DEFS.
+        // Detect this file's actual phase layout from row 3 (phase headers) and
+        // row 4 (per-column labels). Different projects ship different Estimate
+        // files — phases present, their order, and the columns they occupy all
+        // vary file-to-file. Static column maps would silently mis-label.
+        $detection      = $this->detectPhasesFromSheet($sheet);
+        $phaseDefs      = $detection['phase_defs'];
+        $totalCol       = $detection['total_col'];      // 1-based, or null
+        $highestColStr  = $sheet->getHighestColumn();
+
+        // Data rows start at row 5. A=機能ID, B=機能名称, C=Status. Per-phase
+        // hour columns and the Total column position are file-specific.
         foreach ($sheet->getRowIterator(5) as $row) {
             $rowIndex = $row->getRowIndex();
             $cells = $sheet->rangeToArray(
-                'A'.$rowIndex.':AE'.$rowIndex,
+                'A'.$rowIndex.':'.$highestColStr.$rowIndex,
                 null,
                 true,
                 false
             )[0] ?? [];
 
-            $functionId   = isset($cells[0])  ? (is_string($cells[0])  ? trim($cells[0])  : $cells[0])  : null;
-            $functionName = isset($cells[1])  ? (is_string($cells[1])  ? trim($cells[1])  : $cells[1])  : null;
-            $difficulty   = isset($cells[2])  ? (is_string($cells[2])  ? trim($cells[2])  : $cells[2])  : null;
-            $totalHours   = isset($cells[30]) ? $cells[30] : null;
+            $functionId   = isset($cells[0]) ? (is_string($cells[0]) ? trim($cells[0]) : $cells[0]) : null;
+            $functionName = isset($cells[1]) ? (is_string($cells[1]) ? trim($cells[1]) : $cells[1]) : null;
+            $difficulty   = isset($cells[2]) ? (is_string($cells[2]) ? trim($cells[2]) : $cells[2]) : null;
+            $totalHours   = ($totalCol !== null && isset($cells[$totalCol - 1])) ? $cells[$totalCol - 1] : null;
 
             if (! $functionName) {
+                continue;
+            }
+            // Skip summary / total / team-composition rows that sit at the
+            // bottom of the sheet (Leader | 1 | 8.361h, Developer | 3 | 51.9h,
+            // 1人(Hr) / 1人(Days) / Months totals, etc). Two complementary signals:
+            //  - function_name purely numeric → it's a headcount in col 2,
+            //    not a feature name. Real features are descriptive text.
+            //  - function_id matches team-composition / unit-total keywords.
+            $fnStr  = (string) $functionName;
+            $fidStr = (string) ($functionId ?? '');
+            if (preg_match('/^\s*\d+(\.\d+)?\s*$/', $fnStr)) {
+                continue;
+            }
+            if ($fidStr !== '' && preg_match('/(Leader|Developer|UIUX|1人|2人|3人|\(Hr\)|\(Days\)|\(Months\)|Total)/u', $fidStr)) {
                 continue;
             }
             if (! in_array($difficulty, ['簡単', '普通', '難しい'], true)) {
@@ -804,7 +839,7 @@ PROMPT;
             }
 
             $phases = [];
-            foreach (self::PHASE_DEFS as $phase) {
+            foreach ($phaseDefs as $phase) {
                 $sum = 0.0;
                 foreach ($phase['cols'] as $col1Based) {
                     $val = $cells[$col1Based - 1] ?? null;
@@ -822,7 +857,6 @@ PROMPT;
                     'is_execution' => $phase['is_execution'],
                     'hours'        => round($sum, 2),
                 ];
-                $activePhaseCodes[$phase['code']] = true;
             }
 
             $rowNo++;
@@ -836,19 +870,133 @@ PROMPT;
             ];
         }
 
+        // Surface every phase declared in the file's row 3 — even ones with
+        // zero hours across all tasks. PMs want to see "this phase exists in
+        // the template but has no work yet" rather than have it silently
+        // hidden. Per-task phase rows (above) are still filtered to non-zero
+        // entries so empty cells render as blank in the UI grid.
         $activePhases = [];
-        foreach (self::PHASE_DEFS as $phase) {
-            if (isset($activePhaseCodes[$phase['code']])) {
-                $activePhases[] = [
-                    'code'         => $phase['code'],
-                    'name'         => $phase['name'],
-                    'order'        => $phase['order'],
-                    'is_execution' => $phase['is_execution'],
-                ];
-            }
+        foreach ($phaseDefs as $phase) {
+            $activePhases[] = [
+                'code'         => $phase['code'],
+                'name'         => $phase['name'],
+                'order'        => $phase['order'],
+                'is_execution' => $phase['is_execution'],
+            ];
         }
 
         return ['tasks' => $tasks, 'active_phases' => $activePhases, 'raw_markdown' => $rawMarkdown];
+    }
+
+    /**
+     * Inspect a Web_Manhour_Detail sheet and return the phase column layout it
+     * actually uses. Each Estimate.xlsx may ship a different phase subset; we
+     * read the truth from the file rather than a hard-coded constant.
+     *
+     * Detection rules:
+     *  - Row 3 holds phase header labels (Japanese, optionally with English on
+     *    a second line). We match the first line against PHASE_CATALOG.
+     *  - Each phase's column range runs from its row-3 header column up to the
+     *    column before the next row-3 header (or the column before Total for
+     *    the last phase), excluding tail-overhead columns (Risk / Management /
+     *    Test Data / Manual) identified via row-4 NON_PHASE_LABEL_KEYWORDS.
+     *  - Development has no row-3 header and is always at cols 4–5, recognised
+     *    by row-4 label "Develop" or "開発工数".
+     *  - Total column is detected from row 4 (cell containing "Total").
+     *
+     * @return array{phase_defs: array<int, array{code: string, name: string, cols: array<int, int>, order: int, is_execution: bool}>, total_col: ?int}
+     */
+    private function detectPhasesFromSheet(Worksheet $sheet): array
+    {
+        $highestColIndex = Coordinate::columnIndexFromString($sheet->getHighestColumn());
+
+        // 1. Find Total column from row 4.
+        $totalCol = null;
+        for ($c = 1; $c <= $highestColIndex; $c++) {
+            $v = (string) $sheet->getCell([$c, 4])->getValue();
+            if (stripos($v, 'Total') !== false) {
+                $totalCol = $c;
+                break;
+            }
+        }
+        $effectiveLastCol = $totalCol ? $totalCol - 1 : $highestColIndex;
+
+        // 2. Walk row 3 left-to-right collecting (col → catalog meta) for each
+        //    Japanese phase label we recognise.
+        $phaseStarts = [];
+        for ($c = 1; $c <= $effectiveLastCol; $c++) {
+            $cellVal = trim((string) $sheet->getCell([$c, 3])->getValue());
+            if ($cellVal === '') {
+                continue;
+            }
+            $firstLine = trim(strtok($cellVal, "\n"));
+            if (isset(self::PHASE_CATALOG[$firstLine])) {
+                $phaseStarts[$c] = [
+                    'label' => $firstLine,
+                    'meta'  => self::PHASE_CATALOG[$firstLine],
+                ];
+            }
+        }
+        ksort($phaseStarts);
+        $phaseStartCols = array_keys($phaseStarts);
+
+        // 3. Compute each phase's column range, stopping at tail-overhead labels.
+        $phaseDefs = [];
+        foreach ($phaseStartCols as $i => $startCol) {
+            $boundaryCol = isset($phaseStartCols[$i + 1])
+                ? $phaseStartCols[$i + 1] - 1
+                : $effectiveLastCol;
+
+            $cols = [];
+            for ($c = $startCol; $c <= $boundaryCol; $c++) {
+                $row4Label = (string) $sheet->getCell([$c, 4])->getValue();
+                if ($this->isNonPhaseColumn($row4Label)) {
+                    break;
+                }
+                $cols[] = $c;
+            }
+
+            $meta = $phaseStarts[$startCol]['meta'];
+            $phaseDefs[] = [
+                'code'         => $meta['code'],
+                'name'         => $phaseStarts[$startCol]['label'],
+                'cols'         => $cols,
+                'order'        => $meta['order'],
+                'is_execution' => $meta['is_execution'],
+            ];
+        }
+
+        // 4. Always inject Development at cols 4–5 when its row-4 label
+        //    confirms presence.
+        $devHeader = (string) $sheet->getCell([4, 4])->getValue();
+        if (stripos($devHeader, 'Develop') !== false || str_contains($devHeader, '開発工数')) {
+            $phaseDefs[] = [
+                'code'         => 'development',
+                'name'         => 'Development',
+                'cols'         => [4, 5],
+                'order'        => 5,
+                'is_execution' => true,
+            ];
+        }
+
+        usort($phaseDefs, fn ($a, $b) => $a['order'] <=> $b['order']);
+
+        return ['phase_defs' => $phaseDefs, 'total_col' => $totalCol];
+    }
+
+    private function isNonPhaseColumn(string $row4Label): bool
+    {
+        $label = trim($row4Label);
+        if ($label === '') {
+            return false;
+        }
+        foreach (self::NON_PHASE_LABEL_KEYWORDS as $kw) {
+            if (str_contains($label, $kw)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -1146,6 +1294,28 @@ PROMPT;
                 ];
             }
         }
+
+        // Also surface phases that are declared in the Estimate.xlsx's row 3
+        // headers but have zero hours across all tasks (so no DB rows exist
+        // for them). PMs want to see "this phase exists in the template but
+        // has no work yet" rather than have the column silently hidden.
+        // Cheap: one xlsx read; can move to a per-project cache later.
+        try {
+            $declared = $this->readEstimateSheet()['active_phases'] ?? [];
+            foreach ($declared as $p) {
+                if (! isset($byCode[$p['code']])) {
+                    $byCode[$p['code']] = [
+                        'code'  => $p['code'],
+                        'name'  => $p['name'],
+                        'order' => (int) $p['order'],
+                    ];
+                }
+            }
+        } catch (\Throwable $e) {
+            // Missing / unreadable file → fall back to DB-only phases.
+            Log::warning('activePhasesFromRows: could not read estimate for phase merge: '.$e->getMessage());
+        }
+
         $active = array_values($byCode);
         usort($active, fn ($a, $b) => $a['order'] <=> $b['order']);
 
