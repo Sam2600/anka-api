@@ -1,0 +1,366 @@
+id: chg-011-project-pipeline-and-contract-drafting
+name: Project Pipeline backend — rank state machine, deal field locking, AI contract drafting
+status: proposed
+created: 2026-05-14
+owners: [claude.max@brycenmyanmar.com.mm]
+paired_with: anka-frontend/openspec/changes/chg-009-project-pipeline-rewrite.yaml
+
+why: |
+  Manager delivered a new "System Flow — ANKA" spec on 2026-05-14 that
+  redrew the module boundaries. The eight numbered processes (① Master
+  Data → ⑧ Forecast) each get one module owner. Project Pipeline (the
+  renamed CRM menu, see frontend chg-009) owns ③ Nego + ⑤ Contract
+  Generation only.
+
+  Backend changes:
+    1. Strict rank state machine — forward-only, event-driven, no
+       manual override.
+    2. Deal model gains the Estimation handoff fields (final_*) plus a
+       Dropped status flag (orthogonal to rank, replaces D rank).
+    3. Field locking in the DealController — requirement_description /
+       target_timeline / estimate_budget / final_* fields become
+       read-only when rank ∈ {A, S}.
+    4. New AI contract drafting feature: contract_templates table with
+       3 seeded SES variants (Cloud Backup / Managed Hosting / Engineer
+       Dispatch), deal_contract_drafts table, ContractDraftService that
+       calls Claude to fill structured contract sections, and a
+       controller exposing the wizard endpoints.
+    5. Mark-signed flow that uploads a counter-signed PDF and fires
+       A→S via the existing win_deal() stored procedure.
+
+scope_decisions:
+  rank_rules:
+    - "Ranks reduced from 5 to 4: C / B / A / S. D removed."
+    - "Forecast weights (informational, used by ⑧ Forecast module): C=30, B=50, A=80, S=100."
+    - "Forward-only state machine. Backward transitions throw 422."
+    - "No manual override — old PATCH /deals/{id}/stage endpoint removed. Rank changes only fire from event triggers."
+  rank_triggers:
+    - "→ C: deal created via POST /deals (intake form)"
+    - "→ B: Estimation menu sets final_confirmed_at + populates required final_* fields, then PATCHes deal.rank='B' via internal call (this menu doesn't trigger B; Estimation does)"
+    - "→ A: first contract draft generated via POST /deals/{deal}/contract-drafts"
+    - "→ S: mark-signed via POST /contract-drafts/{draft}/mark-signed; calls existing win_deal() stored procedure"
+  field_locking:
+    - "When rank ∈ {A, S}, DealController::update() rejects writes to: requirement_description, target_timeline, estimate_budget, final_monthly_fee, final_installation_fee, final_contract_months, final_ot_policy, final_support_hours_per_month, final_team_summary, final_currency, final_confirmed_at, suggested_template_variant"
+    - "Allowed in A: status (for dropping), notes / activity log"
+    - "Allowed in S: nothing on the deal — to amend, create a new deal"
+  dropped_status:
+    - "deal.status ENUM('active','dropped'); deal.dropped_at_rank ENUM('C','B','A') NULL"
+    - "S deals cannot be dropped — POST /deals/{deal}/drop returns 422 if rank='S'"
+    - "Forecast module (⑧) only includes status='active' deals"
+  estimation_handoff_contract:
+    - "These fields on `deals` MUST be populated by the Estimation menu before a deal can become contract-eligible:"
+    - "final_monthly_fee (decimal, NOT NULL when contract draft attempted)"
+    - "final_installation_fee (decimal, nullable)"
+    - "final_contract_months (int, NOT NULL when contract draft attempted)"
+    - "final_ot_policy (text, nullable)"
+    - "final_support_hours_per_month (int, nullable, DEFAULT 12 in service layer)"
+    - "final_team_summary (text, NOT NULL when contract draft attempted)"
+    - "final_currency (char(3), NOT NULL when contract draft attempted)"
+    - "final_confirmed_at (timestamp, NOT NULL when contract draft attempted — gates B→A trigger)"
+    - "suggested_template_variant (varchar, nullable — Estimation hints at which SES variant)"
+
+what:
+  migrations:
+    - 2026_05_15_000001_add_final_fields_to_deals.php
+      - Adds: final_monthly_fee (decimal 14,2), final_installation_fee
+        (decimal 14,2 nullable), final_contract_months (int),
+        final_ot_policy (text), final_support_hours_per_month (int),
+        final_team_summary (text), final_currency (char 3),
+        final_confirmed_at (timestamp), suggested_template_variant
+        (varchar 64).
+      - All nullable at the DB level (validated at the service layer
+        when contract draft is attempted).
+    - 2026_05_15_000002_add_status_and_dropped_at_rank_to_deals.php
+      - status ENUM('active','dropped') DEFAULT 'active'
+      - dropped_at_rank ENUM('C','B','A') NULL
+      - Backfill: status='active' for all existing rows. dropped_at_rank
+        backfilled from existing rank='D' rows (rare but possible),
+        then rank rewritten to whatever the deal was at before being
+        marked D.
+    - 2026_05_15_000003_drop_d_rank_from_deals_check.php
+      - Updates the rank CHECK constraint to ('C','B','A','S').
+      - Run AFTER the rank-D backfill in 000002.
+    - 2026_05_15_000004_create_contract_templates_table.php
+      - Columns: id (uuid), tenant_id (uuid nullable — null for global
+        seed templates), name, slug (unique per tenant), umbrella
+        (varchar — 'SES' for v1), version (int default 1), sections
+        (jsonb), is_active (bool), timestamps, deletes.
+    - 2026_05_15_000005_create_deal_contract_drafts_table.php
+      - Columns: id (uuid), tenant_id, deal_id (FK), template_id (FK),
+        template_version_at_generation (int), status ENUM('draft',
+        'sent_to_customer','signed','superseded') DEFAULT 'draft',
+        version (int default 1), wizard_inputs (jsonb), ai_outputs
+        (jsonb), sections (jsonb), generated_pdf_path (varchar),
+        sent_at (timestamp), sent_to_email (varchar), signed_at
+        (timestamp), signed_pdf_path (varchar), generated_by_user_id
+        (FK), finalized_by_user_id (FK), timestamps, deletes.
+    - 2026_05_15_000006_seed_3_ses_template_variants.php
+      - Seeds three rows in contract_templates with tenant_id=NULL
+        (global). Each row's `sections` JSON contains the 10-section
+        template structure with template-variant-specific fixed_text,
+        ai_prompt, wizard_questions, output_format per section.
+      - Variant 1: Cloud Backup (modeled after the Yazaki Veritas
+        Backup Exec contract — TB-tiered pricing, GCP/AWS/Azure config,
+        data deletion-on-termination clauses)
+      - Variant 2: Managed Hosting / Cloud Operations (24/7 monitoring,
+        SLA-based pricing, incident response)
+      - Variant 3: Engineer Dispatch (traditional SES — engineer
+        assigned for X hours/month, working hours, rate card)
+
+  models:
+    - app/Models/ContractTemplate.php — BelongsToTenant trait (with
+      override allowing tenant_id IS NULL = global). Casts: sections
+      → array. Scopes: active(), forUmbrella().
+    - app/Models/DealContractDraft.php — BelongsToTenant. Belongs to
+      Deal, ContractTemplate, generatedByUser, finalizedByUser.
+      Casts: wizard_inputs / ai_outputs / sections → array, sent_at /
+      signed_at → datetime.
+    - app/Models/Deal.php — adds:
+      - canTransitionTo(string $newRank): bool — encodes forward-only
+        + precondition rules
+      - canBeDropped(): bool — true iff rank ∈ {C,B,A} AND status='active'
+      - isLocked(): bool — true iff rank ∈ {A,S}
+      - lockedFields(): array — list of field names blocked in A/S
+      - status / dropped_at_rank casts
+      - new final_* attribute fillable list
+
+  services:
+    - app/Services/ContractDraftService.php (new, ~400 LOC)
+      - generateDraft(Deal $deal, ContractTemplate $template, array $wizardInputs): DealContractDraft
+        - Validates: deal.rank='B', deal.status='active', all required
+          final_* fields populated, deal.final_confirmed_at not null.
+        - Builds prompt from template.sections + wizardInputs +
+          deal.requirement_description + final_* values.
+        - Single Claude call requesting structured JSON keyed by each
+          ai_written section's key. 90s timeout, retry on
+          ConnectionException only (mirrors ContractAnalysisService
+          resilience pattern).
+        - Merges fixed sections + AI outputs + wizard slot values.
+        - Marks gaps as "{{TODO: <what>}}" tokens (Path B).
+        - On first successful generation for a deal: fires B→A via
+          Deal::transitionTo('A').
+      - regenerateSection(DealContractDraft $draft, string $sectionKey, array $newWizardInputs): array
+      - renderDocx(DealContractDraft $draft): string
+        - Uses phpoffice/phpword (already a dependency for
+          ContractAnalysisService text extraction). Loads the template's
+          DOCX skeleton, fills section placeholders from draft.sections.
+        - Returns storage path: storage/contract-drafts/{tenant}/{draft_id}_v{version}.docx
+      - markSent(DealContractDraft $draft, string $email, User $sentBy): void
+        - Sets status='sent_to_customer', sent_at, sent_to_email.
+        - Fires ContractDraftSent event (mailable picks it up).
+      - markSigned(DealContractDraft $draft, UploadedFile $signedPdf, User $signedBy): array
+        - Validates PDF + max 25MB.
+        - Stores at storage/contract-drafts/{tenant}/{draft_id}_signed.pdf.
+        - Sets status='signed', signed_at, signed_pdf_path.
+        - Calls win_deal(p_deal_id, p_tenant_id) stored procedure
+          (with PHP fallback for SQLite tests, mirroring existing
+          DealContractDocumentController::autoWinDeal pattern).
+        - Returns { document, auto_won, contract: {id} } shape matching
+          existing UploadResponse for frontend reuse.
+    - app/Services/ContractEmailService.php (new)
+      - send(DealContractDraft $draft, string $toEmail, ?string $message): void
+      - Uses Laravel Mail with tenant SMTP config (env or per-tenant
+        settings — falls back to platform default if tenant SMTP not
+        configured).
+      - Attaches the rendered DOCX from generated_pdf_path.
+
+  controllers:
+    - app/Http/Controllers/Api/ContractTemplateController.php (new)
+      - GET /contract-templates — list active templates (global +
+        tenant-owned). Query: ?umbrella=SES.
+      - GET /contract-templates/{template} — single template with full
+        sections JSON.
+      - (Admin CRUD deferred to v2.)
+    - app/Http/Controllers/Api/DealContractDraftController.php (new)
+      - GET /deals/{deal}/contract-drafts — list drafts for a deal,
+        most recent first. permission:view_crm.
+      - POST /deals/{deal}/contract-drafts — start generation.
+        Body: { template_id, wizard_inputs }. Returns the new draft.
+        Fires B→A on first generation. permission:manage_crm.
+      - GET /contract-drafts/{draft} — single draft. permission:view_crm.
+      - PATCH /contract-drafts/{draft} — patch single section content
+        (user edits in wizard step 2). Body: { section_key, content }.
+        permission:manage_crm.
+      - POST /contract-drafts/{draft}/regenerate-section — re-run AI for
+        one section. Body: { section_key, wizard_inputs }.
+        permission:manage_crm.
+      - POST /contract-drafts/{draft}/finalise — render DOCX, return
+        storage URL. permission:manage_crm.
+      - POST /contract-drafts/{draft}/send — email to customer.
+        Body: { to_email, message? }. permission:send_contract_draft
+        (manager-only).
+      - POST /contract-drafts/{draft}/mark-signed — multipart upload
+        signed PDF. Fires A→S. permission:manage_crm.
+    - app/Http/Controllers/Api/DealController.php — modifications:
+      - update() — rejects writes to locked fields when rank ∈ {A,S}.
+        Returns 422 with field-level errors.
+      - REMOVED: PATCH /deals/{deal}/stage endpoint (manual rank
+        override). Rank changes only via event triggers.
+      - REMOVED: POST /deals/{deal}/win endpoint (callable via API by
+        any privileged user, bypasses contract gate). win_deal() now
+        only fires from ContractDraftService::markSigned.
+      - NEW: POST /deals/{deal}/drop — sets status='dropped',
+        dropped_at_rank=current_rank. Rejects if rank='S'.
+
+  resources:
+    - app/Http/Resources/DealResource.php — adds final_* fields,
+      status, dropped_at_rank, suggested_template_variant. Adds
+      lock_state object: { is_locked: bool, locked_fields: string[] }
+      so the frontend doesn't have to compute it.
+    - app/Http/Resources/ContractTemplateResource.php (new)
+    - app/Http/Resources/DealContractDraftResource.php (new) — includes
+      draft.deal as a lightweight DealSummaryResource for list payloads.
+
+  routes:
+    - routes/api.php — under tenant middleware group:
+      - Resource: contract-templates (GET only)
+      - Nested: deals/{deal}/contract-drafts (GET, POST)
+      - Resource: contract-drafts (GET show, PATCH, custom POSTs for
+        regenerate-section / finalise / send / mark-signed)
+      - POST /deals/{deal}/drop
+    - Route alias: /project-pipeline/* → /crm/* preserved for
+      backward-compat. (Frontend handles the URL change; backend keeps
+      same paths.)
+
+  permissions:
+    - app/Http/Middleware/CheckPermission.php — no changes; new
+      permission `send_contract_draft` added to the permission matrix.
+    - app/Models/Tenant.php (or wherever permissions are seeded) —
+      send_contract_draft seeded for Admin + Executive roles.
+    - view_crm and manage_crm names UNCHANGED at backend (alias is
+      a frontend concern via lib/route-permissions.ts).
+
+  what_stays_in_place:
+    - app/Services/ContractAnalysisService.php — kept for the Contract
+      Review menu (chg-009 frontend Phase A relocates the consumers,
+      not the service).
+    - app/Models/DealContractDocument.php — kept.
+    - DealContractDocumentController + its routes — kept. The Contract
+      Review menu owns it now per the new module boundaries; backend
+      just keeps serving the routes.
+
+placeholders:
+  - The exact Claude prompt for ContractDraftService is not finalised.
+    Initial draft will reuse the system-prompt skeleton from
+    ContractAnalysisService (rules 1–9, especially Rule 9 about no
+    snake_case in human-facing text). The user prompt structure needs
+    iteration once we see actual generation output against the Yazaki
+    template.
+  - The 3 SES template variants' wizard_questions arrays are first
+    drafts. Expect 1–2 rounds of refinement after the first real
+    customer contract is drafted end-to-end.
+  - Tenant SMTP configuration for ContractEmailService is the same
+    placeholder used by other tenant mail (welcome emails, etc.). If
+    tenant-SMTP work is incomplete elsewhere, this falls back to the
+    platform-default mailer.
+
+risk: |
+  - Removing PATCH /deals/{deal}/stage and POST /deals/{deal}/win is a
+    breaking API change. Any internal scripts or admin tools calling
+    these endpoints will break. Audit before merging.
+  - The rank state-machine class needs careful test coverage —
+    forward-only with multiple owners (Estimation sets B, this menu
+    sets A and S) is easy to get wrong. Recommend ≥10 unit tests in
+    tests/Unit/DealRankTransitionTest.php covering: valid forward,
+    invalid backward, invalid skip (C→A direct), invalid manual
+    override, dropping from C/B/A, attempting to drop S, locking in
+    A/S.
+  - ContractDraftService Claude calls are 60–90s. Need queue worker if
+    tenant traffic spikes; for v1 synchronous calls in the request
+    cycle are fine (same pattern as ContractAnalysisService).
+  - phpoffice/phpword DOCX generation against complex templates
+    (tables, section numbering) can be finicky. The Yazaki template's
+    bullet-pair format (Provider/User scope split) needs a custom
+    renderer; budget extra time here.
+  - Field locking guards in DealController::update() must be in the
+    request validation layer, NOT in the controller body, so 422
+    field-level errors render correctly in the frontend's normalizeError.
+
+rollback: |
+  - Migrations 000001 / 000004 / 000005 are additive — safe to drop in
+    reverse order if needed.
+  - Migration 000002 (status/dropped_at_rank) — reversal would lose
+    drop history but no other data. Safe.
+  - Migration 000003 (rank CHECK update) — reversible but requires
+    re-adding 'D' to the constraint and migrating any new C/B/A drops
+    back to D rank. Avoid rolling back 000003 without a plan.
+  - Removed endpoints (PATCH stage, POST win) — restore from git if
+    needed; no data dependency.
+
+manual_steps:
+  - composer update && php artisan migrate
+  - php artisan db:seed --class=Database\\Seeders\\ContractTemplateSeeder
+    (if seeder is split out from migration)
+  - Smoke-test the rank state machine:
+      php artisan tinker
+      > $deal = \App\Models\Deal::first(); $deal->canTransitionTo('A')
+  - Coordinate frontend chg-009 deploy — backend ships first so
+    /contract-templates and /deals/{deal}/contract-drafts return real
+    data when frontend's [Generate Contract Draft] button calls them.
+
+phasing:
+  - phase: B
+    description: "Additive deal-model + state-machine. No breaking changes. Ships first, before frontend Phase B."
+    files:
+      - migration 000001 (final_* fields, all nullable)
+      - migration 000002 (status, dropped_at_rank)
+      - Deal model updates (canTransitionTo, lockedFields, casts)
+      - DealController::update() field-locking guards
+      - Unit tests for the state machine
+  - phase: B-breaking
+    description: "Breaking removals. Coordinate with frontend chg-009 release."
+    files:
+      - migration 000003 (drop D from rank CHECK)
+      - Remove PATCH /deals/{deal}/stage
+      - Remove POST /deals/{deal}/win
+      - Add POST /deals/{deal}/drop
+  - phase: C
+    description: "Build AI contract drafting feature."
+    files:
+      - migrations 000004 / 000005 / 000006 (templates + drafts + seed)
+      - ContractTemplate, DealContractDraft models
+      - ContractDraftService + ContractEmailService
+      - ContractTemplateController + DealContractDraftController
+      - Routes + Resources
+      - Mail template (Blade) for ContractDraftSent
+
+estimated_size: ~1500 LOC (backend portion); ~3–5 days
+
+deferred_to_v2:
+  - Admin CRUD UI for editing contract templates (templates only
+    seeded via migration in v1)
+  - Re-usable contract_clauses library table
+  - E-sign integration (Adobe Sign / DocuSign / etc.)
+  - Multi-language contract drafting (Japanese first)
+  - Contract amendment / renewal flows
+  - Per-tenant SMTP customisation for the ContractEmailService (uses
+    platform default in v1)
+  - Background queueing for the Claude generation call (synchronous in v1)
+
+review_checklist:
+  - "Does Deal::canTransitionTo enforce forward-only? Test C→A directly returns false."
+  - "Does Deal::canTransitionTo refuse to transition a dropped deal?"
+  - "Does DealController::update return 422 with field-level errors when locked fields are written?"
+  - "Does ContractDraftService::generateDraft validate ALL required final_* fields before calling Claude (saves 90s of Claude time on misconfigured deals)?"
+  - "Does markSigned still call win_deal() with the SQLite PHP fallback for tests?"
+  - "Are the 3 SES variants' sections JSON valid against the section-config schema (key, title, type, output_format etc.)?"
+  - "Does DropDeal endpoint refuse status='S'?"
+  - "Have we audited internal callers of PATCH /deals/{id}/stage and POST /deals/{id}/win before removing them?"
+
+paired_with_notes: |
+  This change must ship in lock-step with frontend chg-009. The
+  recommended order:
+    1. Backend Phase B (additive — final_* + status + state machine)
+    2. Frontend chg-009 Phase B (additive — kanban + locking, reads
+       new fields from backend)
+    3. Backend Phase C (contract drafting service + endpoints)
+    4. Frontend chg-009 Phase C (wizard UI)
+    5. Backend Phase B-breaking (remove old stage/win endpoints, add
+       drop endpoint)
+    6. Frontend chg-009 Phase A (relocate moved files; coordinate with
+       Estimation + Contract Review menu owners)
+    7. Frontend chg-009 Phase D (rename routes /crm → /project-pipeline)
+
+  Steps 1–4 are additive and can ship over multiple deploys. Step 5
+  is the risk window — both backend and frontend release together to
+  avoid orphaned UI buttons or 404s.

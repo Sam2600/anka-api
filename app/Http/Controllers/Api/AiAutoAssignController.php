@@ -58,12 +58,15 @@ class AiAutoAssignController extends Controller
 
             $prompt = $this->buildAutoAssignPrompt($project, $deal, $employeesWithSkills, $requiredSkills);
 
+            $baseUrl = rtrim(config('services.anthropic.base_url') ?: 'https://api.anthropic.com', '/');
+            $model = config('services.anthropic.model') ?: 'claude-3-5-sonnet-latest';
+
             $response = Http::withHeaders([
                 'x-api-key' => $apiKey,
                 'anthropic-version' => '2023-06-01',
                 'content-type' => 'application/json',
-            ])->post('https://api.anthropic.com/v1/messages', [
-                'model' => 'claude-3-5-sonnet-latest',
+            ])->post($baseUrl.'/v1/messages', [
+                'model' => $model,
                 'max_tokens' => 2048,
                 'system' => 'You are an HR staffing assistant. Return ONLY a JSON array of employee IDs with allocated hours. No markdown, no explanation.',
                 'messages' => [

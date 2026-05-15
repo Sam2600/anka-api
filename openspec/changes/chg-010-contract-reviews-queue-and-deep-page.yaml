@@ -1,0 +1,102 @@
+id: chg-010-contract-reviews-queue-and-deep-page
+name: Contract Reviews queue + deep-review page (under /crm)
+status: implemented
+created: 2026-05-14
+owners: [claude.max@brycenmyanmar.com.mm]
+
+why: |
+  The rich AnalysisResultCard had outgrown its embedded slot on the deal-
+  detail page. With 26 graded fields, evidence quotes, dispute risks,
+  diff-vs-previous, and the deal-mismatch banner, it took up most of the
+  screen and pushed the deal's own info below the fold. Salespeople
+  reviewing multiple contracts also had no triage view — they had to
+  open each deal individually to see the verdict status.
+
+  This change splits the surface into two screens, both under /crm
+  (since contract review is a CRM workflow, not a standalone destination
+  worth a sidebar slot):
+    1. /crm/contract-reviews         — tenant-wide queue with status
+       filters, search, and per-row score/status chips. Salespeople triage
+       what needs attention.
+    2. /crm/contract-reviews/[id]    — deep review with the full
+       AnalysisResultCard + a deal-context side panel for reconciliation.
+
+  The deal-detail uploader keeps the upload area and now shows a compact
+  one-line summary per doc with an "Open full review →" link to the
+  deep page. The full verdict no longer crowds the deal detail.
+
+what:
+  backend:
+    - DealContractDocumentController::indexAll — new GET /contract-documents
+      endpoint. Returns paginated, tenant-scoped list with the deal eager-
+      loaded (id, name, client, status). Filters: status, search (matches
+      original_filename / deal.name / deal.client, case-insensitive).
+      Routed under view_crm permission alongside the existing show / index.
+    - DealContractDocumentResource: new conditional `deal` field, only
+      emitted when the relation is eager-loaded (queue endpoint sets it,
+      per-deal index doesn't, keeping the existing payload stable).
+
+  frontend:
+    - lib/queries/contractDocuments.ts: new useAllContractDocuments(filters)
+      hook backing the queue, plus useContractDocument(id) for the deep
+      page; new ContractDocumentDealSummary type for the embedded deal.
+    - components/tables/ContractReviewsTable.tsx (new): TanStack table with
+      Status / Score / Deal / File / Uploaded columns. Score column uses
+      severity-tier colours; rows link to the deep page.
+    - app/(dashboard)/crm/contract-reviews/page.tsx (new): queue page with
+      status filter chips (All / Pending / Analyzing / Needs attention /
+      Approved / Failed), debounced search, four quick-glance stat cards
+      derived from the current filter result.
+    - app/(dashboard)/crm/contract-reviews/[id]/page.tsx (new): deep review
+      with the existing AnalysisResultCard in the main column + a deal-
+      context side panel (deal name, client, stage, expected budget,
+      timeline, contact) so reviewers can spot mismatches between what
+      the contract says and what the deal expected.
+    - app/(dashboard)/crm/page.tsx: new "Contract Reviews" outline button
+      in the page header next to "New Deal", FileSearch icon. Discovery
+      surface — no sidebar entry by design.
+    - components/crm/ContractDocumentUploader.tsx: replaced the embedded
+      AnalysisResultCard with a new ContractDocumentSummaryRow that shows
+      status icon, badge, filename, score, mismatch chip (when deal_match
+      fails), executive summary (line-clamped to 2 lines), and an "Open
+      full review →" link. Delete button preserved. Saves ~400 vertical
+      pixels on the deal detail page per doc.
+
+  openspec:
+    - app-routes.yaml: documented the two new routes under /crm.
+    - components.yaml: ContractDocumentUploader entry rewritten;
+      ContractReviewsTable added.
+    - api-contracts.yaml: indexAll route documented.
+
+permissions: |
+  Both routes inherit /crm's permission via longest-prefix match in
+  lib/route-permissions.ts → Executive + Sales. Admin bypasses as usual.
+  Backend gates GET /contract-documents under permission:view_crm.
+
+risk: |
+  - The queue endpoint is paginated (50/page default, capped at 100). On
+    a tenant with thousands of historical contract docs the user can still
+    paginate. No risk of pulling everything in one shot.
+  - Search is case-insensitive substring on three fields. Slow on Postgres
+    if the tenant has 10k+ rows — not an issue at current scale; revisit
+    with a trigram index if it ever bites.
+  - The compact summary row on the deal-detail uploader still loads all
+    rich verdict fields (we just don't render the long ones). Same payload
+    size as before.
+
+rollback: |
+  - All routes are additive; reverting the frontend leaves no orphan
+    references because the deal-detail uploader's summary row is a new
+    component and the deep page is reached only via that new link.
+  - Backend indexAll is a new method; safe to drop.
+
+manual_steps:
+  - npm run dev / build to pick up the new pages.
+  - No backend migration needed.
+
+follow_up:
+  - Add a "[N pending] needs attention" badge to the CRM page button
+    when it's worth the extra round trip per page load.
+  - When the structured-extraction work ships (deferred from chg-009
+    discussion), surface the extracted Contract vs Deal reconciliation
+    panel on the deep page side-by-side with the current deal context.

@@ -19,6 +19,24 @@ class DealContractDocumentResource extends JsonResource
             'size_bytes' => $this->size_bytes,
             'analysis_status' => $this->analysis_status,
             'analysis_result' => $this->analysis_result,
+            // Surfaced top-level for the UI score gauge and quick filtering.
+            // Same values are also accessible inside analysis_result; these
+            // two columns just save the frontend from unpacking the JSONB.
+            'overall_score' => $this->overall_score,
+            'detected_payment_pattern' => $this->detected_payment_pattern,
+            // Snapshot of the prior verdict (when this is a re-upload).
+            // Claude consumes it to produce diff_vs_previous; the UI can also
+            // render a "previous vs current" comparison if/when we add one.
+            'previous_analysis' => $this->previous_analysis,
+            // Lightweight deal summary — only included when the parent deal
+            // relationship is eager-loaded. Used by the /contract-reviews
+            // queue table to show "for which deal?" without an extra fetch.
+            'deal' => $this->whenLoaded('deal', fn () => $this->deal ? [
+                'id' => $this->deal->id,
+                'name' => $this->deal->name,
+                'client' => $this->deal->client,
+                'status' => $this->deal->status,
+            ] : null),
             'analyzed_at' => $this->analyzed_at?->toIso8601String(),
             'created_at' => $this->created_at?->toIso8601String(),
             'updated_at' => $this->updated_at?->toIso8601String(),

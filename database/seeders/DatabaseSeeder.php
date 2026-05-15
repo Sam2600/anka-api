@@ -21,6 +21,7 @@ use App\Models\Invoice;
 use App\Models\Milestone;
 use App\Models\Project;
 use App\Models\ProjectTeamAssignment;
+use App\Models\Rank;
 use App\Models\Role;
 use App\Models\Skill;
 use App\Models\Tenant;
@@ -75,6 +76,7 @@ class DatabaseSeeder extends Seeder
             'users',
             'employees',
             'skills',
+            'ranks',
             'capacity_roles',
             'roles',
             'departments',
@@ -114,10 +116,11 @@ class DatabaseSeeder extends Seeder
         ]);
 
         $capacityRoles = $this->createCapacityRoles($tenant);
+        $ranks = $this->createRanks($tenant);
         $departments = $this->createDepartments($tenant);
         $roles = $this->createRoles($tenant, $departments, $blueprint['role_rates']);
         $skills = $this->createSkills($tenant, $blueprint['skills']);
-        $employees = $this->createEmployees($tenant, $blueprint['employees'], $departments, $roles, $capacityRoles, $skills);
+        $employees = $this->createEmployees($tenant, $blueprint['employees'], $departments, $roles, $capacityRoles, $ranks, $skills);
         $users = $this->createUsers($tenant, $blueprint['users'], $employees);
 
         $this->finishDepartments($departments, $employees);
@@ -146,6 +149,65 @@ class DatabaseSeeder extends Seeder
         }
 
         return $roles;
+    }
+
+    /**
+     * Seniority ranks per tenant. Levels are chosen with gaps so tenants
+     * can add custom ranks ("Principal" 35, "Staff" 45) without bumping
+     * every other rank's level. Higher = more senior.
+     */
+    private function createRanks(Tenant $tenant): array
+    {
+        $ranks = [];
+
+        foreach ([
+            ['code' => 'Junior', 'name' => 'Junior',           'level' => 10],
+            ['code' => 'Mid',    'name' => 'Mid-Level',        'level' => 20],
+            ['code' => 'Senior', 'name' => 'Senior',           'level' => 30],
+            ['code' => 'Lead',   'name' => 'Lead / Tech Lead', 'level' => 40],
+        ] as $row) {
+            $ranks[$row['code']] = Rank::create([
+                'tenant_id' => $tenant->id,
+                'code' => $row['code'],
+                'name' => $row['name'],
+                'level' => $row['level'],
+            ]);
+        }
+
+        return $ranks;
+    }
+
+    /**
+     * Heuristic rank assignment from a seeded employee's role title.
+     * Mirrors the AI prompt's pre-existing keyword logic so the seeded
+     * data exercises the same seniority taxonomy. Returns the rank code
+     * key ('Lead', 'Senior', 'Mid', 'Junior') for the supplied ranks
+     * map; returns null when no keywords match (employee stays unranked).
+     */
+    private function deriveRankCode(?string $roleTitle): string
+    {
+        $title = strtolower((string) $roleTitle);
+        if ($title === '') {
+            return 'Mid';
+        }
+
+        foreach (['lead', 'head', 'principal', 'master', 'manager', 'director', 'architect'] as $kw) {
+            if (str_contains($title, $kw)) {
+                return 'Lead';
+            }
+        }
+        foreach (['senior'] as $kw) {
+            if (str_contains($title, $kw)) {
+                return 'Senior';
+            }
+        }
+        foreach (['junior', 'intern', 'associate', 'trainee'] as $kw) {
+            if (str_contains($title, $kw)) {
+                return 'Junior';
+            }
+        }
+
+        return 'Mid';
     }
 
     private function createDepartments(Tenant $tenant): array
@@ -213,12 +275,14 @@ class DatabaseSeeder extends Seeder
         array $departments,
         array $roles,
         array $capacityRoles,
+        array $ranks,
         array $skills
     ): array {
         $employees = [];
 
         foreach ($employeeRows as $row) {
             $role = $roles[$row['role']];
+            $rankCode = $this->deriveRankCode($row['role']);
             $employee = Employee::create([
                 'tenant_id' => $tenant->id,
                 'department_id' => $departments[$row['department']]->id,
@@ -228,6 +292,7 @@ class DatabaseSeeder extends Seeder
                 'role_name' => $row['role'],
                 'capacity_role' => $row['capacity'],
                 'capacity_role_id' => $capacityRoles[$row['capacity']]->id,
+                'rank_id' => $ranks[$rankCode]->id,
                 'monthly_salary' => $row['salary'],
                 'workable_hours' => $row['hours'],
                 'status' => $row['status'] ?? 'Active',
@@ -480,17 +545,14 @@ class DatabaseSeeder extends Seeder
         ];
 
         if ($scenario === 'rejected') {
+            $verdict = $this->demoRejectedVerdict();
             DealContractDocument::create($base + [
                 'original_filename' => Str::slug($deal->client).'-draft-contract.pdf',
                 'size_bytes' => 412_300,
                 'analysis_status' => 'rejected',
-                'analysis_result' => [
-                    'approved' => false,
-                    'missing_fields' => ['payment_terms', 'effective_date'],
-                    'reasoning' => 'Draft contract includes scope and signatures, but no payment schedule or commencement date — both required before this deal can move to Won.',
-                    'required_fields' => ['client_name', 'contract_value', 'payment_terms', 'effective_date', 'signatures', 'scope_of_work'],
-                    'model' => 'claude-3-5-sonnet-latest',
-                ],
+                'analysis_result' => $verdict,
+                'overall_score' => $verdict['overall_score'],
+                'detected_payment_pattern' => $verdict['detected_payment_pattern'],
                 'analyzed_at' => now()->subDays(2),
                 'created_at' => now()->subDays(2),
                 'updated_at' => now()->subDays(2),
@@ -526,6 +588,108 @@ class DatabaseSeeder extends Seeder
             'created_at' => now()->subMinutes(5),
             'updated_at' => now()->subMinutes(5),
         ]);
+    }
+
+    /**
+     * Shaped verdict for a representative `rejected` demo doc — mirrors the
+     * production ContractAnalysisService output (field_grades, dispute_risks,
+     * critical_failures, executive_summary). Two critical failures
+     * (customer_signature, out_of_scope_clause) so the UI shows both the red
+     * "critical" block and the amber "required" block.
+     */
+    private function demoRejectedVerdict(): array
+    {
+        // Build a default-present grade list with two missing critical entries.
+        $grades = [];
+        $missing = [
+            'customer_signature' => 'User signature block has Name / Position / NRC / Date all blank on page 5.',
+            'out_of_scope_clause' => 'No explicit statement that out-of-scope work is billable separately or unsupported.',
+        ];
+        $partial = [
+            'working_hours_timezone' => [
+                'evidence' => 'Online supporting for technical issue during 09:00 AM to 16:00 PM except Holidays.',
+                'location' => '§7 Monitoring',
+                'reasoning' => 'Hours are stated but no timezone — fine locally, ambiguous for offshore.',
+                'fix' => 'Add "Myanmar Standard Time (UTC+6:30)" to the §7 hours statement.',
+            ],
+        ];
+
+        foreach (\App\Services\ContractAnalysisService::FIELD_DEFINITIONS as $def) {
+            $field = $def['field'];
+            if (isset($missing[$field])) {
+                $grades[] = [
+                    'field' => $field,
+                    'label' => $def['label'],
+                    'status' => 'missing',
+                    'severity' => $def['severity'],
+                    'score' => 0,
+                    'evidence' => null,
+                    'evidence_location' => null,
+                    'reasoning' => $missing[$field],
+                    'suggested_fix' => 'Add this clause before re-uploading.',
+                ];
+            } elseif (isset($partial[$field])) {
+                $p = $partial[$field];
+                $grades[] = [
+                    'field' => $field,
+                    'label' => $def['label'],
+                    'status' => 'partial',
+                    'severity' => $def['severity'],
+                    'score' => 60,
+                    'evidence' => $p['evidence'],
+                    'evidence_location' => $p['location'],
+                    'reasoning' => $p['reasoning'],
+                    'suggested_fix' => $p['fix'],
+                ];
+            } else {
+                $grades[] = [
+                    'field' => $field,
+                    'label' => $def['label'],
+                    'status' => 'present',
+                    'severity' => $def['severity'],
+                    'score' => 90,
+                    'evidence' => null,
+                    'evidence_location' => null,
+                    'reasoning' => 'Clause present and clearly worded.',
+                    'suggested_fix' => null,
+                ];
+            }
+        }
+
+        return [
+            'approved' => false,
+            'overall_score' => 72,
+            'detected_payment_pattern' => 'monthly_recurring',
+            'executive_summary' => 'Strong commercial terms but missing customer signature and an explicit out-of-scope clause. Two critical failures — cannot approve.',
+            'field_grades' => $grades,
+            'critical_failures' => array_keys($missing),
+            'dispute_risks' => [
+                [
+                    'concern' => 'Commencement date is left as the placeholder text "Date" rather than an actual date.',
+                    'severity' => 'high',
+                    'clause_quote' => 'starting from Date to Date will be encompassed as "Free"',
+                    'suggested_remediation' => 'Fill the exact trial dates before signing — otherwise the trial-period and term-length boundaries are undefined.',
+                ],
+            ],
+            'deal_match' => [
+                // Demo shows a passing deal-match so the rejection is clearly
+                // attributable to missing fields (not a wrong-customer upload).
+                'is_match' => true,
+                'confidence' => 0.92,
+                'deal_client' => null,
+                'doc_parties' => ['Brycen Myanmar Ltd.', 'Customer Co.,Ltd'],
+                'checks' => [
+                    'client_name_match' => 'present',
+                    'value_alignment' => 'within_25%',
+                    'project_name_match' => 'partial',
+                    'contact_match' => 'present',
+                ],
+                'discrepancies' => [],
+                'reasoning' => 'Contract parties and project description match the deal context.',
+            ],
+            'diff_vs_previous' => null,
+            'model' => 'claude-3-5-sonnet-latest',
+        ];
     }
 
     private function createDelivery(Tenant $tenant, Deal $deal, array $row, array $employees, User $admin): void

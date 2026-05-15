@@ -38,6 +38,44 @@ class DealContractDocumentController extends Controller
         return DealContractDocumentResource::collection($docs);
     }
 
+    /**
+     * Tenant-wide contract-document list — feeds the /contract-reviews
+     * queue screen. Joins deal name + client so the table can render
+     * "for which deal?" without an extra round trip per row.
+     *
+     * Optional filters: status (pending|analyzing|approved|rejected|failed),
+     * search (matches against deal name, deal client, original filename —
+     * case-insensitive substring).
+     *
+     * Pagination: standard Laravel paginate; per_page capped at 100.
+     */
+    public function indexAll(Request $request)
+    {
+        $query = DealContractDocument::query()
+            ->with(['deal:id,name,client,status'])
+            ->orderBy('created_at', 'desc');
+
+        if ($request->filled('status')) {
+            $query->where('analysis_status', $request->input('status'));
+        }
+
+        if ($request->filled('search')) {
+            $needle = '%'.$request->input('search').'%';
+            $op = DB::getDriverName() === 'pgsql' ? 'ilike' : 'like';
+            $query->where(function ($q) use ($needle, $op) {
+                $q->where('original_filename', $op, $needle)
+                    ->orWhereHas('deal', function ($dq) use ($needle, $op) {
+                        $dq->where('name', $op, $needle)
+                            ->orWhere('client', $op, $needle);
+                    });
+            });
+        }
+
+        $perPage = min((int) ($request->input('per_page', 50)), 100);
+
+        return DealContractDocumentResource::collection($query->paginate($perPage));
+    }
+
     public function show(DealContractDocument $contractDocument)
     {
         return new DealContractDocumentResource($contractDocument);
@@ -69,6 +107,32 @@ class DealContractDocumentController extends Controller
         );
 
         $tenantId = app('tenant_id');
+
+        // Re-upload semantics (per the chg-008 plan): keep ONE rolling level of
+        // history. Snapshot the previous row's analysis_result into the new row's
+        // `previous_analysis` so Claude can compute diff_vs_previous, then delete
+        // the prior file + row. If the user wants full audit history later we'd
+        // switch this to a "mark-superseded" pattern instead.
+        //
+        // The "real previous upload" check (`fileExistsOnDisk`) filters out the
+        // seeded demo rows — they have fictional storage paths and no actual
+        // files, so they shouldn't pollute first-time uploads with a phantom
+        // diff against a verdict the user never produced.
+        $previousDocs = DealContractDocument::where('deal_id', $deal->id)->get();
+        $previousAnalysisForDiff = null;
+        foreach ($previousDocs as $prev) {
+            $fileExistsOnDisk = $prev->storage_path
+                && Storage::disk('local')->exists($prev->storage_path);
+
+            if ($prev->analysis_result && $fileExistsOnDisk && ! $previousAnalysisForDiff) {
+                $previousAnalysisForDiff = $prev->analysis_result;
+            }
+            if ($fileExistsOnDisk) {
+                Storage::disk('local')->delete($prev->storage_path);
+            }
+            $prev->delete();
+        }
+
         $storagePath = sprintf(
             'contract-docs/%s/%s/%s.%s',
             $tenantId,
@@ -89,9 +153,14 @@ class DealContractDocumentController extends Controller
             'size_bytes' => $file->getSize(),
             'storage_path' => $storagePath,
             'analysis_status' => 'pending',
+            'previous_analysis' => $previousAnalysisForDiff,
         ]);
 
-        $document = $analyzer->analyze($document);
+        // Pass the deal so the analyzer can verify the uploaded contract is
+        // actually for THIS deal (client name / project name / value match).
+        // Without this the AI would happily approve a wrong-customer contract
+        // and auto-fire win_deal() with mis-routed Contract + Project data.
+        $document = $analyzer->analyze($document, $deal);
 
         // Auto-fire win when Claude (or the keyword fallback) approves the contract.
         if ($document->analysis_status === 'approved' && $deal->status === 'negotiation') {
@@ -110,6 +179,50 @@ class DealContractDocumentController extends Controller
             'document' => (new DealContractDocumentResource($document))->resolve($request),
             'auto_won' => false,
         ], 201);
+    }
+
+    /**
+     * Re-run AI analysis against an existing uploaded file. Used when the
+     * first analysis hit the keyword fallback (Claude unreachable / proxy
+     * timeout) — this lets the salesperson recover with one click instead
+     * of having to delete + re-upload the file.
+     *
+     * If the re-analysis succeeds and is approved AND the deal is still in
+     * negotiation, the existing auto-fire path runs (same as initial upload).
+     */
+    public function reanalyze(Request $request, DealContractDocument $contractDocument, ContractAnalysisService $analyzer)
+    {
+        // The analyser needs the actual file on disk to extract text.
+        // Reject early if it's missing rather than letting the service
+        // return a "failed" verdict and confusing the user.
+        if (! $contractDocument->storage_path
+            || ! Storage::disk('local')->exists($contractDocument->storage_path)) {
+            abort(422, 'The original file is no longer available. Please upload again.');
+        }
+
+        $deal = $contractDocument->deal;
+
+        $contractDocument = $analyzer->analyze($contractDocument, $deal);
+
+        // Mirror the post-upload auto-win behaviour: if the new verdict
+        // approves AND the deal is still in negotiation, fire win_deal().
+        if ($contractDocument->analysis_status === 'approved'
+            && $deal && $deal->status === 'negotiation') {
+            $winPayload = $this->autoWinDeal($deal);
+
+            return response()->json([
+                'document' => (new DealContractDocumentResource($contractDocument->load('deal')))->resolve($request),
+                'auto_won' => true,
+                'deal' => $winPayload['deal'] ?? null,
+                'contract' => $winPayload['contract'] ?? null,
+                'project' => $winPayload['project'] ?? null,
+            ]);
+        }
+
+        return response()->json([
+            'document' => (new DealContractDocumentResource($contractDocument->load('deal')))->resolve($request),
+            'auto_won' => false,
+        ]);
     }
 
     public function destroy(DealContractDocument $contractDocument)
