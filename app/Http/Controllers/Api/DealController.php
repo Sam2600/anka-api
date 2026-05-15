@@ -20,7 +20,15 @@ class DealController extends Controller
         $query = Deal::with(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads'])
             ->withExists(['contract_drafts as has_sent_contract_draft' => function ($q) {
                 $q->whereIn('status', ['sent_to_customer', 'signed']);
-            }]);
+            }])
+            ->addSelect([
+                '*',
+                'active_contract_draft_id' => \App\Models\DealContractDraft::select('id')
+                    ->whereColumn('deal_id', 'deals.id')
+                    ->whereNotIn('status', ['superseded'])
+                    ->orderByDesc('created_at')
+                    ->limit(1),
+            ]);
 
         if ($request->filled('status')) {
             $query->where('status', $request->status);
@@ -113,6 +121,10 @@ class DealController extends Controller
         $deal->loadExists(['contract_drafts as has_sent_contract_draft' => function ($q) {
             $q->whereIn('status', ['sent_to_customer', 'signed']);
         }]);
+        $deal->active_contract_draft_id = $deal->contract_drafts()
+            ->whereNotIn('status', ['superseded'])
+            ->orderByDesc('created_at')
+            ->value('id');
         return new DealResource($deal->load(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads']));
     }
 
