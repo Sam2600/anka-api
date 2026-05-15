@@ -28,9 +28,8 @@ use Throwable;
  * gaps the AI couldn't fill confidently are left as `{{TODO: …}}` tokens
  * the salesperson resolves in wizard step 2.
  *
- * Resilience mirrors ContractAnalysisService: 90s timeout, retry on
- * ConnectionException only (don't retry response-timeouts — Claude is
- * working, let it finish).
+ * Resilience: 90s timeout, retry on ConnectionException only — don't
+ * retry response-timeouts because Claude is working, let it finish.
  */
 class ContractDraftService
 {
@@ -786,7 +785,7 @@ TXT;
 
     /**
      * Invoke the win_deal() Postgres stored procedure, or the PHP fallback
-     * for SQLite tests. Mirrors DealContractDocumentController::autoWinDeal.
+     * for SQLite tests.
      */
     private function fireWinDeal(Deal $deal): void
     {
