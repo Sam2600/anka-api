@@ -49,12 +49,28 @@ class EstimationAiService
         try {
             return $this->callClaude($apiKey, $prompt, $deal);
         } catch (Throwable $e) {
-            // One retry with a tightened "JSON only" preamble before giving up.
-            // Sonnet 3.5 is usually reliable on structured output but occasionally
-            // wraps in ```json blocks or adds a one-line preface.
-            Log::info('EstimationAi: first call failed, retrying once', [
+            // Only retry on JSON-shape failures, where a tightened "JSON only"
+            // preamble helps. Skip retry on transport-level failures (timeouts,
+            // network) — the proxy is the bottleneck there and a second call
+            // just doubles the wait. Detect by looking for the strings our
+            // RuntimeException raises from non-JSON output.
+            $msg = $e->getMessage();
+            $isJsonFailure = str_contains($msg, 'returned non-JSON')
+                || str_contains($msg, 'missing key:')
+                || str_contains($msg, 'function_ids do not match')
+                || str_contains($msg, 'is missing a `role` field');
+
+            if (! $isJsonFailure) {
+                Log::warning('EstimationAi: call failed (no retry)', [
+                    'deal_id' => $deal->id,
+                    'error' => $msg,
+                ]);
+                throw $e;
+            }
+
+            Log::info('EstimationAi: first call returned bad JSON, retrying once', [
                 'deal_id' => $deal->id,
-                'error' => $e->getMessage(),
+                'error' => $msg,
             ]);
 
             return $this->callClaude(
@@ -69,7 +85,12 @@ class EstimationAiService
     {
         $baseUrl = rtrim(env('ANTHROPIC_BASE_URL') ?: self::DEFAULT_BASE_URL, '/');
 
-        $response = Http::timeout(90)
+        // 180s was 90s — bumped after the proxy (api.vibecode-claude.online)
+        // started consistently exceeding 90s when the prompt grew to include
+        // project_overheads. Sonnet itself usually completes in 30-60s; the
+        // headroom is for proxy overhead on long structured responses.
+        $response = Http::timeout(180)
+            ->connectTimeout(15)
             ->withHeaders([
                 'x-api-key' => $apiKey,
                 'authorization' => 'Bearer '.$apiKey,

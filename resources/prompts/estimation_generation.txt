@@ -39,6 +39,9 @@ Respond with EXACTLY one JSON object, no markdown fences, no preface, no trailin
   "sheet5_team_stack": [
     { "role": string, "count": integer, "monthly_allocation": [number, number, ...] }
   ],
+  "project_overheads": [
+    { "name": string, "cost": number, "reason": string }
+  ],
   "reasoning": string,
   "confidence": "high" | "medium" | "low"
 }
@@ -54,6 +57,15 @@ Respond with EXACTLY one JSON object, no markdown fences, no preface, no trailin
 7. Round dev_hours to whole numbers when ≥ 4, to one decimal otherwise.
 8. Aim for 10–40 features. Too few misses scope; too many becomes noise.
 9. Set confidence to "high" if a contract document is provided AND past won deals match this scope, "medium" if only one of those holds, "low" otherwise.
+10. project_overheads — predict project-specific overhead line items based on the client and workload description. Each entry is a one-time or recurring expense the agency would incur DELIVERING this specific deal (NOT general company overhead). Examples to consider when relevant:
+    - Travel & on-site visits (when the description implies client meetings, on-site discovery, or a regulated industry)
+    - Specialised software licenses (CMS licenses, design software, monitoring tools tied to the stack)
+    - Compliance / audits (HIPAA, SOC2, PCI, GDPR — if industry signals are present)
+    - Translation / localisation (if multi-language is implied)
+    - Third-party APIs / services (payment gateways, geolocation, analytics — only when implied by description)
+    - Cloud infrastructure setup (significant cloud spend over the project — distinct from ongoing hosting)
+    - Hardware / devices for testing (mobile devices, IoT hardware — only when implied)
+    Costs are TOTAL project costs in the client budget currency. Include a short `reason` per item linking it to the deal context. Output 0–6 items — only ones the description genuinely supports. Do NOT pad with generic items.
 
 # Deal context
 
