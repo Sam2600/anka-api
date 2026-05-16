@@ -92,9 +92,17 @@ class ContractDraftService
     }
 
     /**
-     * Replace one section's AI output with a fresh generation. Useful when
-     * the user updates a wizard question and wants only that section
-     * regenerated, not the whole draft.
+     * Replace one section's AI output with a fresh generation. Surgical:
+     * only the target section's `rendered` is replaced — every other
+     * section (including hand-edited ones marked user_edited=true) is
+     * left exactly as it was.
+     *
+     * Earlier this method rebuilt the entire sections array via
+     * mergeSections(), which destroyed any sections whose AI output
+     * wasn't in $draft->ai_outputs (e.g. seeded drafts; or drafts where
+     * the operator hand-edited content directly into `sections` without
+     * a matching ai_outputs entry). That's now fixed by doing the
+     * replacement in place on $draft->sections.
      */
     public function regenerateSection(
         DealContractDraft $draft,
@@ -125,7 +133,8 @@ class ContractDraftService
 
         // Only AI-written sections support regeneration; fixed/slot-only
         // sections have nothing for Claude to produce.
-        if (! in_array($sectionConfig['type'] ?? '', ['ai_written', 'ai_with_slots'], true)) {
+        $type = $sectionConfig['type'] ?? '';
+        if (! in_array($type, ['ai_written', 'ai_with_slots'], true)) {
             throw ValidationException::withMessages([
                 'section_key' => ["Section '{$sectionKey}' is not AI-written; no regeneration possible."],
             ]);
@@ -133,14 +142,56 @@ class ContractDraftService
 
         $mergedWizardInputs = array_merge($draft->wizard_inputs ?? [], $newWizardInputs);
         $allAi = $this->callClaude($deal, $template, $mergedWizardInputs, onlySectionKey: $sectionKey);
+        $newAiOutput = $allAi[$sectionKey] ?? '';
 
-        $aiOutputs = array_merge($draft->ai_outputs ?? [], $allAi);
-        $merged = $this->mergeSections($template, $aiOutputs, $deal, $mergedWizardInputs);
+        // For ai_with_slots, fill `{{slot}}` tokens from deal + wizard.
+        // For ai_written, the Claude output is the final rendered text.
+        $rendered = $type === 'ai_with_slots'
+            ? $this->fillSlots($newAiOutput, $deal, $mergedWizardInputs)
+            : $newAiOutput;
+
+        // Surgical update of $draft->sections — find the target by key
+        // and replace only its `rendered` + recompute its `has_todo`.
+        // Regeneration discards any prior hand-edit on THIS section
+        // (user_edited resets to false), but every OTHER section is
+        // untouched.
+        $sections = $draft->sections ?? [];
+        $found = false;
+        foreach ($sections as &$section) {
+            if (($section['key'] ?? null) === $sectionKey) {
+                $section['rendered'] = $rendered;
+                $section['has_todo'] = str_contains($rendered, '{{TODO');
+                $section['user_edited'] = false;
+                $found = true;
+                break;
+            }
+        }
+        unset($section);
+
+        // Defensive: if the target section wasn't already in the draft
+        // (e.g. template added a section since this draft was generated),
+        // append a fresh entry rather than silently dropping the output.
+        if (! $found) {
+            $sections[] = [
+                'key' => $sectionKey,
+                'title' => $sectionConfig['title'] ?? '',
+                'type' => $type,
+                'output_format' => $sectionConfig['output_format'] ?? 'paragraph',
+                'rendered' => $rendered,
+                'has_todo' => str_contains($rendered, '{{TODO'),
+                'user_edited' => false,
+            ];
+        }
+
+        // Audit trail: keep ai_outputs in sync with what Claude returned
+        // for this key. Distinct from `sections[].rendered` for ai_with_slots
+        // (ai_outputs holds pre-slot-fill text; rendered has slots filled).
+        $aiOutputs = array_merge($draft->ai_outputs ?? [], [$sectionKey => $newAiOutput]);
 
         $draft->update([
             'wizard_inputs' => $mergedWizardInputs,
             'ai_outputs' => $aiOutputs,
-            'sections' => $merged,
+            'sections' => $sections,
         ]);
 
         return $draft->fresh();

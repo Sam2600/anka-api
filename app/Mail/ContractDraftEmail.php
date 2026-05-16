@@ -41,7 +41,7 @@ class ContractDraftEmail extends Mailable implements ShouldQueue
 
     public function envelope(): Envelope
     {
-        $providerName = config('contract.provider.name', 'Brycen Myanmar Ltd.');
+        $providerName = $this->resolveProviderName();
         $dealName = $this->deal->name ?: 'Service Agreement';
 
         $envelope = new Envelope(
@@ -64,7 +64,7 @@ class ContractDraftEmail extends Mailable implements ShouldQueue
         return new Content(
             view: 'emails.contract-draft',
             with: [
-                'providerName' => config('contract.provider.name', 'Brycen Myanmar Ltd.'),
+                'providerName' => $this->resolveProviderName(),
                 'dealName'     => $this->deal->name,
                 'clientName'   => $this->deal->client,
                 'contactName'  => $this->deal->contact_name,
@@ -77,6 +77,21 @@ class ContractDraftEmail extends Mailable implements ShouldQueue
                 'draftVersion' => $this->draft->version,
             ],
         );
+    }
+
+    /**
+     * Provider name shown in the email subject + body. Prefers the
+     * tenant's own name (editable in Org → Company); falls back to the
+     * global config when tenant data is unavailable.
+     *
+     * Runs in the queue worker, where the tenant scope isn't bound — so
+     * we read via the deal's belongs-to relation, which uses the FK
+     * directly and ignores the tenant scope.
+     */
+    private function resolveProviderName(): string
+    {
+        return $this->deal->tenant?->name
+            ?: config('contract.provider_fallback.name', 'Provider');
     }
 
     /**

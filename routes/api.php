@@ -205,6 +205,9 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     // Tenant settings (own tenant only)
     Route::get('/tenant', [TenantController::class, 'show']);
     Route::put('/tenant', [TenantController::class, 'update']);
+    // Multipart logo upload + remove. Used by the Organization → Company tab.
+    Route::post('/tenant/logo', [TenantController::class, 'uploadLogo']);
+    Route::delete('/tenant/logo', [TenantController::class, 'deleteLogo']);
 
     // Milestones
     Route::apiResource('milestones', MilestoneController::class);
