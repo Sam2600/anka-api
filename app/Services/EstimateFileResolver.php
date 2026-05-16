@@ -6,6 +6,7 @@ use App\Models\Contract;
 use App\Models\EstimationVersion;
 use App\Models\Project;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 
 class EstimateFileResolver
 {
@@ -30,7 +31,10 @@ class EstimateFileResolver
             return null;
         }
 
-        $absolute = storage_path('app/'.ltrim($version->xlsx_path, '/'));
+        // EstimationXlsxService writes via Storage::disk('local'), whose
+        // Laravel-11 root is storage/app/private — NOT storage/app. Resolve
+        // through the same disk so the path always matches the writer.
+        $absolute = Storage::disk('local')->path($version->xlsx_path);
 
         if (! file_exists($absolute)) {
             Log::warning('EstimateFileResolver: xlsx_path row exists but file missing on disk', [
