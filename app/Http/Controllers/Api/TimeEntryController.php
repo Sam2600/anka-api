@@ -87,11 +87,24 @@ class TimeEntryController extends Controller
                 ->increment('consumed_hours', $entry->hours);
         });
 
+        // Real-time auto-status triggers — order matters. Contract first so
+        // its status is fresh when Project reads it (Project Completed rule
+        // mirrors the contract). See storage/contract_auto_status_decision.md.
+        $project = $timeEntry->fresh()->project;
+        $contract = $project?->contract;
+        if ($contract) {
+            $contract->maybeAutoTransition($project, 'time_entry_approval');
+        }
+        if ($project) {
+            // Re-fetch the contract so we read its possibly-just-updated status.
+            $project->maybeAutoTransition($contract?->fresh(), 'time_entry_approval');
+        }
+
         // Soft gate: if the linked contract isn't yet binding, warn the approver
         // that these hours may not be invoiceable. We don't block — sometimes
         // urgent work happens before paperwork is final, and finance reconciles
         // later. The frontend toasts this so it surfaces in the approval queue.
-        $contractStatus = optional($timeEntry->fresh()->project?->contract)->status;
+        $contractStatus = optional($contract?->fresh())->status;
         $warning = in_array($contractStatus, ['Draft', 'Cancelled'], true)
             ? "Approved — but the linked contract is in '{$contractStatus}' status. These hours may not yet be invoiceable."
             : null;

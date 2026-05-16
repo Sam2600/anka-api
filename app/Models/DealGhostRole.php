@@ -17,6 +17,7 @@ class DealGhostRole extends Model
         'tenant_id',
         'deal_id',
         'role_type',
+        'rank_id',
         'quantity',
         'months',
         'avg_monthly_salary',
@@ -36,5 +37,10 @@ class DealGhostRole extends Model
     public function deal()
     {
         return $this->belongsTo(Deal::class);
+    }
+
+    public function rank()
+    {
+        return $this->belongsTo(Rank::class);
     }
 }

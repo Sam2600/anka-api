@@ -14,7 +14,9 @@ use App\Http\Controllers\Api\ExchangeRateController;
 use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\MilestoneController;
 use App\Http\Controllers\Api\OrganizationController;
+use App\Http\Controllers\Api\PhaseProgressLogController;
 use App\Http\Controllers\Api\ProjectController;
+use App\Http\Controllers\Api\ScheduleTrackingController;
 use App\Http\Controllers\Api\RankController;
 use App\Http\Controllers\Api\TenantController;
 use App\Http\Controllers\Api\TimeEntryController;
@@ -132,6 +134,7 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::middleware('permission:manage_crm')->group(function () {
         Route::post('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'store']);
         Route::post('/deals/{deal}/estimation-versions/ai-draft', [EstimationVersionController::class, 'aiDraft']);
+        Route::post('/deals/{deal}/estimation-versions/ai-delta', [EstimationVersionController::class, 'aiDelta']);
         Route::post('/estimation-versions/{id}/restore', [EstimationVersionController::class, 'restore']);
     });
 
@@ -226,10 +229,33 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::get('/projects/{project}/team', [AiAutoAssignController::class, 'index']);
     Route::post('/projects/{project}/team', [AiAutoAssignController::class, 'store']);
     Route::delete('/projects/{project}/team/{assignment}', [AiAutoAssignController::class, 'destroy']);
+    // @deprecated — replaced by the plan-team + confirm-team preview flow.
+    // No frontend consumer; retained until cleanup pass after the new flow ships.
     Route::post('/projects/{project}/auto-assign', [AiAutoAssignController::class, 'autoAssign']);
 
-    // Project Task Assignments (xlsx-driven AI task allocation)
+    // AI team build — preview proposes employees for unfilled ghost roles;
+    // confirm writes only the picks the user accepted. No DB writes in preview.
+    Route::post('/projects/{project}/plan-team',    [AiAutoAssignController::class, 'planTeamPreview']);
+    Route::post('/projects/{project}/confirm-team', [AiAutoAssignController::class, 'confirmTeamPlan']);
+
+    // Project Task Assignments (xlsx-driven AI task allocation, per-phase)
     Route::post('/projects/{project}/assign-tasks', [AiAutoAssignController::class, 'assignTasks']);
     Route::get('/projects/{project}/task-assignments', [AiAutoAssignController::class, 'taskAssignmentsIndex']);
-    Route::patch('/projects/{project}/task-assignments/{assignment}', [AiAutoAssignController::class, 'updateTaskAssignment']);
+    Route::patch('/projects/{project}/task-phase-assignments/{phaseAssignment}', [AiAutoAssignController::class, 'updateTaskPhaseAssignment']);
+
+    // Schedule tracking — daily progress logs + project/phase variance.
+    // See SCHEDULE_TRACKING_IMPLEMENTATION_PLAN.md for the design.
+    Route::get   ('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'index']);
+    Route::post  ('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'store']);
+    Route::patch ('/phase-progress-logs/{log}',                          [PhaseProgressLogController::class, 'update']);
+    Route::delete('/phase-progress-logs/{log}',                          [PhaseProgressLogController::class, 'destroy']);
+    Route::post  ('/phase-progress-logs/{log}/unlock',                   [PhaseProgressLogController::class, 'unlock']);
+    Route::get   ('/me/schedule-tracking/today',                         [PhaseProgressLogController::class, 'today']);
+
+    Route::get('/projects/{project}/schedule-tracking',             [ScheduleTrackingController::class, 'index']);
+    Route::get('/projects/{project}/schedule-tracking/summary',     [ScheduleTrackingController::class, 'summary']);
+    Route::get('/projects/{project}/schedule-tracking/by-assignee', [ScheduleTrackingController::class, 'byAssignee']);
+    // Per-day per-developer late-hours breakdown. Drives the Finance page's
+    // overtime calc and the "Late Hours by Developer" table.
+    Route::get('/projects/{project}/late-hours-by-day',             [ScheduleTrackingController::class, 'lateHoursByDay']);
 });
