@@ -105,6 +105,11 @@ WORKDIR /var/www/html
 # Bring in vendored composer deps from stage 1.
 COPY --from=composer /app/vendor ./vendor
 
+# Bring the composer binary too — we need it for `composer dump-autoload`
+# after the app code is copied in (the vendor stage only knew about
+# composer.json/composer.lock, not the app's namespaces).
+COPY --from=composer /usr/bin/composer /usr/local/bin/composer
+
 # Application code. .dockerignore strips secrets + cache + node_modules.
 COPY . .
 
