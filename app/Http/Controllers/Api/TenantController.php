@@ -11,6 +11,7 @@ use App\Services\AuditService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 class TenantController extends Controller
@@ -26,15 +27,79 @@ class TenantController extends Controller
 
     public function update(Request $request)
     {
+        // Org-admins can change their own company name (it appears on
+        // contracts + customer-facing emails). Slug is still super-admin-only
+        // because it's part of URLs / external references.
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255',
-            'slug' => 'sometimes|required|string|max:100|alpha_dash|unique:tenants,slug,'.app('tenant_id'),
+            'signatory_name' => 'sometimes|nullable|string|max:255',
+            'signatory_title' => 'sometimes|nullable|string|max:255',
+            'tax_rate' => 'sometimes|numeric|min:0|max:1',
+            'avg_delivery_lag_months' => 'sometimes|integer|min:0|max:24',
+            'avg_payment_days_late' => 'sometimes|integer|min:0|max:365',
         ]);
 
         $tenant = Tenant::findOrFail(app('tenant_id'));
         $tenant->update($validated);
 
         return response()->json(['data' => $this->tenantData($tenant)]);
+    }
+
+    /**
+     * Upload (or replace) the tenant's logo. Rendered at the top of every
+     * contract PDF and the customer-facing email. Public disk so the
+     * frontend can preview it via a plain URL.
+     */
+    public function uploadLogo(Request $request)
+    {
+        $request->validate([
+            // 2 MB cap — large enough for a 400×400 PNG; small enough that
+            // the queue worker doesn't choke embedding it base64 per PDF.
+            'logo' => ['required', 'image', 'mimes:png,jpg,jpeg,webp', 'max:2048'],
+        ]);
+
+        $tenant = Tenant::findOrFail(app('tenant_id'));
+
+        // Delete the prior file (if any) so we don't litter the disk.
+        if ($tenant->logo_path) {
+            Storage::disk('public')->delete($tenant->logo_path);
+        }
+
+        // Deterministic filename per tenant — keeps the public URL stable
+        // when the operator replaces the logo. Extension comes from the
+        // upload so MIME stays correct.
+        $ext = strtolower($request->file('logo')->getClientOriginalExtension() ?: 'png');
+        $relativePath = "tenant-logos/{$tenant->id}.{$ext}";
+
+        Storage::disk('public')->putFileAs(
+            'tenant-logos',
+            $request->file('logo'),
+            "{$tenant->id}.{$ext}",
+        );
+
+        $tenant->update(['logo_path' => $relativePath]);
+
+        AuditService::log('tenant.logo.upload', 'tenant', $tenant->id, 'Logo uploaded');
+
+        return response()->json(['data' => $this->tenantData($tenant->fresh())]);
+    }
+
+    /**
+     * Remove the tenant's logo. PDF + email fall back to the global
+     * config('contract.provider_fallback.logo_path').
+     */
+    public function deleteLogo()
+    {
+        $tenant = Tenant::findOrFail(app('tenant_id'));
+
+        if ($tenant->logo_path) {
+            Storage::disk('public')->delete($tenant->logo_path);
+            $tenant->update(['logo_path' => null]);
+
+            AuditService::log('tenant.logo.delete', 'tenant', $tenant->id, 'Logo removed');
+        }
+
+        return response()->json(['data' => $this->tenantData($tenant->fresh())]);
     }
 
     // ── Super-admin routes (behind super_admin middleware) ───────────────────
@@ -66,6 +131,9 @@ class TenantController extends Controller
             'slug' => 'required|string|max:100|alpha_dash|unique:tenants,slug',
             'plan' => 'nullable|string|max:50',
             'currency' => 'nullable|string|in:MMK,JPY',
+            'tax_rate' => 'nullable|numeric|min:0|max:1',
+            'avg_delivery_lag_months' => 'nullable|integer|min:0|max:24',
+            'avg_payment_days_late' => 'nullable|integer|min:0|max:365',
             'is_active' => 'boolean',
         ]);
 
@@ -74,6 +142,9 @@ class TenantController extends Controller
             'slug' => $validated['slug'],
             'plan' => $validated['plan'] ?? null,
             'currency' => $validated['currency'] ?? 'MMK',
+            'tax_rate' => $validated['tax_rate'] ?? 0.20,
+            'avg_delivery_lag_months' => $validated['avg_delivery_lag_months'] ?? 1,
+            'avg_payment_days_late' => $validated['avg_payment_days_late'] ?? 0,
             'is_active' => $validated['is_active'] ?? true,
         ]);
 
@@ -98,6 +169,9 @@ class TenantController extends Controller
             'slug' => 'sometimes|required|string|max:100|alpha_dash|unique:tenants,slug,'.$id,
             'plan' => 'nullable|string|max:50',
             'currency' => 'nullable|string|in:MMK,JPY',
+            'tax_rate' => 'sometimes|numeric|min:0|max:1',
+            'avg_delivery_lag_months' => 'sometimes|integer|min:0|max:24',
+            'avg_payment_days_late' => 'sometimes|integer|min:0|max:365',
             'is_active' => 'boolean',
         ]);
 
@@ -267,9 +341,21 @@ class TenantController extends Controller
             'name' => $tenant->name,
             'slug' => $tenant->slug,
             'plan' => $tenant->plan,
+            'logo_path' => $tenant->logo_path,
+            'logo_url' => $tenant->logo_url,
+            'signatory_name' => $tenant->signatory_name,
+            'signatory_title' => $tenant->signatory_title,
             'currency' => $tenant->currency ?? 'MMK',
+            'tax_rate' => (float) ($tenant->tax_rate ?? 0.20),
+            'avg_delivery_lag_months' => (int) ($tenant->avg_delivery_lag_months ?? 1),
+            'avg_payment_days_late' => (int) ($tenant->avg_payment_days_late ?? 0),
             'is_active' => $tenant->is_active,
             'created_at' => $tenant->created_at,
+            'exchange_rates' => $tenant->exchangeRates()
+                ->where('to_currency', 'USD')
+                ->get(['from_currency', 'rate'])
+                ->keyBy('from_currency')
+                ->map(fn ($r) => (float) $r->rate),
         ];
     }
 

@@ -33,13 +33,24 @@ class ContractController extends Controller
     public function update(Request $request, Contract $contract)
     {
         $request->validate([
-            'status'      => 'sometimes|in:Active,Completed,Draft,Cancelled',
-            'notes'       => 'sometimes|nullable|string|max:2000',
-            'end_date'    => 'sometimes|nullable|date',
-            'total_value' => 'sometimes|numeric|min:0',
+            'status'               => 'sometimes|in:Draft,Signed,Active,Completed,Cancelled',
+            'notes'                => 'sometimes|nullable|string|max:2000',
+            'end_date'             => 'sometimes|nullable|date',
+            'total_value'          => 'sometimes|numeric|min:0',
+            'signed_at'            => 'sometimes|nullable|date',
+            'payment_terms_days'   => 'sometimes|integer|min:0|max:365',
+            'po_number'            => 'sometimes|nullable|string|max:100',
+            'billing_contact_name' => 'sometimes|nullable|string|max:255',
+            'billing_email'        => 'sometimes|nullable|email|max:255',
+            'currency'             => 'sometimes|nullable|string|in:MMK,JPY,USD',
+            'tax_jurisdiction'     => 'sometimes|nullable|string|max:100',
         ]);
 
-        $contract->update($request->only(['status', 'notes', 'end_date', 'total_value']));
+        $contract->update($request->only([
+            'status', 'notes', 'end_date', 'total_value',
+            'signed_at', 'payment_terms_days', 'po_number',
+            'billing_contact_name', 'billing_email', 'currency', 'tax_jurisdiction',
+        ]));
         return new ContractResource($contract->fresh());
     }
 

@@ -1,0 +1,156 @@
+id: chg-005-crm-rank-stages-and-contract-ai
+name: Collapse CRM stages to ranked C/B/A/S/D + AI contract gate
+status: implemented
+created: 2026-05-12
+owners: [claude.max@brycenmyanmar.com.mm]
+
+why: |
+  The pipeline had 6 stages (lead, qualified, proposal, negotiation, won, lost)
+  with overlapping semantics — Qualified vs Proposal were two stages for what
+  the sales team treated as a single "we've sent the pitch / quote" phase, and
+  there was no enforced step between Negotiation and a closed-won contract. Sales
+  reps could move a deal to Won without any signed customer artefact, creating
+  premature Contracts and Projects.
+
+  This change reduces the pipeline to 5 stages (4 active + lost) with rank
+  labels and inserts a Claude-powered contract-document gate before S/won.
+
+what:
+  - Migration 2026_05_12_000001_collapse_proposal_into_qualified.php
+    - Rewrites any deals.status = 'proposal' to 'qualified'.
+    - Updates the deals_status CHECK constraint to the new 5-value set.
+
+  - Migration 2026_05_12_000002_create_deal_contract_documents_table.php
+    - New `deal_contract_documents` table tracking uploaded files and analysis verdicts.
+    - CHECK constraints on analysis_status, extension, and size_bytes.
+
+  - DealController: dropped 'proposal' from validation `in:` lists; updated the
+    stage-probability default map; qualified now defaults to 40 (was 30 for
+    qualified + 50 for proposal).
+
+  - New DealContractDocumentController (REST: index/show/store/destroy).
+    - POST /deals/{deal}/contract-documents accepts a multipart file
+      (pdf|docx|xlsx|pptx|txt, ≤25 MB) and runs ContractAnalysisService
+      synchronously.
+    - On `approved` verdict, the controller invokes win_deal() (Postgres) or
+      the SQLite fallback so the deal jumps to S/won + Contract + Project are
+      created atomically — same code path as DealController@win.
+
+  - New App\Services\ContractAnalysisService.
+    - Extracts text from each supported format using smalot/pdfparser,
+      phpoffice/phpword, phpoffice/phpspreadsheet, phpoffice/phppresentation.
+    - Sends extracted text + a placeholder required-fields checklist to
+      Claude 3.5 Sonnet (`claude-3-5-sonnet-latest`). Logs token usage to
+      `ai_usage_logs` with feature='contract_analysis'.
+    - Keyword fallback when ANTHROPIC_API_KEY is missing or the API errors.
+
+  - Routes registered under tenant-scoped middleware. view_crm gates reads;
+    manage_crm gates writes (POST/DELETE).
+
+  - composer.json now requires smalot/pdfparser, phpoffice/phpword,
+    phpoffice/phpspreadsheet, phpoffice/phppresentation. Run `composer update`
+    on the affected machines.
+
+  - Seeder rows that used 'proposal' relabelled to 'qualified'.
+
+  - openspec/specs/domain-models.yaml, database-schema.yaml, api-contracts.yaml
+    updated to reflect the 5-stage set, new model/table, and new routes.
+
+placeholders:
+  - The required-fields list in ContractAnalysisService::REQUIRED_FIELDS_PLACEHOLDER
+    is a placeholder per the original request. Replace with the agency's real
+    contract checklist once finalised.
+
+risk: |
+  - Tenants that had deals in 'proposal' now show them in 'qualified'; downstream
+    counts/charts may shift but no data is lost.
+  - First-time upload of a large document is synchronous and may take several
+    seconds — acceptable for v1; can be moved to a queued job later.
+  - Manual override of win — the DealController@win endpoint still exists and
+    is still gated by manage_crm; the frontend Kanban no longer surfaces it.
+
+rollback: |
+  - Migration rollback restores the 6-value CHECK constraint (deals data merge
+    is not reversible by migration; manual reclassification needed if rolling
+    back).
+  - deal_contract_documents table can be dropped without affecting deals.
+
+manual_steps:
+  - composer update            # pull the new PHP packages
+  - php artisan migrate        # apply the two new migrations
+  - (frontend) npm install / npm run build  # picks up new components and queries
+
+fixups:
+  - id: rich-verdict-2026-05-13
+    summary: |
+      Replaced the REQUIRED_FIELDS_PLACEHOLDER stub with the production
+      grading pipeline based on the manager's "one contract template,
+      payment pattern detected from the doc" guidance and a sample
+      Brycen / Yazaki contract.
+
+      Changes:
+      - New migration 2026_05_13_000001_alter_deal_contract_documents_for_rich_verdicts.php
+        adds previous_analysis (jsonb), overall_score (smallint),
+        detected_payment_pattern (varchar 40).
+      - ContractAnalysisService rewritten end-to-end:
+        - FIELD_DEFINITIONS constant: 26 fields across 3 severity tiers
+          (6 critical, 15 required, 5 recommended)
+        - New rich verdict shape: {approved, overall_score, executive_summary,
+          field_grades[], critical_failures[], dispute_risks[],
+          diff_vs_previous, detected_payment_pattern}
+        - PHP-side isApproved() guard so a confused model can't accidentally
+          mark a critical-missing contract as approved
+        - normaliseVerdict() defensively backfills any field Claude forgot
+          to grade
+        - Keyword fallback rewritten to return the same shape, including
+          its own (heuristic) payment-pattern detection
+      - Controller snapshots prior analysis_result into the new row's
+        previous_analysis on every re-upload (one rolling level of history).
+      - Resource exposes overall_score, detected_payment_pattern,
+        previous_analysis at the top level.
+      - Seeder updated to produce a representative rejected verdict in the
+        new shape so the UI demo still works.
+    follow_up:
+      - When the agency provides a "preferred wording" list per clause,
+        we can wire it into the prompt so Claude flags wording that's
+        present but weaker than the agency's standard.
+      - If full audit history (more than one rolling previous version) is
+        needed later, switch from delete-on-replace to mark-superseded.
+
+  - id: deal-match-2026-05-13
+    summary: |
+      Added a deal_match verification step so the AI verifies the uploaded
+      contract actually belongs to the deal it's being uploaded onto. Without
+      this the system would happily approve a wrong-customer contract and
+      auto-fire win_deal(), creating misrouted Contract + Project records.
+
+      Changes:
+      - ContractAnalysisService.analyze() now accepts the parent Deal and
+        injects a "DEAL CONTEXT" section into Claude's prompt with the deal's
+        client, project name, contact, value, currency, timeline, and
+        workload description. Falls back to $document->deal when no Deal is
+        passed explicitly.
+      - New verdict section deal_match {is_match, confidence, deal_client,
+        doc_parties[], checks {client_name_match, value_alignment,
+        project_name_match, contact_match}, discrepancies[], reasoning}.
+      - isApproved() hard-blocks when deal_match.is_match=false, regardless
+        of how well-formed the rest of the contract is.
+      - Keyword fallback gained a heuristicDealMatch() that does a simple
+        case-insensitive client-name substring check (with longest-token
+        fallback for "Yazaki" matching "Myanmar Yazaki Thilawa Co.,Ltd").
+      - DealContractDocumentController passes the deal into analyze().
+      - Seeder demo verdict includes a passing deal_match block.
+
+      Also tightened the model-label badge logic in AnalysisResultCard so
+      the "fallback grading" chip only shows when model === 'keyword-fallback',
+      not when the proxy silently upgrades the model name (Claude 4.6 etc.).
+
+      Verified end-to-end: the Yazaki PDF uploaded onto a Tharaphu Insurance
+      deal returns is_match=false with confidence 0.02 and an explicit
+      "mis-routed onto the Tharaphu Insurance deal and must be replaced"
+      reasoning — approval is correctly blocked.
+    follow_up:
+      - For high-confidence mismatches (confidence < 0.1) consider auto-
+        rejecting the file before storage (don't even keep the row), to
+        reduce noise on the deal's history. For now we keep the record
+        so the salesperson can see the AI's reasoning.

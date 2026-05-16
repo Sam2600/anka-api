@@ -1,0 +1,226 @@
+id: chg-007-ai-estimation-generation
+name: AI-powered estimation draft generation (Claude, per-sheet output)
+status: proposed
+created: 2026-05-13
+owners: [claude.max@brycenmyanmar.com.mm]
+
+why: |
+  Today every estimation is hand-built: a sales engineer reads the deal's
+  workload_description, the (optional) uploaded contract document, and types
+  features/hours/team/overheads into the Estimation Simulator one row at a
+  time. The agency has a structurally consistent way of doing this — same
+  feature granularity, same role mix, same phase ratios — so the work is
+  high-effort but low-novelty. It's a good fit for a model.
+
+  Adding an "AI draft" path on the existing EstimationVersion flow lets the
+  sales engineer click one button, get a structured first pass from Claude,
+  then review and adjust before saving. The output is shaped to feed
+  chg-006's XLSX writer with no glue code — JSON is keyed per sheet so each
+  `fillSheetN` method receives its own branch.
+
+what:
+  - app/Services/EstimationAiService.php (NEW)
+    - generateDraft(Deal $deal): array
+        Builds a single Claude prompt and returns a per-sheet JSON payload.
+        Does NOT persist anything to estimation_versions — preview-first by
+        design (matches chg-006's "version save triggers XLSX gen" rule).
+        Wrapped in try/catch; logs to ai_usage_logs on success and failure.
+
+    - Provider: Anthropic Claude (`claude-3-5-sonnet-latest`), same model
+      family already wired by ContractAnalysisService (chg-005). Reuses the
+      same HTTP client setup + ANTHROPIC_API_KEY env var. Falls back to a
+      structured 503 response when the key is missing or the API errors —
+      no keyword fallback (unlike contract analysis, there's no useful
+      heuristic for "generate an estimation").
+
+    - Prompt inputs (assembled in this order):
+        1. Deal fields: workload_description, client_budget, timeline_months,
+           client name, target_margin (if set), expected_close_date.
+        2. Contract document text: if `deal_contract_documents` has rows for
+           this deal with analysis_status='approved' or 'pending', join the
+           extracted_text fields (already populated by chg-005's extractors:
+           smalot/pdfparser, phpword, phpspreadsheet, phppresentation).
+           Truncate to ~50k chars to keep prompt bounded.
+        3. Organization roles + rates: tenant-scoped query of the `roles`
+           table — name, default rate, department. Tells Claude which role
+           names to use and what the agency's real cost per hour is.
+        4. Few-shot won deals: 2–3 prior deals from same tenant where
+           status='won', ordered by updated_at DESC. For each, include
+           workload_description and the estimation_resources of the
+           latest EstimationVersion. Skip the few-shot block if the tenant
+           has fewer than 2 won deals. Hard-capped to 3 deals to keep
+           prompt size predictable.
+
+    - Output JSON schema (Claude is instructed to return exactly this shape;
+      response is JSON-parsed, validated, and rejected with 422 if malformed):
+
+        {
+          "sheet1_summary": {
+            "rough_estimate_hours": number,
+            "requirement_study_hours": number,
+            "web_development_hours": number,   // expected ≈ sum of sheet3
+            "environment_setup_hours": number,
+            "total_hours_per_person": number,
+            "total_days_per_person": number,
+            "total_months_per_person": number
+          },
+          "sheet2_features": [
+            { "function_id": "F001", "name": string, "explanation": string,
+              "category": string }
+          ],
+          "sheet3_manhours": [
+            { "function_id": "F001", "dev_hours": number }
+          ],
+          "sheet4_milestone": {
+            "start_month": "YYYY-MM",
+            "total_months": number,
+            "phase_durations": {
+              "requirements": number, "architecture": number,
+              "basic_design": number, "server_setup": number,
+              "implementation_web": number, "implementation_android": number,
+              "test_data": number, "unit_test": number,
+              "integration_test": number, "system_test": number,
+              "manual": number
+            }
+          },
+          "sheet5_team_stack": [
+            { "role": string, "count": integer,
+              "monthly_allocation": [number, number, ...] }
+          ],
+          "reasoning": string,
+          "confidence": "high" | "medium" | "low"
+        }
+
+      Notes:
+      - AI only proposes dev_hours per feature in sheet3. Downstream phase
+        columns (code-review = ×0.1, prototype = ×0.15, etc.) stay as
+        Excel formulas in chg-006's writer. AI never produces multipliers.
+      - sheet2_features and sheet3_manhours share function_id — the writer
+        joins them. Validation rejects the response if function_ids don't
+        match 1:1.
+      - sheet5_team_stack monthly_allocation length must equal
+        sheet4_milestone.total_months — validator clamps/pads if off-by-one,
+        rejects if wildly mismatched (>2x off).
+
+    - Token budgeting: prompt template is loaded from a separate
+      `resources/prompts/estimation_generation.txt` file (so it can be
+      tuned without touching PHP). Service injects the per-deal variables.
+      Sets `max_tokens=8192` on the Claude call (Sonnet 3.5 limit).
+
+    - ai_usage_logs entry on every call (success or fail) with
+      feature='estimation_generation', tokens_in/tokens_out, status,
+      deal_id in metadata. Reuses the existing logger from chg-005.
+
+  - app/Http/Controllers/Api/EstimationVersionController.php
+    - aiDraft(string $dealId): NEW.
+      - Loads Deal through the tenant-scoped query (cross-tenant → 404).
+      - Validates the deal has at least workload_description OR a contract
+        document — otherwise 422 with "Deal needs a workload description
+        or attached contract document before AI can generate an estimation".
+      - Calls EstimationAiService::generateDraft($deal).
+      - Returns 200 with the per-sheet JSON wrapped in `data`.
+      - On AI failure (ANTHROPIC_API_KEY missing, Claude 5xx, malformed
+        JSON after one retry): returns 503 with the normalized error.
+      - Does NOT touch estimation_versions, estimation_resources, or
+        deal_overheads. Preview is read-only on the server side.
+
+  - routes/api.php
+    - Inside the tenant-scoped group, alongside the existing version routes:
+        POST /deals/{deal}/estimation-versions/ai-draft
+          → EstimationVersionController@aiDraft
+          middleware: permission:manage_crm
+            (matches the existing version create permission — AI draft is
+             a write-intent action even though it doesn't persist; using
+             manage_crm prevents read-only users from racking up AI
+             token cost.)
+
+  - resources/prompts/estimation_generation.txt (NEW)
+    - The system + user prompt template. Holds:
+        · The output JSON contract (verbatim, for Claude to echo)
+        · Slots for: {client_name}, {workload_description},
+          {client_budget}, {timeline_months}, {target_margin},
+          {contract_documents_text}, {org_roles_block},
+          {few_shot_deals_block}
+        · Style guidance: "match the agency's style shown in the past
+          deals", "function_id format F001/F002…", "category should be
+          'Web', 'Mobile', 'Integration', or 'Infrastructure'".
+    - Externalising the prompt as a file (not a PHP string) means the
+      sales team can tune wording without a redeploy — only the file
+      needs to be edited.
+
+  - openspec/specs/api-contracts.yaml
+    - Adds POST /deals/{deal}/estimation-versions/ai-draft under the
+      tenant-scoped CRM block.
+
+  - openspec/specs/business-logic.yaml
+    - Documents the preview-first rule: ai-draft never writes a version;
+      the existing POST /deals/{deal}/estimation-versions is still the
+      only path that creates a version. Notes the ai_usage_logs feature
+      key 'estimation_generation'.
+
+  - specs/estimation.md
+    - Adds an "AI Generation" section (endpoint, prompt inputs, output
+      schema, ai_usage_logs entry, "AI is read-only — does not persist").
+
+  - tests/Feature/EstimationAiDraftTest.php (NEW)
+    - 200 path with a stubbed Claude client returning a valid per-sheet
+      JSON.
+    - 422 when the deal has no workload_description and no contract doc.
+    - 422 when Claude returns malformed JSON (after one retry).
+    - 503 when ANTHROPIC_API_KEY is unset.
+    - Cross-tenant 404 on the deal lookup.
+    - ai_usage_logs row is written on success AND on failure.
+    - Does NOT assert prompt quality — only the integration plumbing.
+
+placeholders:
+  - The few-shot retrieval is "latest 2–3 won deals by updated_at". If the
+    tenant wants semantic similarity (most relevant past deal, not most
+    recent), that's a follow-up requiring embeddings. Out of scope for v1.
+  - Sheet 5 monthly_allocation values are AI-proposed and intentionally
+    coarse — the existing /crm/[id]/staffing Gemini Team Builder remains
+    available as a separate flow for fine-grained staffing.
+  - Category enum ("Web", "Mobile", "Integration", "Infrastructure") is
+    set in the prompt, not in a DB constraint. If categories grow beyond
+    a handful of values, add an estimation_resources.category column in a
+    follow-up.
+
+risk: |
+  - Token cost: ContractAnalysisService averages ~3–8k input tokens.
+    Estimation generation includes few-shot examples and is expected to
+    average 15–25k input + 2–4k output. At Sonnet 3.5 prices this is
+    cents per call, but the prompt size scales with the contract document
+    size (capped at 50k chars) and the number of features in few-shot
+    examples. Monitor ai_usage_logs.tokens_in p95 in the first week.
+  - Malformed JSON from Claude: the service does ONE retry with a tightened
+    "respond with valid JSON only" preamble before failing. Beyond that,
+    the user just sees a "couldn't generate, please try again" toast.
+    Acceptable for v1 — Claude 3.5 Sonnet is reliable on structured JSON.
+  - Few-shot leakage: confirmed tenant-scoped via the BelongsToTenant trait
+    on Deal. Service must NOT use DB::table('deals') (which bypasses the
+    scope) — it queries through Deal::query(). Code review checkpoint.
+  - PII in prompts: contract document text and past deal descriptions are
+    sent to Anthropic. Anka's terms must permit this. Add a tenant-level
+    opt-out flag (`tenants.ai_estimation_enabled`, default true) in a
+    follow-up if any tenant raises a concern. Not implemented in v1.
+  - Hallucinated role names: prompt instructs Claude to use role names
+    exactly from {org_roles_block}. Validator does NOT reject unknown role
+    names (Claude may invent slight variants) — instead, the writer for
+    sheet 5 fuzzy-matches to the closest tenant role at XLSX generation
+    time. Out-of-scope role names are passed through as-is.
+
+rollback: |
+  - Remove the route and controller method; the service can stay in place
+    unused. No DB schema to revert.
+  - ai_usage_logs rows for feature='estimation_generation' are harmless;
+    delete via a one-line query if desired.
+
+manual_steps:
+  - Ensure ANTHROPIC_API_KEY is set in .env on every environment.
+    Reuses the same key as chg-005 contract analysis.
+  - Verify resources/prompts/estimation_generation.txt is deployed
+    (it's a code-tracked asset, not an environment file).
+  - (frontend) Pairs with anka-frontend chg-010-ai-estimation-generation.
+
+affected_specs:
+  - api-contracts
+  - business-logic

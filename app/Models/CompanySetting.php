@@ -24,16 +24,24 @@ class CompanySetting extends Model
         'overhead_percentage',
         'buffer_percentage',
         'yearly_fixed_cost',
+        'annual_initial_budget',
         'employer_tax_percentage',
         'benefits_percentage',
+        'cost_to_bill_ratio',
+        'default_monthly_capacity_hours',
+        'fallback_hourly_cost',
     ];
 
     protected $casts = [
-        'overhead_percentage'     => 'float',
-        'buffer_percentage'       => 'float',
-        'yearly_fixed_cost'       => 'float',
-        'employer_tax_percentage' => 'float',
-        'benefits_percentage'     => 'float',
+        'overhead_percentage'             => 'float',
+        'buffer_percentage'               => 'float',
+        'yearly_fixed_cost'               => 'float',
+        'annual_initial_budget'           => 'float',
+        'employer_tax_percentage'         => 'float',
+        'benefits_percentage'             => 'float',
+        'cost_to_bill_ratio'              => 'float',
+        'default_monthly_capacity_hours'  => 'integer',
+        'fallback_hourly_cost'            => 'float',
     ];
 
     public function tenant()

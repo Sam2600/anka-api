@@ -1,0 +1,357 @@
+id: domain-models
+name: Domain Models & Eloquent Architecture
+version: "1.0"
+
+summary: |
+  The anka-api backend defines 24 Eloquent models across the agency management domain.
+  All primary models use UUID primary keys (`HasUuids`) and most business models use
+  `SoftDeletes`. Multi-tenancy is enforced via the `BelongsToTenant` trait which adds
+  a global scope filtering every query by the current `tenant_id`.
+
+models:
+  - name: Tenant
+    file: app/Models/Tenant.php
+    traits: [HasFactory, HasUuids]
+    soft_deletes: false
+    key_fields: [name, slug, plan, currency, tax_rate, avg_delivery_lag_months, avg_payment_days_late, is_active]
+    relationships:
+      - users (hasMany)
+      - departments (hasMany)
+      - roles (hasMany)
+      - employees (hasMany)
+      - deals (hasMany)
+      - contracts (hasMany)
+      - invoices (hasMany)
+      - projects (hasMany)
+      - globalOverheads (hasMany)
+      - companySetting (hasOne)
+
+  - name: User
+    file: app/Models/User.php
+    traits: [HasApiTokens, HasFactory, Notifiable, HasUuids, SoftDeletes]
+    soft_deletes: true
+    key_fields: [tenant_id, employee_id, first_name, last_name, email, password, system_role, app_role, is_super_admin]
+    relationships:
+      - tenant (belongsTo)
+      - employee (belongsTo)
+      - approvedTimeEntries (hasMany)
+    notes: |
+      Super admins have `tenant_id = null`. The `app_role` drives RBAC
+      (`Admin`, `Executive`, `Sales`, `Delivery`, `HR`).
+
+  - name: Department
+    file: app/Models/Department.php
+    traits: [HasFactory, HasUuids, SoftDeletes, BelongsToTenant]
+    soft_deletes: true
+    key_fields: [tenant_id, name, manager, manager_id, headcount]
+    relationships:
+      - tenant (belongsTo)
+      - employees (hasMany)
+      - roles (hasMany)
+      - managerEmployee (belongsTo)
+
+  - name: Role
+    file: app/Models/Role.php
+    traits: [HasFactory, HasUuids, SoftDeletes, BelongsToTenant]
+    soft_deletes: true
+    key_fields: [tenant_id, department_id, title, department, rate]
+    relationships:
+      - tenant (belongsTo)
+      - department (belongsTo)
+      - employees (hasMany)
+      - estimationResources (hasMany)
+
+  - name: Employee
+    file: app/Models/Employee.php
+    traits: [HasFactory, HasUuids, SoftDeletes, BelongsToTenant]
+    soft_deletes: true
+    key_fields: [tenant_id, department_id, job_role_id, name, role, role_name, capacity_role, capacity_role_id, rank_id, monthly_salary, workable_hours, cost_per_hour, status]
+    generated_columns:
+      - cost_per_hour: "monthly_salary / workable_hours"
+    relationships:
+      - tenant (belongsTo)
+      - department (belongsTo)
+      - jobRole (belongsTo)
+      - user (hasOne)
+      - timeEntries (hasMany)
+      - hardAssignments (hasMany)
+      - capacityRole (belongsTo)
+      - rank (belongsTo Rank, FK rank_id, ON DELETE SET NULL)
+      - skills (belongsToMany via employee_skills)
+    constraints:
+      - status ∈ [Active, On Leave, Terminated]
+      - capacity_role ∈ [frontend, backend, pm, qa, design]
+
+  - name: CapacityRole
+    file: app/Models/CapacityRole.php
+    traits: [BelongsToTenant, HasFactory, HasUuids, SoftDeletes]
+    soft_deletes: true
+    key_fields: [tenant_id, name, code]
+    relationships:
+      - employees (hasMany)
+
+  - name: Skill
+    file: app/Models/Skill.php
+    traits: [BelongsToTenant, HasFactory, HasUuids, SoftDeletes]
+    soft_deletes: true
+    key_fields: [tenant_id, name, category]
+    relationships:
+      - employees (belongsToMany via employee_skills)
+    constraints:
+      - unique: [tenant_id, name]
+
+  - name: EmployeeSkill
+    file: app/Models/EmployeeSkill.php
+    traits: [BelongsToTenant, HasFactory, HasUuids]
+    soft_deletes: false
+    key_fields: [tenant_id, employee_id, skill_id, proficiency]
+    relationships:
+      - employee (belongsTo)
+      - skill (belongsTo)
+    constraints:
+      - proficiency ∈ [beginner, intermediate, expert]
+      - unique: [employee_id, skill_id]
+
+  - name: CompanySetting
+    file: app/Models/CompanySetting.php
+    traits: [HasFactory, BelongsToTenant]
+    soft_deletes: false
+    key_fields: [id, tenant_id, overhead_percentage, buffer_percentage, yearly_fixed_cost, employer_tax_percentage, benefits_percentage, cost_to_bill_ratio, default_monthly_capacity_hours, fallback_hourly_cost]
+    notes: |
+      `id` defaults to the string `"singleton"`. One row per tenant.
+
+  - name: GlobalOverhead
+    file: app/Models/GlobalOverhead.php
+    traits: [HasFactory, HasUuids, SoftDeletes, BelongsToTenant]
+    soft_deletes: true
+    key_fields: [tenant_id, category, description, monthly_cost, effective_month, effective_year]
+    notes: |
+      `effective_month` / `effective_year` are NULLable. When NULL the overhead
+      applies to every month; when set it applies only to that period.
+
+  - name: Deal
+    file: app/Models/Deal.php
+    traits: [BelongsToTenant, HasFactory, HasUuids, SoftDeletes]
+    soft_deletes: true
+    key_fields: [tenant_id, name, client, contact_name, contact_email, contact_phone, estimated_value, win_probability, status, expected_close_date, lead_source, client_budget, timeline_months, workload_hours, workload_description, target_margin, base_labor_cost, overhead_cost, buffer_cost, total_estimated_cost, estimated_gross_profit, won_at, lost_at, win_reason, loss_reason, wizard_step]
+    relationships:
+      - contract (hasOne)
+      - ghost_roles (hasMany)
+      - hard_assignments (hasMany)
+      - estimation_resources (hasMany)
+      - deal_overheads (hasMany)
+    constraints:
+      - status ∈ [lead, qualified, negotiation, won, lost]
+    notes: |
+      UI rank labels: lead → C, qualified → B (Qualified + Proposal merged),
+      negotiation → A (contract-document upload gate), won → S, lost → D.
+      The old `proposal` stage was collapsed into `qualified` in migration
+      2026_05_12_000001_collapse_proposal_into_qualified.php.
+
+  - name: DealGhostRole
+    file: app/Models/DealGhostRole.php
+    traits: [BelongsToTenant, HasFactory, HasUuids]
+    soft_deletes: false
+    key_fields: [tenant_id, deal_id, role_type, quantity, months, avg_monthly_salary, min_monthly_salary, max_monthly_salary]
+    relationships:
+      - deal (belongsTo)
+
+  - name: DealHardAssignment
+    file: app/Models/DealHardAssignment.php
+    traits: [HasFactory, HasUuids, BelongsToTenant]
+    soft_deletes: false
+    key_fields: [tenant_id, deal_id, employee_id, allocated_hours]
+    relationships:
+      - deal (belongsTo)
+      - employee (belongsTo)
+    constraints:
+      - unique: [deal_id, employee_id]
+
+  - name: EstimationResource
+    file: app/Models/EstimationResource.php
+    traits: [HasFactory, HasUuids, BelongsToTenant]
+    soft_deletes: false
+    key_fields: [tenant_id, deal_id, job_role_id, role_id, feature_name, hours]
+    relationships:
+      - deal (belongsTo)
+      - role (belongsTo)
+
+  - name: DealOverhead
+    file: app/Models/DealOverhead.php
+    traits: [HasFactory, HasUuids, BelongsToTenant]
+    soft_deletes: false
+    key_fields: [tenant_id, deal_id, name, cost]
+    relationships:
+      - deal (belongsTo)
+
+  - name: Rank
+    file: app/Models/Rank.php
+    traits: [BelongsToTenant, HasFactory, HasUuids, SoftDeletes]
+    soft_deletes: true
+    key_fields: [tenant_id, name, code, level]
+    relationships:
+      - employees (hasMany via rank_id)
+    constraints:
+      - unique: [tenant_id, code]
+      - level: integer, 0-100; higher = more senior
+    notes: |
+      Tenant-managed seniority ranks. Seeded defaults: Junior(10), Mid(20),
+      Senior(30), Lead(40). Tenants can add custom ranks via /ranks CRUD.
+      Used by the AI Team Builder as the canonical seniority signal in the
+      Claude prompt (rank.level), with the older roleTitle keyword logic
+      as a fallback for employees that haven't been ranked yet.
+
+  - name: DealContractDocument
+    file: app/Models/DealContractDocument.php
+    traits: [BelongsToTenant, HasFactory, HasUuids]
+    soft_deletes: false
+    key_fields: [tenant_id, deal_id, uploaded_by, original_filename, mime_type, extension, size_bytes, storage_path, analysis_status, analysis_result, previous_analysis, overall_score, detected_payment_pattern, analyzed_at]
+    relationships:
+      - deal (belongsTo)
+      - uploader (belongsTo User, 'uploaded_by')
+    constraints:
+      - analysis_status ∈ [pending, analyzing, approved, rejected, failed]
+      - extension ∈ [pdf, docx, xlsx, pptx, txt] (controller currently rejects xlsx + pptx — see chg-005 fixup)
+      - size_bytes > 0 AND ≤ 26214400 (25 MB)
+    notes: |
+      Customer contract documents uploaded while a deal is in the A-rank
+      `negotiation` stage. ContractAnalysisService extracts text from the
+      file and asks Claude to grade it against a 26-field canonical
+      checklist (6 critical, 15 required, 5 recommended) returning a rich
+      verdict: per-field grade + evidence quote + severity + score +
+      suggested fix, plus dispute risks and (on re-upload) a diff against
+      the prior verdict.
+
+      Re-upload semantics: keep ONE rolling history level. The previous
+      row's analysis_result is snapshotted into the new row's
+      `previous_analysis` column before the old file + row are deleted.
+      Claude consumes the snapshot to compute `diff_vs_previous`.
+
+      Deal-match check: ContractAnalysisService injects the parent Deal's
+      identifying metadata (client, project name, contact, value, timeline,
+      workload description) into Claude's prompt. The verdict includes a
+      `deal_match` section. `isApproved()` hard-blocks when
+      `deal_match.is_match=false` regardless of field grades — prevents a
+      wrong-customer contract from auto-firing win_deal() with misrouted
+      Contract + Project data.
+
+      When the verdict has no missing critical or required fields AND
+      deal_match.is_match is true (PHP isApproved() check, not just
+      Claude's `approved` flag), the controller auto-fires win_deal() so
+      the deal jumps straight to S and the linked Contract + Project are
+      created atomically.
+
+  - name: EstimationVersion
+    file: app/Models/EstimationVersion.php
+    traits: [BelongsToTenant, HasUuids]
+    soft_deletes: false
+    key_fields: [tenant_id, deal_id, version_number, resources, overheads, target_margin, notes, created_by, created_at]
+    relationships:
+      - deal (belongsTo)
+    constraints:
+      - unique: [deal_id, version_number]
+    notes: |
+      `resources` and `overheads` are stored as JSONB.
+
+  - name: Contract
+    file: app/Models/Contract.php
+    traits: [HasFactory, HasUuids, SoftDeletes, BelongsToTenant]
+    soft_deletes: true
+    key_fields: [tenant_id, deal_id, contract_number, client, total_value, revenue_recognized, cash_collected, status, start_date, end_date, signed_at, payment_terms_days, po_number, billing_contact_name, billing_email, currency, tax_jurisdiction, notes]
+    relationships:
+      - deal (belongsTo)
+      - milestones (hasMany)
+      - invoices (hasMany)
+      - project (hasOne)
+    constraints:
+      - status ∈ [Draft, Signed, Active, Completed, Cancelled]
+
+  - name: Milestone
+    file: app/Models/Milestone.php
+    traits: [HasFactory, HasUuids, BelongsToTenant]
+    soft_deletes: false
+    key_fields: [tenant_id, contract_id, name, due_date, amount, status, completed_at, acceptance_criteria, accepted_at, accepted_by_client, sequence_number]
+    relationships:
+      - contract (belongsTo)
+      - invoices (hasMany)
+    constraints:
+      - status ∈ [Pending, In Progress, Completed, Accepted]
+
+  - name: Invoice
+    file: app/Models/Invoice.php
+    traits: [HasFactory, HasUuids, SoftDeletes, BelongsToTenant]
+    soft_deletes: true
+    key_fields: [tenant_id, contract_id, milestone_id, invoice_number, issue_date, due_date, amount, tax, paid_amount, total, status, paid_at, issued_at, sent_to_email, reminder_sent_count, notes]
+    generated_columns:
+      - total: "amount + tax"
+    relationships:
+      - contract (belongsTo)
+      - milestone (belongsTo)
+    notes: |
+      `total` is a PostgreSQL generated column — never set from PHP.
+
+  - name: Project
+    file: app/Models/Project.php
+    traits: [HasFactory, HasUuids, SoftDeletes, BelongsToTenant]
+    soft_deletes: true
+    key_fields: [tenant_id, contract_id, project_number, name, client, budget_hours, consumed_hours, status, start_date, end_date, kickoff_date, project_manager_id]
+    relationships:
+      - contract (belongsTo)
+      - time_entries (hasMany)
+      - teamAssignments (hasMany)
+      - projectManager (belongsTo)
+
+  - name: ProjectTeamAssignment
+    file: app/Models/ProjectTeamAssignment.php
+    traits: [BelongsToTenant, HasFactory, HasUuids]
+    soft_deletes: false
+    key_fields: [tenant_id, project_id, employee_id, allocated_hours, assignment_source]
+    relationships:
+      - project (belongsTo)
+      - employee (belongsTo)
+
+  - name: TimeEntry
+    file: app/Models/TimeEntry.php
+    traits: [HasFactory, HasUuids, BelongsToTenant]
+    soft_deletes: false
+    key_fields: [tenant_id, project_id, employee_id, approved_by, task, date, hours, billable, status, notes, approved_at]
+    relationships:
+      - project (belongsTo)
+      - employee (belongsTo)
+      - approvedBy (belongsTo)
+
+  - name: AuditLog
+    file: app/Models/AuditLog.php
+    traits: [HasFactory, HasUuids]
+    soft_deletes: false
+    key_fields: [user_id, tenant_id, action, level, target_type, target_id, details, ip_address]
+    relationships:
+      - user (belongsTo)
+      - tenant (belongsTo)
+
+  - name: AiUsageLog
+    file: app/Models/AiUsageLog.php
+    traits: [HasFactory, HasUuids]
+    soft_deletes: false
+    key_fields: [tenant_id, user_id, feature, model, input_tokens, output_tokens, estimated_cost_usd]
+    relationships:
+      - tenant (belongsTo)
+      - user (belongsTo)
+
+traits:
+  - name: BelongsToTenant
+    file: app/Traits/BelongsToTenant.php
+    behavior: |
+      Adds a global Eloquent scope filtering all queries by `tenant_id = app('tenant_id')`.
+      Auto-injects `tenant_id` on model creation if the field is empty.
+      Uses `bootBelongsToTenant` (Laravel's per-trait boot convention) so it does not
+      override any model-level `booted()` hooks.
+    critical: true
+    notes: |
+      Never bypass this scope unless explicitly required. It is the primary
+      defense against cross-tenant data leakage.
+
+  - name: HasUuids
+    behavior: All primary keys are UUID v4.
+  - name: SoftDeletes
+    behavior: Used on most primary business models for data recovery.

@@ -8,11 +8,16 @@ use App\Http\Resources\RoleResource;
 use App\Http\Resources\EmployeeResource;
 use App\Http\Resources\GlobalOverheadResource;
 use App\Http\Resources\CompanySettingResource;
+use App\Http\Resources\SkillResource;
+use App\Http\Resources\CapacityRoleResource;
 use App\Models\Department;
 use App\Models\Role;
 use App\Models\Employee;
 use App\Models\GlobalOverhead;
 use App\Models\CompanySetting;
+use App\Models\Skill;
+use App\Models\CapacityRole;
+use App\Models\EmployeeSkill;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
@@ -144,7 +149,7 @@ class OrganizationController extends Controller
     public function indexEmployees()
     {
         return EmployeeResource::collection(
-            Employee::with(['department', 'user'])->orderBy('created_at')->get()
+            Employee::with(['department', 'user', 'capacityRole', 'rank', 'skills'])->orderBy('created_at')->get()
         );
     }
 
@@ -162,42 +167,50 @@ class OrganizationController extends Controller
             'role_name'      => 'nullable|string|max:255',
             'department_id'  => 'nullable|uuid|exists:departments,id',
             'job_role_id'    => 'nullable|uuid|exists:roles,id',
-            'capacity_role'  => 'nullable|in:frontend,backend,pm,qa,design',
+            'capacity_role'  => 'nullable|string|max:50',
+            'capacity_role_id' => 'nullable|uuid|exists:capacity_roles,id',
+            'rank_id'        => [
+                'nullable', 'uuid',
+                Rule::exists('ranks', 'id')
+                    ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
+            ],
             'monthly_salary' => 'required|numeric|min:0',
             'workable_hours' => 'required|integer|min:1|max:744',
             'status'         => 'required|in:Active,On Leave,Terminated',
-            // Login credentials for the auto-created user account.
-            // Currently required so every employee can log in to /my-tasks.
             'email'          => 'required|email|max:255|unique:users,email',
             'password'       => 'required|string|min:6|max:255',
-            // cost_per_hour is GENERATED ALWAYS — never accept from client
+            'skills'         => 'nullable|array',
+            'skills.*.skill_id' => 'required_with:skills|uuid|exists:skills,id',
+            'skills.*.proficiency' => 'required_with:skills|in:beginner,intermediate,expert',
         ]);
 
-        $employee = DB::transaction(function () use ($request) {
+        $employee = DB::transaction(function () use ($request, $tenantId) {
             $employee = new Employee($request->only([
                 'name', 'role', 'role_name', 'department_id', 'job_role_id',
-                'capacity_role', 'monthly_salary', 'workable_hours', 'status',
+                'capacity_role', 'capacity_role_id', 'rank_id',
+                'monthly_salary', 'workable_hours', 'status',
             ]));
             if ($request->filled('id')) {
                 $employee->id = $request->input('id');
             }
             $employee->save();
 
-            // Split "First Last" into first_name + last_name; if a single
-            // word, last_name falls back to that same word so neither column is empty.
+            if ($request->has('skills')) {
+                $this->syncEmployeeSkills($employee, $request->input('skills', []));
+            }
+
             $parts     = preg_split('/\s+/', trim($request->input('name')), 2);
             $firstName = $parts[0] ?? $request->input('name');
             $lastName  = $parts[1] ?? $parts[0] ?? '';
 
-            // password is auto-hashed by the User model's `hashed` cast.
             User::create([
-                'tenant_id'      => app('tenant_id'),
+                'tenant_id'      => $tenantId,
                 'employee_id'    => $employee->id,
                 'first_name'     => $firstName,
                 'last_name'      => $lastName,
                 'email'          => $request->input('email'),
                 'password'       => $request->input('password'),
-                'app_role'       => 'Delivery', // minimal-permission executor
+                'app_role'       => 'Delivery',
                 'system_role'    => 'member',
                 'is_super_admin' => false,
             ]);
@@ -205,8 +218,9 @@ class OrganizationController extends Controller
             return $employee;
         });
 
-        // Reload to get the DB-computed cost_per_hour and eager-loaded department
-        return new EmployeeResource($employee->fresh()->load(['department', 'user']));
+        return new EmployeeResource(
+            $employee->fresh()->load(['department', 'user', 'capacityRole', 'rank', 'skills'])
+        );
     }
 
     public function updateEmployee(Request $request, Employee $employee)
@@ -225,39 +239,47 @@ class OrganizationController extends Controller
             'role_name'      => 'sometimes|nullable|string|max:255',
             'department_id'  => 'sometimes|nullable|uuid|exists:departments,id',
             'job_role_id'    => 'sometimes|nullable|uuid|exists:roles,id',
-            'capacity_role'  => 'sometimes|nullable|in:frontend,backend,pm,qa,design',
+            'capacity_role'  => 'sometimes|nullable|string|max:50',
+            'capacity_role_id' => 'sometimes|nullable|uuid|exists:capacity_roles,id',
+            'rank_id'        => [
+                'sometimes', 'nullable', 'uuid',
+                Rule::exists('ranks', 'id')
+                    ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
+            ],
             'monthly_salary' => 'sometimes|required|numeric|min:0',
             'workable_hours' => 'sometimes|required|integer|min:1|max:744',
             'status'         => 'sometimes|required|in:Active,On Leave,Terminated',
-            // Login credentials — both optional on update. Email is checked for
-            // uniqueness ignoring the current linked user so saving the same
-            // email back doesn't bounce. Password rule only fires when present.
             'email'          => [
                 'sometimes', 'required', 'email', 'max:255',
                 Rule::unique('users', 'email')->ignore(optional($linkedUser)->id),
             ],
             'password'       => 'sometimes|nullable|string|min:6|max:255',
-            // cost_per_hour is GENERATED ALWAYS — never accept from client
+            'skills'         => 'nullable|array',
+            'skills.*.skill_id' => 'required_with:skills|uuid|exists:skills,id',
+            'skills.*.proficiency' => 'required_with:skills|in:beginner,intermediate,expert',
         ]);
 
         DB::transaction(function () use ($request, $employee, $linkedUser) {
             $employee->update($request->only([
                 'name', 'role', 'role_name', 'department_id', 'job_role_id',
-                'capacity_role', 'monthly_salary', 'workable_hours', 'status',
+                'capacity_role', 'capacity_role_id', 'rank_id',
+                'monthly_salary', 'workable_hours', 'status',
             ]));
+
+            if ($request->has('skills')) {
+                $this->syncEmployeeSkills($employee, $request->input('skills', []));
+            }
 
             $hasEmail    = $request->filled('email');
             $newPwd      = $request->input('password');
             $hasPassword = is_string($newPwd) && trim($newPwd) !== '';
 
-            // Mirror the (split) name onto user fields whenever we touch the user.
             $name      = $request->filled('name') ? $request->input('name') : $employee->name;
             $parts     = preg_split('/\s+/', trim((string) $name), 2);
             $firstName = $parts[0] ?? (string) $name;
             $lastName  = $parts[1] ?? ($parts[0] ?? '');
 
             if ($linkedUser) {
-                // Existing linked user — patch only what changed.
                 $userPatch = [
                     'first_name' => $firstName,
                     'last_name'  => $lastName,
@@ -266,13 +288,10 @@ class OrganizationController extends Controller
                     $userPatch['email'] = $request->input('email');
                 }
                 if ($hasPassword) {
-                    $userPatch['password'] = $newPwd; // hashed via User cast
+                    $userPatch['password'] = $newPwd;
                 }
                 $linkedUser->update($userPatch);
             } elseif ($hasEmail && $hasPassword) {
-                // No linked user yet (legacy row created before auto-user-creation).
-                // If the manager has supplied both credentials on Edit, create
-                // the login now so this employee can finally sign in.
                 User::create([
                     'tenant_id'      => app('tenant_id'),
                     'employee_id'    => $employee->id,
@@ -285,11 +304,11 @@ class OrganizationController extends Controller
                     'is_super_admin' => false,
                 ]);
             }
-            // If linkedUser is null AND credentials are missing, do nothing —
-            // the manager just edited a legacy employee without onboarding them.
         });
 
-        return new EmployeeResource($employee->fresh()->load(['department', 'user']));
+        return new EmployeeResource(
+            $employee->fresh()->load(['department', 'user', 'capacityRole', 'rank', 'skills'])
+        );
     }
 
     public function destroyEmployee(Employee $employee)
@@ -297,6 +316,32 @@ class OrganizationController extends Controller
         $employee->delete();
 
         return response()->noContent();
+    }
+
+    /**
+     * Replace the employee's skill set with $skills, where each item is
+     * ['skill_id' => UUID, 'proficiency' => string].
+     *
+     * Called by storeEmployee and updateEmployee. Goes through the
+     * EmployeeSkill model (rather than $employee->skills()->sync(...)) because
+     * the pivot table requires a UUID `id` and a NOT NULL `tenant_id` which
+     * Laravel's default Pivot does not populate — sync() would crash on a
+     * NOT NULL constraint. EmployeeSkill's HasUuids + BelongsToTenant traits
+     * fill both correctly on create.
+     *
+     * @param  array<int, array{skill_id: string, proficiency: string}>  $skills
+     */
+    private function syncEmployeeSkills(Employee $employee, array $skills): void
+    {
+        EmployeeSkill::where('employee_id', $employee->id)->delete();
+
+        foreach ($skills as $item) {
+            EmployeeSkill::create([
+                'employee_id' => $employee->id,
+                'skill_id'    => $item['skill_id'],
+                'proficiency' => $item['proficiency'],
+            ]);
+        }
     }
 
     // ── Global Overheads ──────────────────────────────────────────────────────
@@ -400,12 +445,20 @@ class OrganizationController extends Controller
     public function upsertSettings(Request $request)
     {
         $validated = $request->validate([
-            'overhead_percentage'     => 'required|numeric|min:0|max:100',
-            'buffer_percentage'       => 'required|numeric|min:0|max:100',
-            'yearly_fixed_cost'       => 'required|numeric|min:0',
-            'employer_tax_percentage' => 'required|numeric|min:0|max:100',
-            'benefits_percentage'     => 'required|numeric|min:0|max:100',
+            'overhead_percentage'             => 'required|numeric|min:0|max:100',
+            'buffer_percentage'               => 'required|numeric|min:0|max:100',
+            'yearly_fixed_cost'               => 'required|numeric|min:0',
+            'annual_initial_budget'           => 'sometimes|numeric|min:0',
+            'employer_tax_percentage'         => 'required|numeric|min:0|max:100',
+            'benefits_percentage'             => 'required|numeric|min:0|max:100',
+            'cost_to_bill_ratio'              => 'sometimes|numeric|min:0|max:1',
+            'default_monthly_capacity_hours'  => 'sometimes|integer|min:1|max:744',
+            'fallback_hourly_cost'            => 'sometimes|numeric|min:0',
         ]);
+
+        if (! array_key_exists('annual_initial_budget', $validated)) {
+            $validated['annual_initial_budget'] = 1_000_000_000;
+        }
 
         $tenantId = app('tenant_id');
         $settings = CompanySetting::first();
@@ -417,5 +470,169 @@ class OrganizationController extends Controller
         }
 
         return new CompanySettingResource($settings);
+    }
+
+    // ── Capacity Roles ──────────────────────────────────────────────────────
+
+    public function indexCapacityRoles()
+    {
+        return CapacityRoleResource::collection(
+            CapacityRole::orderBy('name')->get()
+        );
+    }
+
+    public function storeCapacityRole(Request $request)
+    {
+        $tenantId = app('tenant_id');
+        $request->validate([
+            'name' => [
+                'required', 'string', 'max:100',
+                Rule::unique('capacity_roles', 'name')
+                    ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
+            ],
+            'code' => [
+                'required', 'string', 'max:50', 'regex:/^[a-z0-9_-]+$/',
+                Rule::unique('capacity_roles', 'code')
+                    ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
+            ],
+        ]);
+
+        $role = CapacityRole::create($request->only(['name', 'code']));
+
+        return new CapacityRoleResource($role);
+    }
+
+    public function updateCapacityRole(Request $request, CapacityRole $capacityRole)
+    {
+        $tenantId = app('tenant_id');
+        $request->validate([
+            'name' => [
+                'sometimes', 'required', 'string', 'max:100',
+                Rule::unique('capacity_roles', 'name')
+                    ->ignore($capacityRole->id)
+                    ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
+            ],
+            'code' => [
+                'sometimes', 'required', 'string', 'max:50', 'regex:/^[a-z0-9_-]+$/',
+                Rule::unique('capacity_roles', 'code')
+                    ->ignore($capacityRole->id)
+                    ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
+            ],
+        ]);
+
+        $capacityRole->update($request->only(['name', 'code']));
+
+        return new CapacityRoleResource($capacityRole);
+    }
+
+    public function destroyCapacityRole(CapacityRole $capacityRole)
+    {
+        $capacityRole->delete();
+
+        return response()->noContent();
+    }
+
+    // ── Skills ──────────────────────────────────────────────────────────────
+
+    public function indexSkills()
+    {
+        return SkillResource::collection(
+            Skill::orderBy('category')->orderBy('name')->get()
+        );
+    }
+
+    public function storeSkill(Request $request)
+    {
+        $tenantId = app('tenant_id');
+        $request->validate([
+            'name'     => [
+                'required', 'string', 'max:100',
+                Rule::unique('skills', 'name')
+                    ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
+            ],
+            'category' => 'required|string|max:50',
+        ]);
+
+        $skill = Skill::create($request->only(['name', 'category']));
+
+        return new SkillResource($skill);
+    }
+
+    public function updateSkill(Request $request, Skill $skill)
+    {
+        $tenantId = app('tenant_id');
+        $request->validate([
+            'name' => [
+                'sometimes', 'required', 'string', 'max:100',
+                Rule::unique('skills', 'name')
+                    ->ignore($skill->id)
+                    ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
+            ],
+            'category' => 'sometimes|required|string|max:50',
+        ]);
+
+        $skill->update($request->only(['name', 'category']));
+
+        return new SkillResource($skill);
+    }
+
+    public function destroySkill(Skill $skill)
+    {
+        $skill->delete();
+
+        return response()->noContent();
+    }
+
+    // ── Employee Skills ─────────────────────────────────────────────────────
+
+    public function employeeSkills(Employee $employee)
+    {
+        $employee->load('skills');
+
+        return response()->json([
+            'data' => $employee->skills->map(fn ($skill) => [
+                'skill_id'     => $skill->id,
+                'skill_name'   => $skill->name,
+                'category'    => $skill->category,
+                'proficiency' => $skill->pivot->proficiency,
+            ]),
+        ]);
+    }
+
+    public function assignSkill(Request $request, Employee $employee)
+    {
+        $tenantId = app('tenant_id');
+        $request->validate([
+            'skill_id'     => 'required|uuid|exists:skills,id',
+            'proficiency'  => 'required|in:beginner,intermediate,expert',
+        ]);
+
+        $exists = EmployeeSkill::where('employee_id', $employee->id)
+            ->where('skill_id', $request->input('skill_id'))
+            ->exists();
+
+        if ($exists) {
+            EmployeeSkill::where('employee_id', $employee->id)
+                ->where('skill_id', $request->input('skill_id'))
+                ->update(['proficiency' => $request->input('proficiency')]);
+        } else {
+            EmployeeSkill::create([
+                'tenant_id'    => $tenantId,
+                'employee_id'  => $employee->id,
+                'skill_id'     => $request->input('skill_id'),
+                'proficiency'  => $request->input('proficiency'),
+            ]);
+        }
+
+        return response()->json(['message' => 'Skill assigned successfully']);
+    }
+
+    public function removeSkill(Employee $employee, Skill $skill)
+    {
+        EmployeeSkill::where('employee_id', $employee->id)
+            ->where('skill_id', $skill->id)
+            ->delete();
+
+        return response()->noContent();
     }
 }

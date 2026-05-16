@@ -1,0 +1,34 @@
+id: chg-004
+title: "Anka Agency Testing Seeder with Realistic MMK Data"
+status: completed
+branch: feature/bug-fix-akp
+merged: false
+
+description: |
+  Created comprehensive test seeder for Anka Agency tenant with realistic
+  Myanmar Kyat (MMK) data. Enables realistic local testing and demos.
+
+changes:
+  - file: database/seeders/AnkaAgencyTestingSeeder.php
+    type: new
+    description: |
+      20 employees with salaries Ks500K–Ks5M, 6 deals (4 profitable, 2 loss),
+      3 projects, MMK currency. Includes realistic names, departments, roles,
+      and skills.
+
+  - file: database/seeders/DatabaseSeeder.php
+    type: update
+    description: Registered AnkaAgencyTestingSeeder in the main seeder
+
+  - file: database/factories/EmployeeFactory.php
+    type: update
+    description: Adjusted salary ranges for MMK currency context
+
+affected_specs:
+  - domain-models
+  - database-schema
+
+notes: |
+  Seeder successfully wipes and re-seeds the database. All financial data
+  uses MMK values appropriate for Myanmar market (salaries in hundreds of
+  thousands to millions of kyats).

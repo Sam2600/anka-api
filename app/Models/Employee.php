@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use App\Traits\BelongsToTenant;
+use Illuminate\Support\Facades\DB;
 
 // cost_per_hour is a PostgreSQL GENERATED column — never add it to $fillable.
 class Employee extends Model
@@ -21,6 +22,8 @@ class Employee extends Model
         'role',
         'role_name',
         'capacity_role',
+        'capacity_role_id',
+        'rank_id',
         'monthly_salary',
         'workable_hours',
         'status',
@@ -32,6 +35,19 @@ class Employee extends Model
         'workable_hours' => 'integer',
         'cost_per_hour'  => 'float',
     ];
+
+    protected static function booted()
+    {
+        static::saving(function ($model) {
+            if (DB::getDriverName() !== 'pgsql') {
+                if ($model->workable_hours > 0) {
+                    $model->cost_per_hour = $model->monthly_salary / $model->workable_hours;
+                } else {
+                    $model->cost_per_hour = 0;
+                }
+            }
+        });
+    }
 
     public function tenant()
     {
@@ -61,5 +77,22 @@ class Employee extends Model
     public function hardAssignments()
     {
         return $this->hasMany(DealHardAssignment::class);
+    }
+
+    public function capacityRole()
+    {
+        return $this->belongsTo(CapacityRole::class, 'capacity_role_id');
+    }
+
+    public function rank()
+    {
+        return $this->belongsTo(Rank::class, 'rank_id');
+    }
+
+    public function skills()
+    {
+        return $this->belongsToMany(Skill::class, 'employee_skills', 'employee_id', 'skill_id')
+            ->withPivot('proficiency')
+            ->withTimestamps();
     }
 }

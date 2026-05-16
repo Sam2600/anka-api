@@ -1,0 +1,65 @@
+schema: spec-driven
+
+context: |
+  Project: Anka API — multi-tenant agency management SaaS backend.
+  Stack: Laravel 13 · PHP 8.3+ · Sanctum auth · PostgreSQL (prod, Supabase) ·
+  SQLite (tests, in-memory via phpunit.xml).
+
+  Serves a separate Next.js frontend (anka-frontend). CORS is restricted to
+  localhost:3000 / 3001. All API responses are JSON; errors return JSON not
+  HTML (configured in `bootstrap/app.php`).
+
+  Multi-tenancy (CRITICAL): every business-data request must include the
+  `X-Tenant-ID` header. The `TenantScope` middleware (`tenant` alias)
+  validates the UUID, checks the tenant is active, AND verifies the
+  authenticated user's `tenant_id` matches the header before binding
+  `app('tenant_id', ...)`. Super admins bypass scoping entirely.
+  All primary models use the `BelongsToTenant` trait (boot method is
+  `bootBelongsToTenant` — Laravel's per-trait boot convention so a model's
+  own `booted()` doesn't override it).
+
+  Route middleware tiers (`routes/api.php`):
+    1. Auth-only       — `/auth/*` (no tenant header required).
+    2. Super admin     — `/admin/*` (system-level).
+    3. Tenant-scoped   — all business data.
+  Within tier 3, CRM reads are gated by `permission:view_crm` and writes by
+  `permission:manage_crm` (see `CheckPermission` middleware — the role map
+  mirrors the frontend `lib/rbac.ts` exactly).
+
+  Roles: `Admin`, `Executive`, `Sales`, `Delivery`, `HR` (and the
+  orthogonal `is_super_admin` boolean). Permissions live in
+  `app/Http/Middleware/CheckPermission.php` — keep in sync with frontend.
+
+  Atomic Deal → Contract → Project flow: `POST /deals/{deal}/win`
+  invokes the PostgreSQL stored procedure `win_deal(p_deal_id, p_tenant_id)`.
+  SQLite test fallback re-implements it in PHP. Do not duplicate the logic.
+
+  PostgreSQL specifics:
+    - Generated columns: `employees.cost_per_hour`, `invoices.total`.
+      Never set these from PHP; Eloquent ignores writes to them.
+    - Readable IDs via sequences: `CON-0001`, `INV-1042`, `PRJ-101`.
+    - Win-deal stored procedure lives in a migration; tests need special
+      handling because SQLite has no procedures.
+
+  Conventions:
+    - Resources in `app/Http/Resources/` shape responses (snake_case keys
+      wrapped in `data`).
+    - Validation in controllers; tenant-scoped `Rule::exists` for cross-
+      reference fields (e.g. `hard_assignments.*.employee_id`).
+    - Optimistic Eloquent: snake_case columns, `HasUuids` + `SoftDeletes`
+      on most primary models.
+    - Lint: `composer run lint` (Pint).
+    - Tests: `composer test` (PHPUnit 12, SQLite memory).
+    - Local dev: `composer dev` (concurrent server + queue + log stream).
+    - Use Bash / PowerShell tools — Windows dev machine.
+
+  Out-of-scope without explicit ask: editing the frontend, CLAUDE.md docs,
+  or destructive DB operations.
+
+# Per-artifact rules (optional)
+# rules:
+#   proposal:
+#     - Keep proposals under 500 words
+#     - Always include a "Non-goals" section
+#   tasks:
+#     - Break tasks into chunks of max 2 hours

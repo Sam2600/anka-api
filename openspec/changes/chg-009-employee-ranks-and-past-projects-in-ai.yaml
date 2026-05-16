@@ -1,0 +1,125 @@
+id: chg-009-employee-ranks-and-past-projects-in-ai
+name: Employee ranks + past-projects experience signal in the AI Team Builder
+status: implemented
+created: 2026-05-14
+owners: [claude.max@brycenmyanmar.com.mm]
+
+why: |
+  The AI Team Builder previously inferred employee seniority from a
+  free-text keyword match on role titles ("Senior" / "Lead" / "Manager"),
+  which was brittle and depended on title hygiene per tenant. The merge
+  from feature/ai-enhancements added an `employees.rank_id` FK + `ranks`
+  table seeded with Junior/Mid/Senior/Lead per tenant, but the rank wasn't
+  exposed in any API response or used by any prompt — so the new column
+  sat unused.
+
+  Separately the salesperson asked: "when two equally-skilled people are
+  available, prefer the one who's done this kind of project before, even
+  if they cost slightly more." That requires showing Claude each
+  candidate's past projects so it can judge similarity to the current deal.
+
+  This change wires both signals end-to-end: a tenant-managed rank model
+  with full CRUD UI, an AI-team-builder-context endpoint that ships
+  ranks + past-projects per employee, and a prompt rewrite that uses
+  rank.level as the canonical seniority signal and past-project relevance
+  as a tiebreaker that beats raw cost.
+
+what:
+  backend:
+    - EmployeeResource: exposes `rank` object (id, code, name, level) +
+      `rank_id`; OrganizationController eager-loads `rank` on index and
+      detail endpoints.
+    - OrganizationController employee store/update: validates `rank_id`
+      with tenant-scoped Rule::exists.
+    - New RankController + RankResource: full CRUD for /ranks under the
+      tenant-scoped tier. Soft-delete on destroy keeps employee rank_id
+      intact; the migration's ON DELETE SET NULL only fires on force-delete.
+    - New AiTeamBuilderContextController: GET /deals/{deal}/ai-team-builder-context
+      returns each active employee enriched with rank + past_projects
+      (cap 3 per employee, excludes Cancelled / Not Started status,
+      excludes the current deal, deal_description truncated to 500 chars,
+      most-recent first by start_date).
+    - DatabaseSeeder: createRanks() per tenant + deriveRankCode() heuristic
+      that backfills rank_id on every seeded employee from their role-title
+      keywords (Director/Manager/Architect → Lead, Senior → Senior,
+      Junior/Intern → Junior, else → Mid).
+    - cleanDatabase truncation order includes `ranks` so reseeding is
+      idempotent.
+
+  frontend:
+    - types/business.ts: Rank interface + Employee.rank/rankId.
+    - lib/queries/ranks.ts: useRanks() + useRankMutations() TanStack hooks.
+    - lib/queries/organization.ts: maps rank through the employees endpoint
+      (snake_case → camelCase as usual).
+    - lib/schemas/organization.schema.ts: employeeSchema adds rankId
+      optional; new rankSchema for the Ranks-tab form.
+    - components/forms/RankForm.tsx + components/tables/RanksTable.tsx
+      (new): mirror the Capacity-Roles pattern.
+    - app/(dashboard)/organization/page.tsx: new "Ranks" tab between
+      Skills and Salary; passes ranks into EmployeeForm.
+    - components/forms/EmployeeForm.tsx: new Rank <Select> next to
+      Capacity Pool; 'Unranked' sentinel maps to null on save.
+    - components/tables/EmployeesTable.tsx: Rank column (badge with
+      level-band colour, sortable by rank.level).
+    - components/crm/AITeamBuilder.tsx: "Need Management" toggle (default
+      ON); fetches /ai-team-builder-context before each build.
+    - types/aiTeamBuilder.ts: AITeamBuilderInput gains requireLeadership
+      and employeeContext; AITeamBuilderEmployeeContext type for the
+      backend payload.
+    - lib/aiTeamBuilder.ts:
+        • SYSTEM_PROMPT: rank.level is the canonical seniority signal
+          (≥40 Lead, ≥30 Senior, ≥20 Mid, ≤10 Junior); roleTitle keyword
+          fallback only when rank is null.
+        • SYSTEM_PROMPT: leadership requirement is now conditional on the
+          user's "Need Management" toggle; team-composition rule wording
+          updated.
+        • SYSTEM_PROMPT: new "Past-project relevance" tiebreaker — beats
+          raw cost efficiency when two candidates are otherwise equal.
+        • buildUserPrompt: injects per-employee rank + pastProjects from
+          the context endpoint payload; adds "Need Management: yes/no"
+          to the brief.
+        • findCarrier / enforceSkillCoverage: server-side carrier ranking
+          now follows the same proficiency → past-project → cost order.
+
+placeholders:
+  - The skill-overlap optimisation in AiTeamBuilderContextController
+    (skip past-projects for employees whose skills don't overlap any of
+    the deal's keywords) was implemented then disabled — on demo data
+    with generic deal descriptions ("active sales opportunity with
+    scoped workshops...") it filtered out 100% of past projects. The
+    constant unset() is intentional; re-enable when real tenants start
+    hitting context-window limits with the unfiltered payload.
+
+risk: |
+  - Untagged employees fall back to roleTitle keyword matching — same as
+    the old behaviour. Tenants that haven't tagged their staff still get
+    sensible defaults.
+  - Past-projects come from ProjectTeamAssignment rows; a tenant with no
+    historical projects sees pastProjects=[] for everyone, and the prompt
+    falls back to cost-efficiency tiebreaker. No degradation vs the
+    pre-change behaviour.
+  - The seeded rank backfill is deterministic but lossy: a "Backend
+    Engineer" becomes Mid regardless of actual seniority. Tenants will
+    want to re-tag in the UI.
+
+rollback: |
+  - Rank DB column has ON DELETE SET NULL, so dropping the ranks table
+    nullifies rank_id without breaking employees.
+  - All frontend changes are additive; reverting them leaves the schema
+    and rank data intact.
+
+manual_steps:
+  - composer dump-autoload (Rank model + new controllers auto-discovered)
+  - php artisan migrate (already applied via the prior ai-enhancements merge)
+  - php artisan db:seed (refreshes rank_id on seeded employees)
+  - npm run dev / build to pick up the new components
+
+follow_up:
+  - If tenants start hitting prompt-token limits (>15k input), re-enable
+    the AiTeamBuilderContextController skill-overlap optimisation and tune
+    the keyword extraction to use the deal's required_skills array instead
+    of raw description tokens.
+  - When the agency standardises on a specific past-project relevance
+    metric (e.g. "must share 2+ tech-stack keywords"), promote the cheap
+    keyword-overlap heuristic in lib/aiTeamBuilder.ts hasRelevantPastProject
+    to a proper similarity score.

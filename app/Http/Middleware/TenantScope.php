@@ -34,6 +34,14 @@ class TenantScope
             return response()->json(['message' => 'Invalid or inactive tenant'], 403);
         }
 
+        // Cross-tenant defence: the header is user-supplied, so a Tenant-A
+        // user could send Tenant-B's UUID and access B's data unless we
+        // verify ownership. Super admins are allowed across tenants and
+        // skipped above; regular users must match their own tenant.
+        if ((string) $user->tenant_id !== (string) $tenantId) {
+            return response()->json(['message' => 'Tenant access denied'], 403);
+        }
+
         app()->instance('tenant_id', $tenantId);
 
         return $next($request);

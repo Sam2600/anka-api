@@ -1,0 +1,127 @@
+id: business-logic
+name: Key Business Logic & Critical Flows
+version: "1.0"
+
+summary: |
+  Three operations are especially critical: the atomic Deal→Contract→Project conversion,
+  invoice payment with revenue recognition, and time entry approval with pessimistic locking.
+  Additionally, the AI auto-assign feature integrates with an external Claude API.
+
+flows:
+  - name: Deal → Contract → Project (Win Deal)
+    endpoint: POST /deals/{deal}/win
+    controller: DealController@win
+    implementation: |
+      Invokes the PostgreSQL stored procedure `win_deal(p_deal_id, p_tenant_id)`.
+      The procedure atomically:
+      1. Validates the deal exists and belongs to the tenant.
+      2. Creates a Contract row with `contract_number` from sequence, copying client/value.
+      3. Creates a Project row with `project_number` from sequence, linking to the contract.
+      4. Updates the deal status to `won` and sets `won_at`.
+    critical_rules:
+      - "Do NOT replicate this logic in PHP."
+      - "SQLite test fallback re-implements it in PHP because SQLite lacks stored procedures."
+      - "This is the ONLY allowed duplication of win-deal logic."
+    related_files:
+      - routes/api.php
+      - app/Http/Controllers/Api/DealController.php
+      - database/migrations (stored procedure definition)
+
+  - name: Invoice Payment
+    endpoint: PATCH /invoices/{invoice}/pay
+    controller: InvoiceController@pay
+    implementation: |
+      Runs inside `DB::transaction()`:
+      1. Locks the invoice row.
+      2. Records payment amount and sets `paid_at`.
+      3. Simultaneously increments `contracts.revenue_recognized` by the payment amount.
+    critical_rules:
+      - "Must be atomic — never separate the invoice update from revenue recognition."
+    related_files:
+      - app/Http/Controllers/Api/InvoiceController.php
+
+  - name: Time Entry Approval
+    endpoint: PATCH /time-entries/{time_entry}/approve
+    controller: TimeEntryController@approve
+    implementation: |
+      Uses `lockForUpdate()` (pessimistic locking) inside a transaction:
+      1. Locks the time entry row.
+      2. Sets `status = 'Approved'` and `approved_at = now()`.
+      3. Increments `projects.consumed_hours` by the entry's hours.
+    critical_rules:
+      - "Pessimistic locking prevents double-approval race conditions."
+    related_files:
+      - app/Http/Controllers/Api/TimeEntryController.php
+
+  - name: AI Auto-Assign (Project Team Builder)
+    endpoint: POST /projects/{project}/auto-assign
+    controller: AiAutoAssignController@autoAssign
+    implementation: |
+      1. Gathers project context (required roles, existing team, employee skills/availability).
+      2. Calls external Claude API (or demo fallback if key missing / call fails).
+      3. Parses AI response into team assignment recommendations.
+      4. Logs usage to `ai_usage_logs` table.
+    fallback_behavior: |
+      If Claude API is unavailable or `ANTHROPIC_API_KEY` is missing, falls back to
+      deterministic selection based on role matching and availability.
+    related_files:
+      - app/Http/Controllers/Api/AiAutoAssignController.php
+      - app/Models/AiUsageLog.php
+
+  - name: Deal Capacity Feasibility Check
+    controller: DealController
+    method: assertCapacityFeasible
+    implementation: |
+      Before allowing a deal to advance stages or be won, checks whether the tenant's
+      capacity pool (total workable hours per role type) can absorb the deal's estimated
+      resource requirements plus existing hard assignments.
+    related_files:
+      - app/Http/Controllers/Api/DealController.php
+
+controllers:
+  - name: AuthController
+    file: app/Http/Controllers/Api/AuthController.php
+    methods: [login, logout, me, refresh, updateProfile, changePassword]
+  - name: AdminController
+    file: app/Http/Controllers/Api/AdminController.php
+    methods: [dashboardStats, auditLogs, listAllUsers]
+  - name: TenantController
+    file: app/Http/Controllers/Api/TenantController.php
+    methods: [show, update, index, store, showAdmin, updateAdmin, destroy, listUsers, createUser, updateUser, deleteUser]
+  - name: DealController
+    file: app/Http/Controllers/Api/DealController.php
+    methods: [index, store, show, update, updateStage, win, lose, linkedContract, destroy, assertCapacityFeasible]
+  - name: ContractController
+    file: app/Http/Controllers/Api/ContractController.php
+    methods: [index, show, update, linkedProject, destroy]
+  - name: InvoiceController
+    file: app/Http/Controllers/Api/InvoiceController.php
+    methods: [index, show, store, update, pay, send, destroy]
+  - name: MilestoneController
+    file: app/Http/Controllers/Api/MilestoneController.php
+    methods: [index, store, show, update, accept, destroy]
+  - name: ProjectController
+    file: app/Http/Controllers/Api/ProjectController.php
+    methods: [index, show, update, destroy]
+  - name: TimeEntryController
+    file: app/Http/Controllers/Api/TimeEntryController.php
+    methods: [index, show, store, approve, submit, reject, destroy]
+  - name: OrganizationController
+    file: app/Http/Controllers/Api/OrganizationController.php
+    methods: |
+      CRUD for Departments, Roles, Employees, GlobalOverheads, CompanySettings,
+      CapacityRoles, Skills, EmployeeSkills
+  - name: EstimationVersionController
+    file: app/Http/Controllers/Api/EstimationVersionController.php
+    methods: [index, store, show, restore]
+  - name: AiAutoAssignController
+    file: app/Http/Controllers/Api/AiAutoAssignController.php
+    methods: [autoAssign, index, store, destroy]
+  - name: AiUsageController
+    file: app/Http/Controllers/Api/AiUsageController.php
+    methods: [store, adminIndex]
+
+services:
+  - name: AuditService
+    purpose: Logs errors and actions to the `audit_logs` table.
+    used_by: LogSystemErrors middleware, various controllers

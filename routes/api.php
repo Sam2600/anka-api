@@ -1,15 +1,23 @@
 <?php
 
+use App\Http\Controllers\Api\AiAutoAssignController;
+use App\Http\Controllers\Api\AiTeamBuilderContextController;
 use App\Http\Controllers\Api\AiUsageController;
 use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ContractController;
+use App\Http\Controllers\Api\ContractTemplateController;
+use App\Http\Controllers\Api\DealContractDraftController;
 use App\Http\Controllers\Api\DealController;
 use App\Http\Controllers\Api\EstimationVersionController;
+use App\Http\Controllers\Api\ExchangeRateController;
 use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\MilestoneController;
 use App\Http\Controllers\Api\OrganizationController;
+use App\Http\Controllers\Api\PhaseProgressLogController;
 use App\Http\Controllers\Api\ProjectController;
+use App\Http\Controllers\Api\ScheduleTrackingController;
+use App\Http\Controllers\Api\RankController;
 use App\Http\Controllers\Api\TenantController;
 use App\Http\Controllers\Api\TimeEntryController;
 use Illuminate\Support\Facades\Route;
@@ -47,18 +55,88 @@ Route::middleware(['auth:sanctum', 'super_admin', 'throttle:60,1'])->prefix('adm
 
 // Business data routes — require tenant scope.
 Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function () {
-    // Deals
-    Route::apiResource('deals', DealController::class);
-    Route::patch('/deals/{deal}/stage', [DealController::class,    'updateStage']);
-    Route::post('/deals/{deal}/win', [DealController::class,    'win']);
-    Route::post('/deals/{deal}/lose', [DealController::class,    'lose']);
-    Route::get('/deals/{deal}/contract', [DealController::class,    'linkedContract']);
+    // Deals — reads require view_crm (Executive, Sales, Admin), writes
+    // require manage_crm (Sales, Admin). Aligns with the frontend route
+    // permission table in lib/route-permissions.ts so Delivery and HR
+    // can't reach the CRM API even by URL.
+    Route::middleware('permission:view_crm')->group(function () {
+        Route::get('/deals', [DealController::class, 'index']);
+        Route::get('/deals/{deal}', [DealController::class, 'show']);
+        Route::get('/deals/{deal}/contract', [DealController::class, 'linkedContract']);
+    });
 
-    // Estimation Versions
-    Route::get('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'index']);
-    Route::post('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'store']);
-    Route::get('/estimation-versions/{id}', [EstimationVersionController::class, 'show']);
-    Route::post('/estimation-versions/{id}/restore', [EstimationVersionController::class, 'restore']);
+    Route::middleware('permission:manage_crm')->group(function () {
+        Route::post('/deals', [DealController::class, 'store']);
+        Route::put('/deals/{deal}', [DealController::class, 'update']);
+        Route::patch('/deals/{deal}', [DealController::class, 'update']);
+        Route::delete('/deals/{deal}', [DealController::class, 'destroy']);
+        // chg-011 Phase B-breaking: removed PATCH /deals/{deal}/stage,
+        // POST /deals/{deal}/win, POST /deals/{deal}/lose. Rank changes
+        // now fire only from event triggers — Estimation flips C→B,
+        // ContractDraftService flips B→A on draft generation and A→S on
+        // counter-signed PDF upload. The Drop endpoint replaces /lose
+        // and uses the orthogonal lifecycle_status flag.
+        Route::post('/deals/{deal}/drop', [DealController::class, 'drop']);
+    });
+
+    // Rich employee + past-projects context for the AI Team Builder.
+    // view_crm because the data shown (employees + past projects) is
+    // already visible to anyone with CRM-read access via other endpoints.
+    Route::middleware('permission:view_crm')->group(function () {
+        Route::get('/deals/{deal}/ai-team-builder-context', [AiTeamBuilderContextController::class, 'show']);
+    });
+
+    // ── AI Contract Drafting (Project Pipeline ⑤ Contract Generation) ──
+    // chg-011 Phase C. Wizard surface for generating English SES contracts
+    // from the Yazaki-modelled template variants. Generates A→S via
+    // ContractDraftService::markSigned (counter-signed PDF upload).
+    Route::middleware('permission:view_crm')->group(function () {
+        // Stream the rendered contract PDF inline for the wizard's preview
+        // modal. Cached per draft+version on the local disk; cache invalidates
+        // automatically on section edit/regenerate.
+        Route::get('/contract-drafts/{contractDraft}/preview-pdf', [DealContractDraftController::class, 'previewPdf']);
+        Route::get('/contract-templates', [ContractTemplateController::class, 'index'])
+            ->name('contract-templates.index');
+        Route::get('/contract-templates/{contractTemplate}', [ContractTemplateController::class, 'show'])
+            ->name('contract-templates.show');
+        Route::get('/deals/{deal}/contract-drafts', [DealContractDraftController::class, 'index']);
+        Route::get('/contract-drafts/{contractDraft}', [DealContractDraftController::class, 'show'])
+            ->name('contract-drafts.show');
+    });
+    Route::middleware('permission:manage_crm')->group(function () {
+        // Start generation — fires B→A on first successful Claude call.
+        Route::post('/deals/{deal}/contract-drafts', [DealContractDraftController::class, 'store']);
+        // Per-section edit (wizard step 2).
+        Route::patch('/contract-drafts/{contractDraft}/sections/{sectionKey}', [DealContractDraftController::class, 'updateSection']);
+        // Re-run AI for a single section with updated wizard inputs.
+        Route::post('/contract-drafts/{contractDraft}/regenerate-section', [DealContractDraftController::class, 'regenerateSection']);
+        Route::post('/contract-drafts/{contractDraft}/finalise', [DealContractDraftController::class, 'finalise']);
+        // Email send. send_contract_draft is manager-only; manage_crm fallback
+        // for tenants that haven't seeded the new permission yet.
+        Route::post('/contract-drafts/{contractDraft}/send', [DealContractDraftController::class, 'send']);
+        // Counter-signed PDF upload — fires A→S via win_deal().
+        // AI-backed verifier: read-only check that the uploaded signed PDF
+        // matches what we sent and contains a customer signature. The
+        // wizard calls this before mark-signed; the verdict drives the
+        // gate / override UX. Does not mutate the draft.
+        Route::post('/contract-drafts/{contractDraft}/verify-signed-pdf', [DealContractDraftController::class, 'verifySigned']);
+        Route::post('/contract-drafts/{contractDraft}/mark-signed', [DealContractDraftController::class, 'markSigned']);
+        Route::delete('/contract-drafts/{contractDraft}', [DealContractDraftController::class, 'destroy']);
+    });
+
+    // Estimation Versions — reads require view_crm; writes require manage_crm
+    // because saving / restoring a version mutates the parent deal's cost fields.
+    Route::middleware('permission:view_crm')->group(function () {
+        Route::get('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'index']);
+        Route::get('/estimation-versions/{id}', [EstimationVersionController::class, 'show']);
+        Route::get('/estimation-versions/{id}/download/xlsx', [EstimationVersionController::class, 'downloadXlsx']);
+    });
+    Route::middleware('permission:manage_crm')->group(function () {
+        Route::post('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'store']);
+        Route::post('/deals/{deal}/estimation-versions/ai-draft', [EstimationVersionController::class, 'aiDraft']);
+        Route::post('/deals/{deal}/estimation-versions/ai-delta', [EstimationVersionController::class, 'aiDelta']);
+        Route::post('/estimation-versions/{id}/restore', [EstimationVersionController::class, 'restore']);
+    });
 
     // Contracts (created only via win_deal; no store route)
     Route::apiResource('contracts', ContractController::class)->only(['index', 'show', 'update', 'destroy']);
@@ -66,7 +144,9 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
 
     // Invoices
     Route::apiResource('invoices', InvoiceController::class)->only(['index', 'show', 'store', 'destroy']);
-    Route::patch('/invoices/{invoice}/pay', [InvoiceController::class, 'pay']);
+    Route::patch('/invoices/{invoice}',      [InvoiceController::class, 'update']);
+    Route::patch('/invoices/{invoice}/pay',  [InvoiceController::class, 'pay']);
+    Route::post('/invoices/{invoice}/send',  [InvoiceController::class, 'send']);
 
     // Projects (created only via win_deal; no store route)
     Route::apiResource('projects', ProjectController::class)->only(['index', 'show', 'update', 'destroy']);
@@ -101,13 +181,81 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::get('/company-settings', [OrganizationController::class, 'getSettings']);
     Route::put('/company-settings', [OrganizationController::class, 'upsertSettings']);
 
+    // Capacity Roles
+    Route::get('/capacity-roles', [OrganizationController::class, 'indexCapacityRoles']);
+    Route::post('/capacity-roles', [OrganizationController::class, 'storeCapacityRole']);
+    Route::put('/capacity-roles/{capacityRole}', [OrganizationController::class, 'updateCapacityRole']);
+    Route::delete('/capacity-roles/{capacityRole}', [OrganizationController::class, 'destroyCapacityRole']);
+
+    // Ranks — tenant-managed seniority tiers used by the AI Team Builder.
+    // Defaults seeded as Junior/Mid/Senior/Lead but tenants can add custom
+    // ranks (e.g. "Principal", "Staff Engineer") via this endpoint.
+    Route::get('/ranks', [RankController::class, 'index']);
+    Route::post('/ranks', [RankController::class, 'store']);
+    Route::put('/ranks/{rank}', [RankController::class, 'update']);
+    Route::delete('/ranks/{rank}', [RankController::class, 'destroy']);
+
+    // Skills
+    Route::get('/skills', [OrganizationController::class, 'indexSkills']);
+    Route::post('/skills', [OrganizationController::class, 'storeSkill']);
+    Route::put('/skills/{skill}', [OrganizationController::class, 'updateSkill']);
+    Route::delete('/skills/{skill}', [OrganizationController::class, 'destroySkill']);
+
+    // Employee Skills
+    Route::get('/employees/{employee}/skills', [OrganizationController::class, 'employeeSkills']);
+    Route::post('/employees/{employee}/skills', [OrganizationController::class, 'assignSkill']);
+    Route::delete('/employees/{employee}/skills/{skill}', [OrganizationController::class, 'removeSkill']);
+
     // AI usage logging (tenant-scoped)
     Route::post('/ai-usage', [AiUsageController::class, 'store']);
+
+    // Exchange Rates
+    Route::get('/exchange-rates', [ExchangeRateController::class, 'index']);
+    Route::put('/exchange-rates', [ExchangeRateController::class, 'upsert']);
+    Route::delete('/exchange-rates/{rate}', [ExchangeRateController::class, 'destroy']);
 
     // Tenant settings (own tenant only)
     Route::get('/tenant', [TenantController::class, 'show']);
     Route::put('/tenant', [TenantController::class, 'update']);
+    // Multipart logo upload + remove. Used by the Organization → Company tab.
+    Route::post('/tenant/logo', [TenantController::class, 'uploadLogo']);
+    Route::delete('/tenant/logo', [TenantController::class, 'deleteLogo']);
 
     // Milestones
     Route::apiResource('milestones', MilestoneController::class);
+    Route::patch('/milestones/{milestone}/accept', [MilestoneController::class, 'accept']);
+
+    // Project Team Assignments
+    Route::get('/projects/{project}/team', [AiAutoAssignController::class, 'index']);
+    Route::post('/projects/{project}/team', [AiAutoAssignController::class, 'store']);
+    Route::delete('/projects/{project}/team/{assignment}', [AiAutoAssignController::class, 'destroy']);
+    // @deprecated — replaced by the plan-team + confirm-team preview flow.
+    // No frontend consumer; retained until cleanup pass after the new flow ships.
+    Route::post('/projects/{project}/auto-assign', [AiAutoAssignController::class, 'autoAssign']);
+
+    // AI team build — preview proposes employees for unfilled ghost roles;
+    // confirm writes only the picks the user accepted. No DB writes in preview.
+    Route::post('/projects/{project}/plan-team',    [AiAutoAssignController::class, 'planTeamPreview']);
+    Route::post('/projects/{project}/confirm-team', [AiAutoAssignController::class, 'confirmTeamPlan']);
+
+    // Project Task Assignments (xlsx-driven AI task allocation, per-phase)
+    Route::post('/projects/{project}/assign-tasks', [AiAutoAssignController::class, 'assignTasks']);
+    Route::get('/projects/{project}/task-assignments', [AiAutoAssignController::class, 'taskAssignmentsIndex']);
+    Route::patch('/projects/{project}/task-phase-assignments/{phaseAssignment}', [AiAutoAssignController::class, 'updateTaskPhaseAssignment']);
+
+    // Schedule tracking — daily progress logs + project/phase variance.
+    // See SCHEDULE_TRACKING_IMPLEMENTATION_PLAN.md for the design.
+    Route::get   ('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'index']);
+    Route::post  ('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'store']);
+    Route::patch ('/phase-progress-logs/{log}',                          [PhaseProgressLogController::class, 'update']);
+    Route::delete('/phase-progress-logs/{log}',                          [PhaseProgressLogController::class, 'destroy']);
+    Route::post  ('/phase-progress-logs/{log}/unlock',                   [PhaseProgressLogController::class, 'unlock']);
+    Route::get   ('/me/schedule-tracking/today',                         [PhaseProgressLogController::class, 'today']);
+
+    Route::get('/projects/{project}/schedule-tracking',             [ScheduleTrackingController::class, 'index']);
+    Route::get('/projects/{project}/schedule-tracking/summary',     [ScheduleTrackingController::class, 'summary']);
+    Route::get('/projects/{project}/schedule-tracking/by-assignee', [ScheduleTrackingController::class, 'byAssignee']);
+    // Per-day per-developer late-hours breakdown. Drives the Finance page's
+    // overtime calc and the "Late Hours by Developer" table.
+    Route::get('/projects/{project}/late-hours-by-day',             [ScheduleTrackingController::class, 'lateHoursByDay']);
 });

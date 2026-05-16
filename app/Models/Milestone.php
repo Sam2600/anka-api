@@ -19,13 +19,19 @@ class Milestone extends Model
         'amount',
         'status',
         'completed_at',
+        'acceptance_criteria',
+        'accepted_at',
+        'accepted_by_client',
+        'sequence_number',
     ];
 
     protected $casts = [
-        'id'           => 'string',
-        'due_date'     => 'date',
-        'amount'       => 'float',
-        'completed_at' => 'datetime',
+        'id'              => 'string',
+        'due_date'        => 'date',
+        'amount'          => 'float',
+        'completed_at'    => 'datetime',
+        'accepted_at'     => 'datetime',
+        'sequence_number' => 'integer',
     ];
 
     public function contract()

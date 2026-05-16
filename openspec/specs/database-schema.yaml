@@ -1,0 +1,405 @@
+id: database-schema
+name: Database Schema & PostgreSQL Specifics
+version: "1.0"
+
+summary: |
+  46 migrations define the schema. Production runs on PostgreSQL (Supabase);
+  tests use in-memory SQLite. Several PostgreSQL-specific features are used:
+  generated columns, CHECK constraints, stored procedures, and sequence-based
+  readable IDs.
+
+generated_columns:
+  - table: employees
+    column: cost_per_hour
+    expression: "monthly_salary / workable_hours"
+    notes: READ-ONLY in PHP. Eloquent ignores writes.
+  - table: invoices
+    column: total
+    expression: "amount + tax"
+    notes: READ-ONLY in PHP. Eloquent ignores writes.
+
+readable_ids:
+  - table: contracts
+    column: contract_number
+    sequence: CON-0001
+  - table: invoices
+    column: invoice_number
+    sequence: INV-1042
+  - table: projects
+    column: project_number
+    sequence: PRJ-101
+
+stored_procedures:
+  - name: win_deal
+    parameters: [p_deal_id UUID, p_tenant_id UUID]
+    purpose: |
+      Atomically converts a Deal into a Contract and Project. Do not replicate
+      this logic in PHP. Lives in a migration file.
+    test_fallback: |
+      SQLite has no stored procedures. Tests re-implement the logic in PHP
+      (see test helpers). This is the ONLY allowed duplication.
+
+check_constraints:
+  - table: employees
+    constraints:
+      - "status IN ('Active', 'On Leave', 'Terminated')"
+      - "capacity_role IN ('frontend', 'backend', 'pm', 'qa', 'design')"
+  - table: deals
+    constraints:
+      - "status IN ('lead', 'qualified', 'negotiation', 'won', 'lost')"
+      - numerous non-negative value checks on financial fields
+      - notes: |
+          Reduced from 6 stages to 5 in migration 2026_05_12_000001. The old
+          `proposal` rows were folded into `qualified`. UI rank labels:
+          lead→C, qualified→B, negotiation→A, won→S, lost→D.
+  - table: deal_contract_documents
+    constraints:
+      - "analysis_status IN ('pending', 'analyzing', 'approved', 'rejected', 'failed')"
+      - "extension IN ('pdf', 'docx', 'xlsx', 'pptx', 'txt')"
+      - "size_bytes > 0 AND size_bytes <= 26214400"
+  - table: contracts
+    constraints:
+      - "status IN ('Draft', 'Signed', 'Active', 'Completed', 'Cancelled')"
+  - table: milestones
+    constraints:
+      - "status IN ('Pending', 'In Progress', 'Completed', 'Accepted')"
+
+tables:
+  - name: tenants
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: name, type: string }
+      - { name: slug, type: string, unique: true }
+      - { name: plan, type: string }
+      - { name: currency, type: string, default: USD }
+      - { name: tax_rate, type: decimal }
+      - { name: avg_delivery_lag_months, type: integer }
+      - { name: avg_payment_days_late, type: integer }
+      - { name: is_active, type: boolean }
+
+  - name: users
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, nullable: true, fk: tenants.id, on_delete: RESTRICT }
+      - { name: employee_id, type: UUID, nullable: true, fk: employees.id, on_delete: SET NULL }
+      - { name: first_name, type: string }
+      - { name: last_name, type: string }
+      - { name: email, type: string, unique: true }
+      - { name: password, type: string }
+      - { name: app_role, type: string }
+      - { name: system_role, type: string }
+      - { name: is_super_admin, type: boolean }
+
+  - name: departments
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: name, type: string }
+      - { name: manager_id, type: UUID, nullable: true, fk: employees.id }
+      - { name: headcount, type: integer }
+
+  - name: roles
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: department_id, type: UUID, nullable: true, fk: departments.id }
+      - { name: title, type: string }
+      - { name: department, type: string }
+      - { name: rate, type: decimal }
+
+  - name: ranks
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: name, type: "varchar(100)" }
+      - { name: code, type: "varchar(50)" }
+      - { name: level, type: integer, default: 0 }
+    unique: [tenant_id, code]
+    notes: |
+      Seniority tiers per tenant; seeded defaults Junior(10), Mid(20),
+      Senior(30), Lead(40). Soft-deleted. employees.rank_id is FK
+      ON DELETE SET NULL so dropping a rank doesn't orphan employees.
+
+  - name: employees
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: department_id, type: UUID, nullable: true, fk: departments.id }
+      - { name: job_role_id, type: UUID, nullable: true, fk: roles.id }
+      - { name: name, type: string }
+      - { name: role, type: string }
+      - { name: role_name, type: string }
+      - { name: capacity_role, type: string, nullable: true }
+      - { name: capacity_role_id, type: UUID, nullable: true, fk: capacity_roles.id }
+      - { name: rank_id, type: UUID, nullable: true, fk: ranks.id, on_delete: SET NULL }
+      - { name: monthly_salary, type: decimal }
+      - { name: workable_hours, type: integer }
+      - { name: cost_per_hour, type: decimal, generated: "monthly_salary / workable_hours" }
+      - { name: status, type: string }
+
+  - name: capacity_roles
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: name, type: string }
+      - { name: code, type: string }
+    unique: [tenant_id, code]
+
+  - name: skills
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: name, type: string }
+      - { name: category, type: string }
+    unique: [tenant_id, name]
+
+  - name: employee_skills
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: employee_id, type: UUID, fk: employees.id }
+      - { name: skill_id, type: UUID, fk: skills.id }
+      - { name: proficiency, type: string }
+    unique: [employee_id, skill_id]
+
+  - name: company_settings
+    key_columns:
+      - { name: id, type: string, default: "'singleton'", pk: true }
+      - { name: tenant_id, type: UUID, unique: true, fk: tenants.id }
+      - { name: overhead_percentage, type: decimal }
+      - { name: buffer_percentage, type: decimal }
+      - { name: yearly_fixed_cost, type: decimal }
+      - { name: employer_tax_percentage, type: decimal }
+      - { name: benefits_percentage, type: decimal }
+      - { name: cost_to_bill_ratio, type: decimal }
+      - { name: default_monthly_capacity_hours, type: integer }
+      - { name: fallback_hourly_cost, type: decimal }
+
+  - name: global_overheads
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: category, type: string }
+      - { name: description, type: text, nullable: true }
+      - { name: monthly_cost, type: decimal }
+      - { name: effective_month, type: integer, nullable: true }
+      - { name: effective_year, type: integer, nullable: true }
+
+  - name: deals
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: name, type: string }
+      - { name: client, type: string }
+      - { name: contact_name, type: string, nullable: true }
+      - { name: contact_email, type: string, nullable: true }
+      - { name: contact_phone, type: string, nullable: true }
+      - { name: estimated_value, type: decimal, nullable: true }
+      - { name: win_probability, type: integer, nullable: true }
+      - { name: status, type: string }
+      - { name: expected_close_date, type: date, nullable: true }
+      - { name: lead_source, type: string, nullable: true }
+      - { name: client_budget, type: decimal, nullable: true }
+      - { name: timeline_months, type: integer, nullable: true }
+      - { name: workload_hours, type: integer, nullable: true }
+      - { name: workload_description, type: text, nullable: true }
+      - { name: target_margin, type: decimal, nullable: true }
+      - { name: base_labor_cost, type: decimal, nullable: true }
+      - { name: overhead_cost, type: decimal, nullable: true }
+      - { name: buffer_cost, type: decimal, nullable: true }
+      - { name: total_estimated_cost, type: decimal, nullable: true }
+      - { name: estimated_gross_profit, type: decimal, nullable: true }
+      - { name: won_at, type: timestamp, nullable: true }
+      - { name: lost_at, type: timestamp, nullable: true }
+      - { name: win_reason, type: text, nullable: true }
+      - { name: loss_reason, type: text, nullable: true }
+      - { name: wizard_step, type: string, nullable: true }
+
+  - name: deal_ghost_roles
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: deal_id, type: UUID, fk: deals.id }
+      - { name: role_type, type: string }
+      - { name: quantity, type: integer }
+      - { name: months, type: integer }
+      - { name: avg_monthly_salary, type: decimal, nullable: true }
+      - { name: min_monthly_salary, type: decimal, nullable: true }
+      - { name: max_monthly_salary, type: decimal, nullable: true }
+
+  - name: deal_hard_assignments
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: deal_id, type: UUID, fk: deals.id }
+      - { name: employee_id, type: UUID, fk: employees.id }
+      - { name: allocated_hours, type: integer }
+    unique: [deal_id, employee_id]
+
+  - name: estimation_resources
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: deal_id, type: UUID, fk: deals.id }
+      - { name: job_role_id, type: UUID, nullable: true, fk: roles.id }
+      - { name: role_id, type: UUID, nullable: true, fk: roles.id }
+      - { name: feature_name, type: string }
+      - { name: hours, type: integer }
+
+  - name: deal_overheads
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: deal_id, type: UUID, fk: deals.id }
+      - { name: name, type: string }
+      - { name: cost, type: decimal }
+
+  - name: deal_contract_documents
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: deal_id, type: UUID, fk: deals.id, on_delete: CASCADE }
+      - { name: uploaded_by, type: UUID, nullable: true, fk: users.id, on_delete: SET NULL }
+      - { name: original_filename, type: string }
+      - { name: mime_type, type: string }
+      - { name: extension, type: string }
+      - { name: size_bytes, type: integer }
+      - { name: storage_path, type: string }
+      - { name: analysis_status, type: string, default: "'pending'" }
+      - { name: analysis_result, type: jsonb, nullable: true }
+      - { name: previous_analysis, type: jsonb, nullable: true, notes: "Snapshot of the prior verdict on re-upload, copied forward before the old row is deleted. Drives the diff_vs_previous section of the new verdict." }
+      - { name: overall_score, type: smallint, nullable: true, notes: "Surfaced from analysis_result.overall_score for fast UI access and future filtering. 0-100 weighted by severity (critical=3, required=2, recommended=1)." }
+      - { name: detected_payment_pattern, type: "varchar(40)", nullable: true, notes: "Which billing pattern Claude detected: monthly_recurring · milestone_based · per_phase · one_time · unknown." }
+      - { name: analyzed_at, type: timestamp, nullable: true }
+
+  - name: estimation_versions
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: deal_id, type: UUID, fk: deals.id }
+      - { name: version_number, type: integer }
+      - { name: resources, type: jsonb }
+      - { name: overheads, type: jsonb }
+      - { name: target_margin, type: decimal }
+      - { name: notes, type: text, nullable: true }
+      - { name: created_by, type: UUID, nullable: true, fk: users.id }
+    unique: [deal_id, version_number]
+
+  - name: contracts
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: deal_id, type: UUID, unique: true, fk: deals.id }
+      - { name: contract_number, type: string, unique: true, default: "CON-0001" }
+      - { name: client, type: string }
+      - { name: total_value, type: decimal }
+      - { name: revenue_recognized, type: decimal, default: 0 }
+      - { name: cash_collected, type: decimal, default: 0 }
+      - { name: status, type: string }
+      - { name: start_date, type: date, nullable: true }
+      - { name: end_date, type: date, nullable: true }
+      - { name: signed_at, type: timestamp, nullable: true }
+      - { name: payment_terms_days, type: integer, nullable: true }
+      - { name: po_number, type: string, nullable: true }
+      - { name: billing_contact_name, type: string, nullable: true }
+      - { name: billing_email, type: string, nullable: true }
+      - { name: currency, type: string, nullable: true }
+      - { name: tax_jurisdiction, type: string, nullable: true }
+      - { name: notes, type: text, nullable: true }
+
+  - name: milestones
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: contract_id, type: UUID, fk: contracts.id }
+      - { name: name, type: string }
+      - { name: due_date, type: date, nullable: true }
+      - { name: amount, type: decimal }
+      - { name: status, type: string }
+      - { name: completed_at, type: timestamp, nullable: true }
+      - { name: acceptance_criteria, type: text, nullable: true }
+      - { name: accepted_at, type: timestamp, nullable: true }
+      - { name: accepted_by_client, type: boolean, default: false }
+      - { name: sequence_number, type: integer }
+
+  - name: invoices
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: contract_id, type: UUID, fk: contracts.id }
+      - { name: milestone_id, type: UUID, nullable: true, fk: milestones.id }
+      - { name: invoice_number, type: string, unique: true, default: "INV-1042" }
+      - { name: issue_date, type: date, nullable: true }
+      - { name: due_date, type: date, nullable: true }
+      - { name: amount, type: decimal }
+      - { name: tax, type: decimal }
+      - { name: paid_amount, type: decimal, default: 0 }
+      - { name: total, type: decimal, generated: "amount + tax" }
+      - { name: status, type: string }
+      - { name: paid_at, type: timestamp, nullable: true }
+      - { name: issued_at, type: timestamp, nullable: true }
+      - { name: sent_to_email, type: string, nullable: true }
+      - { name: reminder_sent_count, type: integer, default: 0 }
+
+  - name: projects
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: contract_id, type: UUID, unique: true, fk: contracts.id }
+      - { name: project_number, type: string, unique: true, default: "PRJ-101" }
+      - { name: name, type: string }
+      - { name: client, type: string }
+      - { name: budget_hours, type: integer }
+      - { name: consumed_hours, type: integer, default: 0 }
+      - { name: status, type: string }
+      - { name: start_date, type: date, nullable: true }
+      - { name: end_date, type: date, nullable: true }
+      - { name: kickoff_date, type: date, nullable: true }
+      - { name: project_manager_id, type: UUID, nullable: true, fk: employees.id }
+
+  - name: project_team_assignments
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: project_id, type: UUID, fk: projects.id }
+      - { name: employee_id, type: UUID, fk: employees.id }
+      - { name: allocated_hours, type: integer }
+      - { name: assignment_source, type: string, nullable: true }
+
+  - name: time_entries
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: project_id, type: UUID, fk: projects.id }
+      - { name: employee_id, type: UUID, fk: employees.id }
+      - { name: approved_by, type: UUID, nullable: true, fk: users.id }
+      - { name: task, type: string }
+      - { name: date, type: date }
+      - { name: hours, type: decimal }
+      - { name: billable, type: boolean, default: true }
+      - { name: status, type: string, default: "Draft" }
+      - { name: notes, type: text, nullable: true }
+      - { name: approved_at, type: timestamp, nullable: true }
+
+  - name: audit_logs
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: user_id, type: UUID, nullable: true, fk: users.id }
+      - { name: tenant_id, type: UUID, nullable: true, fk: tenants.id }
+      - { name: action, type: string }
+      - { name: level, type: string }
+      - { name: target_type, type: string, nullable: true }
+      - { name: target_id, type: string, nullable: true }
+      - { name: details, type: jsonb, nullable: true }
+      - { name: ip_address, type: string, nullable: true }
+
+  - name: ai_usage_logs
+    key_columns:
+      - { name: id, type: UUID PK }
+      - { name: tenant_id, type: UUID, fk: tenants.id }
+      - { name: user_id, type: UUID, fk: users.id }
+      - { name: feature, type: string }
+      - { name: model, type: string }
+      - { name: input_tokens, type: integer }
+      - { name: output_tokens, type: integer }
+      - { name: estimated_cost_usd, type: decimal }
