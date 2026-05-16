@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Storage;
 
 class Tenant extends Model
 {
@@ -14,6 +15,7 @@ class Tenant extends Model
         'name',
         'slug',
         'plan',
+        'logo_path',
         'currency',
         'tax_rate',
         'avg_delivery_lag_months',
@@ -28,6 +30,32 @@ class Tenant extends Model
         'avg_delivery_lag_months' => 'integer',
         'avg_payment_days_late' => 'integer',
     ];
+
+    /**
+     * Public URL for the tenant's logo, or null when no logo is set.
+     * Used by the frontend to preview the logo on the Company settings page.
+     * The PDF renderer reads the filesystem path directly via logoAbsolutePath().
+     */
+    public function getLogoUrlAttribute(): ?string
+    {
+        return $this->logo_path
+            ? Storage::disk('public')->url($this->logo_path)
+            : null;
+    }
+
+    /**
+     * Absolute filesystem path to the tenant's logo, or null when no logo
+     * is set or the file is missing on disk. The PDF service uses this to
+     * embed the image as a base64 data URI (Dompdf can't reach storage/).
+     */
+    public function logoAbsolutePath(): ?string
+    {
+        if (! $this->logo_path) {
+            return null;
+        }
+        $abs = Storage::disk('public')->path($this->logo_path);
+        return is_file($abs) ? $abs : null;
+    }
 
     public function users()
     {
