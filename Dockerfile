@@ -15,13 +15,18 @@ COPY composer.json composer.lock ./
 
 # Install vendor/ without dev deps. --no-scripts because artisan isn't here yet
 # (the app code is copied in the next stage and scripts run there).
+#
+# --ignore-platform-req=ext-gd because the composer:2 image (Alpine) doesn't
+# ship gd, but the runtime stage below installs it. Composer would otherwise
+# refuse to resolve phpoffice/phpspreadsheet + phpoffice/phpword.
 RUN composer install \
     --no-dev \
     --no-interaction \
     --no-progress \
     --no-scripts \
     --prefer-dist \
-    --optimize-autoloader
+    --optimize-autoloader \
+    --ignore-platform-req=ext-gd
 
 # ── Stage 2: php-fpm runtime ─────────────────────────────────────────────────
 FROM php:8.3-fpm-bookworm AS runtime
