@@ -228,6 +228,14 @@ class DealController extends Controller
 
             $this->replaceDealChildren($deal, $request);
 
+            // C → B auto-advance the moment the deal has any estimation row or
+            // overhead persisted. Mirrors the B → A check below; the model
+            // method is no-op for deals already past C, dropped, or with no
+            // estimation data. Refresh first so the relation counts include
+            // rows replaceDealChildren just wrote.
+            $deal->refresh();
+            $deal->maybePromoteToQualified();
+
             // B → A auto-advance on Estimation handoff completion.
             // When a deal at 'qualified' has all REQUIRED_ESTIMATION_FIELDS
             // filled (the last write to land is typically final_confirmed_at),
