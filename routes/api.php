@@ -123,6 +123,7 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::middleware('permission:manage_crm')->group(function () {
         Route::post('/deals/{deal}/estimation-versions', [EstimationVersionController::class, 'store']);
         Route::post('/deals/{deal}/estimation-versions/ai-draft', [EstimationVersionController::class, 'aiDraft']);
+        Route::post('/deals/{deal}/estimation-versions/ai-delta', [EstimationVersionController::class, 'aiDelta']);
         Route::post('/estimation-versions/{id}/restore', [EstimationVersionController::class, 'restore']);
     });
 
