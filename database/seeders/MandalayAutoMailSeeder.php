@@ -131,7 +131,11 @@ class MandalayAutoMailSeeder extends Seeder
                 'estimated_gross_profit' => 50000000,
             ]);
 
-            $sections = $this->prerenderedSections();
+            // Concrete party names for the rendered text. The PDF + email
+            // still pull from the live tenant + deal at render time; these
+            // strings are what the seeded body contains until Claude
+            // regenerates a section.
+            $sections = $this->prerenderedSections($tenant->name, $deal->client);
 
             $draft = DealContractDraft::create([
                 'id' => (string) Str::orderedUuid(),
@@ -186,7 +190,7 @@ class MandalayAutoMailSeeder extends Seeder
         ];
     }
 
-    private function prerenderedSections(): array
+    private function prerenderedSections(string $providerName, string $customerName): array
     {
         $commencement = now()->addDays(14)->toDateString();
         $endDate = now()->addDays(14)->addMonths(24)->toDateString();
@@ -198,12 +202,12 @@ class MandalayAutoMailSeeder extends Seeder
                 'type' => 'ai_written',
                 'output_format' => 'paragraph',
                 'rendered' =>
-                    'Provider shall deliver an off-site backup service to Mandalay Auto Parts '
-                    .'Distribution Co., Ltd. ("User") covering the User\'s ERP, inventory, and '
-                    .'finance systems hosted on three Windows Server 2019 nodes. The service '
-                    .'comprises centralized configuration of backup jobs to Microsoft Azure '
-                    .'(Southeast Asia region), automated nightly transfers, and safeguards '
-                    .'against unauthorized modification or deletion of the off-site copies.',
+                    "{$providerName} shall deliver an off-site backup service to {$customerName} "
+                    ."covering the customer's ERP, inventory, and finance systems hosted on three "
+                    ."Windows Server 2019 nodes. The service comprises centralized configuration "
+                    ."of backup jobs to Microsoft Azure (Southeast Asia region), automated nightly "
+                    ."transfers, and safeguards against unauthorized modification or deletion of "
+                    ."the off-site copies.",
                 'has_todo' => false,
                 'user_edited' => false,
             ],
@@ -230,21 +234,29 @@ class MandalayAutoMailSeeder extends Seeder
                 'output_format' => 'bulleted_pair',
                 'rendered' =>
                     "Provider:\n"
-                    ."- Initial: design and document the three-server backup topology, install Veritas agents, "
-                    ."configure Azure containers with encryption at rest.\n"
-                    ."- Initial: complete first full backup of all three servers and confirm restore integrity.\n"
-                    ."- Monthly: monitor backup jobs daily; investigate and remediate failures within one business day.\n"
-                    ."- Monthly: rotate Azure access keys and patch Veritas agents per vendor advisories.\n"
-                    ."- Quarterly: execute restore validation on a 50 GB sample and deliver a written report.\n"
+                    ."- Initial: {$providerName} designs and documents the three-server backup topology, "
+                    ."installs Veritas agents, and configures Azure containers with encryption at rest.\n"
+                    ."- Initial: {$providerName} completes the first full backup of all three servers and "
+                    ."confirms restore integrity.\n"
+                    ."- Monthly: {$providerName} monitors backup jobs daily; investigates and remediates "
+                    ."failures within one business day.\n"
+                    ."- Monthly: {$providerName} rotates Azure access keys and patches Veritas agents per "
+                    ."vendor advisories.\n"
+                    ."- Quarterly: {$providerName} executes restore validation on a 50 GB sample and "
+                    ."delivers a written report.\n"
                     ."\n"
                     ."User:\n"
-                    ."- Initial: provide domain admin credentials and VPN access to the three source servers.\n"
-                    ."- Initial: confirm backup window (18:00–07:30 MST) does not conflict with ERP nightly jobs.\n"
-                    ."- Monthly: notify Provider 48 hours before any planned server maintenance.\n"
-                    ."- Monthly: review backup-health reports issued by Provider on the 5th of each month.\n"
-                    ."- Annually: supply a test environment for the full-restore drill.\n"
+                    ."- Initial: {$customerName} provides domain admin credentials and VPN access to the "
+                    ."three source servers.\n"
+                    ."- Initial: {$customerName} confirms the backup window (18:00–07:30 MST) does not "
+                    ."conflict with ERP nightly jobs.\n"
+                    ."- Monthly: {$customerName} notifies {$providerName} 48 hours before any planned "
+                    ."server maintenance.\n"
+                    ."- Monthly: {$customerName} reviews backup-health reports issued by {$providerName} "
+                    ."on the 5th of each month.\n"
+                    ."- Annually: {$customerName} supplies a test environment for the full-restore drill.\n"
                     ."\n"
-                    ."We do not support any work that is out of scope.",
+                    ."{$providerName} does not support any work that is out of scope.",
                 'has_todo' => false,
                 'user_edited' => false,
             ],
@@ -258,9 +270,9 @@ class MandalayAutoMailSeeder extends Seeder
                     ."- Domain admin credentials for the three Windows Server 2019 source nodes; access scoped to backup operations only.\n"
                     ."- Initial 5 TB full backup expected to complete in approximately 17–20 days at 30 Mbps; "
                     ."source servers and VPN must remain active throughout this period.\n"
-                    ."- Daily coordination during the initial transfer window between User's IT lead and Provider's engineer.\n"
-                    ."- User to maintain Azure billing on a separate subscription owned by User; Provider configures but does not own the subscription.\n"
-                    ."- Customer notifies Provider 48 hours before any planned ERP downtime to avoid false-positive backup alerts.",
+                    ."- Daily coordination during the initial transfer window between {$customerName}'s IT lead and {$providerName}'s engineer.\n"
+                    ."- {$customerName} to maintain Azure billing on a separate subscription owned by {$customerName}; {$providerName} configures but does not own the subscription.\n"
+                    ."- {$customerName} notifies {$providerName} 48 hours before any planned ERP downtime to avoid false-positive backup alerts.",
                 'has_todo' => false,
                 'user_edited' => false,
             ],
@@ -273,8 +285,8 @@ class MandalayAutoMailSeeder extends Seeder
                     "Monthly Service Fee: MMK 7,500,000 per month, invoiced at the end of each calendar month.\n"
                     ."Initial Setup Fee: MMK 2,000,000, invoiced once on the Commencement Date.\n\n"
                     ."Overtime: this agreement does not include any free support hours. All ad-hoc "
-                    ."support requested by User is billed at MMK 35,000 per hour, reflected on the "
-                    ."following month's invoice with an itemized log of hours.\n\n"
+                    ."support requested by {$customerName} is billed at MMK 35,000 per hour, reflected "
+                    ."on the following month's invoice with an itemized log of hours.\n\n"
                     ."Out-of-scope work — including application-level data migration, ERP version "
                     ."upgrades, and recovery of files deleted prior to the Commencement Date — is "
                     ."quoted separately on receipt of a written request.",
@@ -301,10 +313,10 @@ class MandalayAutoMailSeeder extends Seeder
                 'rendered' =>
                     "(a) Total service supporting hours = 8 hours/month (paid; see Fees section).\n"
                     ."(b) Online support for technical issues during 06:00 PM to 07:30 AM (Myanmar Standard Time, UTC+6:30), "
-                    ."matching the customer's after-hours backup window. Holidays excepted.\n"
+                    ."matching {$customerName}'s after-hours backup window. Holidays excepted.\n"
                     ."(c) If issues are reported after 07:30 AM, support continues the following backup window.\n"
                     ."(d) Support and monitoring are limited to the Azure cloud backup service described above.\n"
-                    ."(e) We do not support any other options.",
+                    ."(e) {$providerName} does not support any other options.",
                 'has_todo' => false,
                 'user_edited' => false,
             ],
@@ -314,9 +326,9 @@ class MandalayAutoMailSeeder extends Seeder
                 'type' => 'fixed',
                 'output_format' => 'paragraph',
                 'rendered' =>
-                    "(a) Provider will submit invoices to User at the end of each month.\n"
+                    "(a) {$providerName} will submit invoices to {$customerName} at the end of each month.\n"
                     ."(b) Payment is payable within 14 days of the date of invoice.\n"
-                    ."(c) All applicable bank charges and taxes shall be paid by the User.",
+                    ."(c) All applicable bank charges and taxes shall be paid by {$customerName}.",
                 'has_todo' => false,
                 'user_edited' => false,
             ],
@@ -326,9 +338,10 @@ class MandalayAutoMailSeeder extends Seeder
                 'type' => 'fixed',
                 'output_format' => 'paragraph',
                 'rendered' =>
-                    '(a) User will notify Provider by official email at least one month before the break time. '
-                    .'If User breaks this contract before the end of the Actual Usage Period, '
-                    .'Provider may charge the remaining months as an Early Termination fee.',
+                    "(a) {$customerName} will notify {$providerName} by official email at least one month "
+                    ."before the break time. If {$customerName} breaks this contract before the end of the "
+                    ."Actual Usage Period, {$providerName} may charge the remaining months as an Early "
+                    .'Termination fee.',
                 'has_todo' => false,
                 'user_edited' => false,
             ],

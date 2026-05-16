@@ -628,6 +628,13 @@ OUTPUT RULES (absolute):
 3. Formal, precise contract English. Use "shall" for binding obligations, "will"
    for expected behaviour, "may" for permissions. Attribute every obligation to
    a named party — no passive-voice ambiguity about who is responsible.
+3a. PARTY NAMING (important): use the concrete party names provided in DEAL
+   CONTEXT throughout the section body — refer to the agency by its actual
+   provider name and to the customer by its actual customer name. Do NOT use
+   the abstract role labels "Provider" or "User" as bare nouns in body text.
+   The ONLY exceptions are: (i) the "Provider:" and "User:" header labels
+   inside bulleted_pair sections (these are layout markers, not body prose);
+   (ii) verbatim quotes from the customer's own text.
 4. Do NOT include the section title in your output — the renderer prepends it.
 5. Never expose internal field names (snake_case keys), placeholder syntax, or
    system identifiers in human-readable text. The customer reads this directly.
@@ -866,10 +873,12 @@ TXT;
     {
         $slots = $this->resolveSlots($deal, $wizardInputs);
 
-        // Custom slot: trial period clause.
+        // Custom slot: trial period clause. Uses the customer's name for
+        // readability (matches the rest of the contract body).
         $trialMonths = (int) ($wizardInputs['trial_months'] ?? 0);
+        $customerName = $slots['customer_name'] ?? 'User';
         $slots['trial_period_clause'] = $trialMonths > 0
-            ? "User can use {$trialMonths} month(s) as a free trial of the service starting from the Commencement Date."
+            ? "{$customerName} can use {$trialMonths} month(s) as a free trial of the service starting from the Commencement Date."
             : 'No trial period applies.';
 
         return preg_replace_callback(
@@ -891,9 +900,18 @@ TXT;
     {
         $currency = $deal->final_currency ?? 'USD';
         $fmtMoney = function ($value) use ($currency) {
-            if ($value === null) return null;
+            if ($value === null) {
+                return null;
+            }
             return $currency.' '.number_format((float) $value, 2);
         };
+
+        // Resolve party names per draft. provider_name is the tenant
+        // (config fallback when tenant has no name); customer_name is the
+        // deal's client. These slot into the template's fixed_text so the
+        // contract body refers to parties by their actual names.
+        $providerName = $deal->tenant?->name
+            ?: config('contract.provider_fallback.name', 'Provider');
 
         return array_merge([
             'final_monthly_fee' => $fmtMoney($deal->final_monthly_fee),
@@ -902,6 +920,7 @@ TXT;
             'final_ot_policy' => $deal->final_ot_policy,
             'final_support_hours_per_month' => $deal->final_support_hours_per_month ?? self::DEFAULT_SUPPORT_HOURS,
             'final_team_summary' => $deal->final_team_summary,
+            'provider_name' => $providerName,
             'customer_name' => $deal->client,
             'project_name' => $deal->name,
             'payment_terms_days' => 7,
