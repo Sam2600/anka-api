@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
 use App\Traits\BelongsToTenant;
 use App\Models\ProjectTeamAssignment;
@@ -156,5 +157,35 @@ class Project extends Model
         }
 
         return self::STATUS_ON_TRACK;
+    }
+
+    /**
+     * Returns the project's effective end date.
+     *
+     * Falls back to start_date + deal.timeline_months when end_date is null,
+     * so projects scoped only by "X months from start" still have a window
+     * for AI task planning and Gantt-style UI rendering.
+     *
+     * Requires `contract.deal` eager-loaded to compute the fallback.
+     */
+    public function effectiveEndDate(): ?Carbon
+    {
+        if ($this->end_date) {
+            return Carbon::parse($this->end_date)->startOfDay();
+        }
+        if (! $this->start_date) {
+            return null;
+        }
+        $months = $this->contract?->deal?->timeline_months;
+        if (! $months) {
+            return null;
+        }
+
+        return Carbon::parse($this->start_date)->startOfDay()->addMonths((int) $months);
+    }
+
+    public function endDateIsEstimated(): bool
+    {
+        return ! $this->end_date && $this->effectiveEndDate() !== null;
     }
 }

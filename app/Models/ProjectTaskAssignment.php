@@ -23,22 +23,11 @@ class ProjectTaskAssignment extends Model
         'offshore',
         'difficulty',
         'total_hours',
-        'assignee_id',
-        'assignment_source',
-        'planned_start',
-        'planned_end',
-        'actual_start',
-        'actual_end',
-        'status',
     ];
 
     protected $casts = [
-        'row_no'        => 'integer',
-        'total_hours'   => 'float',
-        'planned_start' => 'date',
-        'planned_end'   => 'date',
-        'actual_start'  => 'date',
-        'actual_end'    => 'date',
+        'row_no'      => 'integer',
+        'total_hours' => 'float',
     ];
 
     public function project()
@@ -46,8 +35,8 @@ class ProjectTaskAssignment extends Model
         return $this->belongsTo(Project::class);
     }
 
-    public function assignee()
+    public function phaseAssignments()
     {
-        return $this->belongsTo(Employee::class, 'assignee_id');
+        return $this->hasMany(ProjectTaskPhaseAssignment::class, 'task_assignment_id')->orderBy('phase_order');
     }
 }

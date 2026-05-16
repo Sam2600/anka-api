@@ -13,3 +13,9 @@ Schedule::command('invoices:flip-overdue')->dailyAt('01:00')->withoutOverlapping
 // real time — this command is the date-driven sibling. See
 // storage/contract_auto_status_decision.md for the why.
 Schedule::command('contracts:auto-transition')->dailyAt('01:30')->withoutOverlapping();
+
+// Nightly: lock schedule-tracking progress logs whose log_date is older than
+// the previous working day. Employees can edit "yesterday" until end-of-day
+// today; older logs become immutable history. PMs can manually unlock via
+// POST /phase-progress-logs/{log}/unlock.
+Schedule::command('progress-logs:lock')->dailyAt('02:00')->withoutOverlapping();

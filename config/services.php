@@ -39,6 +39,9 @@ return [
         // Override when going through a proxy / reseller (e.g. vibecode-claude.online).
         // No trailing slash — code appends "/v1/messages".
         'base_url' => rtrim(env('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), '/'),
+        'schedule_retries'     => (int) env('ANTHROPIC_SCHEDULE_RETRIES', 2),
+        'schedule_max_tokens'  => (int) env('ANTHROPIC_SCHEDULE_MAX_TOKENS', 16384),
+        'schedule_model'       => env('ANTHROPIC_SCHEDULE_MODEL', 'claude-3-5-sonnet-latest'),
     ],
 
     'gemini' => [
