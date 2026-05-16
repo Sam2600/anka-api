@@ -8,6 +8,8 @@ use App\Models\ContractTemplate;
 use App\Models\Deal;
 use App\Models\DealContractDraft;
 use App\Services\ContractDraftService;
+use App\Services\ContractPdfService;
+use App\Services\SignedContractVerifier;
 use Illuminate\Http\Request;
 
 /**
@@ -42,6 +44,17 @@ class DealContractDraftController extends Controller
         $validated = $request->validate([
             'template_id' => ['required', 'string', 'exists:contract_templates,id'],
             'wizard_inputs' => ['sometimes', 'array'],
+            // Per-draft override of the Provider signatory on the PDF.
+            // Null/missing → fall back to tenant.signatory_*. Empty string
+            // is treated as "explicitly leave blank for this draft".
+            'signatory_name_override' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'signatory_title_override' => ['sometimes', 'nullable', 'string', 'max:255'],
+            // Customer-side signer captured at draft time. The deal's
+            // contact_* fields are the day-to-day liaison (often a sales
+            // rep / procurement contact) and are not the authorised signer.
+            // All three optional — blank values render '____' on the PDF.
+            'customer_signatory_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'customer_signatory_title' => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);
 
         $template = ContractTemplate::findOrFail($validated['template_id']);
@@ -51,6 +64,10 @@ class DealContractDraftController extends Controller
             $template,
             $validated['wizard_inputs'] ?? [],
             $request->user(),
+            $validated['signatory_name_override'] ?? null,
+            $validated['signatory_title_override'] ?? null,
+            $validated['customer_signatory_name'] ?? null,
+            $validated['customer_signatory_title'] ?? null,
         );
 
         return new DealContractDraftResource($draft->load(['deal', 'template']));
@@ -59,6 +76,33 @@ class DealContractDraftController extends Controller
     public function show(DealContractDraft $contractDraft)
     {
         return new DealContractDraftResource($contractDraft->load(['deal', 'template']));
+    }
+
+    /**
+     * Stream the rendered PDF inline so the wizard can preview the actual
+     * customer-facing document (logo, layout, signature block) before
+     * sending. Reuses the per-draft+version cache — edits/regenerates
+     * already invalidate it via ContractPdfService::clearCache, so the
+     * preview always reflects the current sections.
+     */
+    public function previewPdf(DealContractDraft $contractDraft, ContractPdfService $pdfService)
+    {
+        $absolutePath = $pdfService->renderDraft($contractDraft);
+
+        if (! is_file($absolutePath)) {
+            return response()->json(['message' => 'Could not render the preview PDF.'], 500);
+        }
+
+        $slug = \Illuminate\Support\Str::slug($contractDraft->deal?->name ?? 'contract');
+        $filename = "{$slug}-v{$contractDraft->version}.pdf";
+
+        return response()->file($absolutePath, [
+            'Content-Type' => 'application/pdf',
+            // 'inline' = render in browser; the iframe in the wizard reads it
+            // straight from the blob URL the frontend builds after fetch.
+            'Content-Disposition' => 'inline; filename="'.$filename.'"',
+            'Cache-Control' => 'private, max-age=0, no-store',
+        ]);
     }
 
     public function updateSection(Request $request, DealContractDraft $contractDraft, string $sectionKey)
@@ -114,6 +158,23 @@ class DealContractDraftController extends Controller
         );
 
         return new DealContractDraftResource($draft->load(['deal', 'template']));
+    }
+
+    /**
+     * Run an AI-backed verification of the customer's returned signed PDF
+     * against the original we sent. Returns a verdict the wizard uses to
+     * gate the actual mark-signed action. This endpoint does NOT mutate
+     * the draft or store the uploaded file — it's a read-only check.
+     */
+    public function verifySigned(Request $request, DealContractDraft $contractDraft, SignedContractVerifier $verifier)
+    {
+        $request->validate([
+            'signed_pdf' => ['required', 'file', 'mimes:pdf', 'max:25600'],
+        ]);
+
+        $verdict = $verifier->verify($contractDraft, $request->file('signed_pdf'));
+
+        return response()->json(['data' => $verdict]);
     }
 
     public function markSigned(Request $request, DealContractDraft $contractDraft)

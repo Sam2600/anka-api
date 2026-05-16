@@ -32,6 +32,8 @@ class TenantController extends Controller
         // because it's part of URLs / external references.
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255',
+            'signatory_name' => 'sometimes|nullable|string|max:255',
+            'signatory_title' => 'sometimes|nullable|string|max:255',
             'tax_rate' => 'sometimes|numeric|min:0|max:1',
             'avg_delivery_lag_months' => 'sometimes|integer|min:0|max:24',
             'avg_payment_days_late' => 'sometimes|integer|min:0|max:365',
@@ -341,6 +343,8 @@ class TenantController extends Controller
             'plan' => $tenant->plan,
             'logo_path' => $tenant->logo_path,
             'logo_url' => $tenant->logo_url,
+            'signatory_name' => $tenant->signatory_name,
+            'signatory_title' => $tenant->signatory_title,
             'currency' => $tenant->currency ?? 'MMK',
             'tax_rate' => (float) ($tenant->tax_rate ?? 0.20),
             'avg_delivery_lag_months' => (int) ($tenant->avg_delivery_lag_months ?? 1),

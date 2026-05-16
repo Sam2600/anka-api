@@ -127,7 +127,10 @@ class MailTestSeeder extends Seeder
                 'estimated_gross_profit' => 15000000,
             ]);
 
-            $sections = $this->prerenderedSections();
+            // Concrete party names for the rendered text. PDF + email pull
+            // from live tenant + deal at render; these strings are what the
+            // seeded body contains until Claude regenerates a section.
+            $sections = $this->prerenderedSections($tenant->name, $deal->client);
 
             $draft = DealContractDraft::create([
                 'id' => (string) Str::orderedUuid(),
@@ -195,7 +198,7 @@ class MailTestSeeder extends Seeder
      * contain. No unresolved placeholder markers, so the markSent guard
      * passes on the first click.
      */
-    private function prerenderedSections(): array
+    private function prerenderedSections(string $providerName, string $customerName): array
     {
         $commencement = now()->addDays(7)->toDateString();
         $endDate = now()->addDays(7)->addMonths(12)->toDateString();
@@ -207,12 +210,11 @@ class MailTestSeeder extends Seeder
                 'type' => 'ai_written',
                 'output_format' => 'paragraph',
                 'rendered' =>
-                    'Brycen Myanmar Ltd. ("Provider") shall provide centralized cloud backup '
-                    .'services to Test Customer Co., Ltd. ("User"), comprising secure off-site '
-                    .'storage of the User\'s server data with protection against unauthorized '
-                    .'modification and deletion. The service includes initial setup, ongoing '
-                    .'monitoring, and quarterly restore validation as detailed in the sections '
-                    .'that follow.',
+                    "{$providerName} shall provide centralized cloud backup services to "
+                    ."{$customerName}, comprising secure off-site storage of the customer's "
+                    .'server data with protection against unauthorized modification and deletion. '
+                    .'The service includes initial setup, ongoing monitoring, and quarterly '
+                    .'restore validation as detailed in the sections that follow.',
                 'has_todo' => false,
                 'user_edited' => false,
             ],
@@ -238,18 +240,23 @@ class MailTestSeeder extends Seeder
                 'output_format' => 'bulleted_pair',
                 'rendered' =>
                     "Provider:\n"
-                    ."- Initial: configure AWS S3 buckets, install Veritas agents, encrypt data in transit and at rest.\n"
-                    ."- Initial: validate first full backup end-to-end before sign-off.\n"
-                    ."- Monthly: monitor backup health, alert on failures within 1 business day.\n"
-                    ."- Monthly: rotate access keys quarterly; security patch backup agents.\n"
+                    ."- Initial: {$providerName} configures AWS S3 buckets, installs Veritas agents, "
+                    ."and encrypts data in transit and at rest.\n"
+                    ."- Initial: {$providerName} validates the first full backup end-to-end before sign-off.\n"
+                    ."- Monthly: {$providerName} monitors backup health and alerts on failures within "
+                    ."1 business day.\n"
+                    ."- Monthly: {$providerName} rotates access keys quarterly and applies security "
+                    ."patches to the backup agents.\n"
                     ."\n"
                     ."User:\n"
-                    ."- Initial: provide server list, console access, and AWS account billing details.\n"
-                    ."- Initial: confirm acceptable backup windows and bandwidth caps.\n"
-                    ."- Monthly: create or adjust backup jobs as data sources change.\n"
-                    ."- Monthly: schedule restore tests with Provider during the agreed window.\n"
+                    ."- Initial: {$customerName} provides the server list, console access, and AWS "
+                    ."account billing details.\n"
+                    ."- Initial: {$customerName} confirms acceptable backup windows and bandwidth caps.\n"
+                    ."- Monthly: {$customerName} creates or adjusts backup jobs as data sources change.\n"
+                    ."- Monthly: {$customerName} schedules restore tests with {$providerName} during "
+                    ."the agreed window.\n"
                     ."\n"
-                    ."We do not support any work that is out of scope.",
+                    ."{$providerName} does not support any work that is out of scope.",
                 'has_todo' => false,
                 'user_edited' => false,
             ],
@@ -263,8 +270,8 @@ class MailTestSeeder extends Seeder
                     ."- Remote console access to source servers during initial transfer and quarterly restore tests.\n"
                     ."- Initial 10 TB full backup expected to complete in approximately 18–22 days at 50 Mbps; "
                     ."the source server and internet must remain active throughout.\n"
-                    ."- Daily coordination between User's IT contact and Provider during the transfer window.\n"
-                    ."- User is responsible for backup-job retention scheduling beyond the default 30-day window.",
+                    ."- Daily coordination between {$customerName}'s IT contact and {$providerName} during the transfer window.\n"
+                    ."- {$customerName} is responsible for backup-job retention scheduling beyond the default 30-day window.",
                 'has_todo' => false,
                 'user_edited' => false,
             ],
@@ -279,7 +286,8 @@ class MailTestSeeder extends Seeder
                     ."Overtime: the first 8 hours of additional support per month are included. Beyond 8 hours, "
                     ."additional support is billed at MMK 25,000 per hour. Charges shall be reflected on the "
                     ."following month's invoice.\n\n"
-                    ."Out-of-scope work is quoted separately on receipt of a written request.",
+                    ."Out-of-scope work is quoted separately by {$providerName} on receipt of a written "
+                    ."request from {$customerName}.",
                 'has_todo' => false,
                 'user_edited' => false,
             ],
@@ -306,7 +314,7 @@ class MailTestSeeder extends Seeder
                     ."(b) Online support for technical issues during 09:00 AM to 04:00 PM (Myanmar Standard Time, UTC+6:30) except Holidays.\n"
                     ."(c) If issues are reported after 04:00 PM, support will continue the next working day.\n"
                     ."(d) Support and monitoring are limited to the cloud backup service described above.\n"
-                    ."(e) We do not support any other options.",
+                    ."(e) {$providerName} does not support any other options.",
                 'has_todo' => false,
                 'user_edited' => false,
             ],
@@ -316,9 +324,9 @@ class MailTestSeeder extends Seeder
                 'type' => 'fixed',
                 'output_format' => 'paragraph',
                 'rendered' =>
-                    "(a) Provider will submit invoices to User at the end of each month.\n"
+                    "(a) {$providerName} will submit invoices to {$customerName} at the end of each month.\n"
                     ."(b) Payment is payable within 7 days of the date of invoice.\n"
-                    ."(c) All applicable bank charges and taxes shall be paid by the User.",
+                    ."(c) All applicable bank charges and taxes shall be paid by {$customerName}.",
                 'has_todo' => false,
                 'user_edited' => false,
             ],
@@ -328,9 +336,10 @@ class MailTestSeeder extends Seeder
                 'type' => 'fixed',
                 'output_format' => 'paragraph',
                 'rendered' =>
-                    '(a) User will notify Provider by official email at least one month before the break time. '
-                    .'If User breaks this contract before the end of the Actual Usage Period, '
-                    .'Provider may charge the remaining months as an Early Termination fee.',
+                    "(a) {$customerName} will notify {$providerName} by official email at least one month "
+                    ."before the break time. If {$customerName} breaks this contract before the end of the "
+                    ."Actual Usage Period, {$providerName} may charge the remaining months as an Early "
+                    .'Termination fee.',
                 'has_todo' => false,
                 'user_edited' => false,
             ],

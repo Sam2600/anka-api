@@ -46,7 +46,7 @@ class ContractPdfService
         // Provider details: prefer per-tenant data, fall back to global
         // config when the tenant hasn't uploaded a logo / set fields yet.
         $tenant = $deal->tenant()->first();
-        $provider = $this->resolveProvider($tenant);
+        $provider = $this->resolveProvider($tenant, $draft);
 
         $pdf = Pdf::loadView('pdf.contract-draft', [
             'draft' => $draft,
@@ -55,6 +55,13 @@ class ContractPdfService
             'logoDataUri' => $this->logoDataUri($tenant),
             'sections' => $this->sectionsForRender($draft),
             'generatedAt' => now()->toDayDateTimeString(),
+            'providerSignDate' => now()->toFormattedDateString(),
+            // Customer signer block — pulled from the draft's per-contract
+            // capture. Null/empty values surface as '____' on the PDF so
+            // the customer can hand-fill. Date is always blank — we don't
+            // know when the customer will sign; they write it on signing.
+            'customerSignerName' => $draft->customer_signatory_name,
+            'customerSignerTitle' => $draft->customer_signatory_title,
         ])->setPaper('a4');
 
         // Ensure parent dir exists; Storage::put creates it implicitly.
@@ -66,11 +73,16 @@ class ContractPdfService
     /**
      * Merge per-tenant provider info with the config-level fallback. Tenant
      * fields win when set; config fills the gaps. Returns the same shape
-     * the Blade view expects (name/address/phone/email).
+     * the Blade view expects (name/address/phone/email + signatory).
      *
-     * @return array{name:string,address:string,phone:string,email:string}
+     * Signatory fallback chain (most specific wins):
+     *   draft.signatory_*_override → tenant.signatory_* → null/empty
+     * Empty signer renders a blank "Signed by" line for the operator
+     * (or the customer's counter-signing party) to fill in by hand.
+     *
+     * @return array{name:string,address:string,phone:string,email:string,signatory_name:?string,signatory_title:?string}
      */
-    private function resolveProvider(?\App\Models\Tenant $tenant): array
+    private function resolveProvider(?\App\Models\Tenant $tenant, DealContractDraft $draft): array
     {
         $fallback = config('contract.provider_fallback', []);
         return [
@@ -78,7 +90,26 @@ class ContractPdfService
             'address' => $fallback['address'] ?? '',
             'phone'   => $fallback['phone'] ?? '',
             'email'   => $fallback['email'] ?? '',
+            'signatory_name'  => $this->firstNonEmpty([
+                $draft->signatory_name_override,
+                $tenant?->signatory_name,
+            ]),
+            'signatory_title' => $this->firstNonEmpty([
+                $draft->signatory_title_override,
+                $tenant?->signatory_title,
+            ]),
         ];
+    }
+
+    /** Returns the first trimmed non-empty string in $candidates, else null. */
+    private function firstNonEmpty(array $candidates): ?string
+    {
+        foreach ($candidates as $value) {
+            if (is_string($value) && trim($value) !== '') {
+                return trim($value);
+            }
+        }
+        return null;
     }
 
     /**
@@ -88,6 +119,20 @@ class ContractPdfService
     {
         $root = config('contract.pdf_storage_path', 'contract-drafts');
         return "{$root}/{$draft->id}/v{$draft->version}.pdf";
+    }
+
+    /**
+     * Delete the cached PDF for this draft+version (if any). Called from
+     * ContractDraftService whenever the rendered sections change, so the
+     * next markSent re-renders from the updated content instead of
+     * re-sending the stale cached PDF.
+     */
+    public function clearCache(DealContractDraft $draft): void
+    {
+        $path = $this->relativePathFor($draft);
+        if (Storage::disk('local')->exists($path)) {
+            Storage::disk('local')->delete($path);
+        }
     }
 
     /**
