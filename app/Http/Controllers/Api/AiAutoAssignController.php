@@ -13,6 +13,7 @@ use App\Models\Project;
 use App\Models\ProjectTaskAssignment;
 use App\Models\ProjectTaskPhaseAssignment;
 use App\Models\ProjectTeamAssignment;
+use App\Services\EstimateFileResolver;
 use App\Services\Scheduling\AiSchedulePayload;
 use App\Services\Scheduling\AiScheduleValidator;
 use App\Services\Scheduling\CalendarFactory;
@@ -326,6 +327,438 @@ PROMPT;
         return json_encode($data, JSON_PRETTY_PRINT);
     }
 
+    // ── Team build preview + confirm (new business flow) ──────────────────────
+
+    /**
+     * Preview: ask the AI to fill the project's planned team structure
+     * (deal_ghost_roles) from the tenant's available employees, keeping
+     * any members already on `project_team_assignments` intact.
+     * Returns { kept, proposed, unfilled, roles_to_fill } — NO DB writes.
+     */
+    public function planTeamPreview(Project $project)
+    {
+        $tenantId = app('tenant_id');
+
+        $project->load([
+            'contract.deal.ghost_roles.rank',
+            'teamAssignments.employee.rank',
+            'teamAssignments.employee.capacityRole',
+        ]);
+
+        $deal = $project->contract?->deal;
+        if (! $deal) {
+            return response()->json([
+                'error' => 'Project has no originating deal; cannot infer planned team structure.',
+            ], 422);
+        }
+
+        $ghostRoles = $deal->ghost_roles ?? collect();
+        if ($ghostRoles->isEmpty()) {
+            return response()->json([
+                'error' => 'Originating deal has no planned roles (deal_ghost_roles). Populate planned team structure first.',
+            ], 422);
+        }
+
+        // 1. "Kept" — everyone already on the team. Never re-pick or evict.
+        $kept = $project->teamAssignments->map(fn ($a) => [
+            'employee_id'     => $a->employee_id,
+            'name'            => optional($a->employee)->name,
+            'rank_code'       => optional(optional($a->employee)->rank)->code,
+            'rank_name'       => optional(optional($a->employee)->rank)->name,
+            'capacity_role'   => optional(optional($a->employee)->capacityRole)->code ?? $a->employee?->capacity_role,
+            'allocated_hours' => (float) $a->allocated_hours,
+        ])->values()->all();
+
+        $keptEmployeeIds = array_map(fn ($k) => $k['employee_id'], $kept);
+
+        // 2. "Roles to fill" — ghost_role quantities minus matching kept counts
+        //    (matching = same capacity_role bucket as the ghost role's role_type).
+        $keptCountByRoleType = [];
+        foreach ($kept as $k) {
+            $bucket = $k['capacity_role'] ?? 'unknown';
+            $keptCountByRoleType[$bucket] = ($keptCountByRoleType[$bucket] ?? 0) + 1;
+        }
+
+        $rolesToFill = [];
+        foreach ($ghostRoles as $gr) {
+            $remaining = max(0, (int) $gr->quantity - (int) ($keptCountByRoleType[$gr->role_type] ?? 0));
+            // We decrement the bucket so successive ghost roles of the same
+            // role_type don't all subtract the same kept employees.
+            $consumed = min((int) $gr->quantity, (int) ($keptCountByRoleType[$gr->role_type] ?? 0));
+            $keptCountByRoleType[$gr->role_type] = max(0, ($keptCountByRoleType[$gr->role_type] ?? 0) - $consumed);
+
+            if ($remaining === 0) {
+                continue;
+            }
+
+            $rolesToFill[] = [
+                'ghost_role_id'   => $gr->id,
+                'role_type'       => $gr->role_type,
+                'rank_id'         => $gr->rank_id,
+                'rank_code'       => optional($gr->rank)->code,
+                'rank_name'       => optional($gr->rank)->name,
+                'quantity_needed' => $remaining,
+                'min_salary'      => (float) $gr->min_monthly_salary,
+                'avg_salary'      => (float) $gr->avg_monthly_salary,
+                'max_salary'      => (float) $gr->max_monthly_salary,
+                'months'          => (int) $gr->months,
+            ];
+        }
+
+        if (empty($rolesToFill)) {
+            return response()->json([
+                'kept'          => $kept,
+                'proposed'      => [],
+                'unfilled'      => [],
+                'roles_to_fill' => [],
+                'message'       => 'Planned team structure is already fully staffed; nothing to add.',
+            ]);
+        }
+
+        // 3. Eligible employee pool — active, full-time (>=160h/mo), in tenant,
+        //    not already on this project's team.
+        $eligible = Employee::with(['rank', 'capacityRole'])
+            ->where('tenant_id', $tenantId)
+            ->where('status', 'Active')
+            ->where('workable_hours', '>=', 160)
+            ->whereNotIn('id', $keptEmployeeIds)
+            ->get();
+
+        $employeePool = $eligible->map(fn ($emp) => [
+            'employee_id'    => $emp->id,
+            'name'           => $emp->name,
+            'rank_code'      => optional($emp->rank)->code,
+            'rank_name'      => optional($emp->rank)->name,
+            'capacity_role'  => optional($emp->capacityRole)->code ?? $emp->capacity_role,
+            'workable_hours' => (float) $emp->workable_hours,
+            'monthly_salary' => (float) $emp->monthly_salary,
+        ])->values()->all();
+
+        // 4. Build indexes for the validator.
+        $ghostRoleIndex = [];
+        foreach ($rolesToFill as $r) {
+            $ghostRoleIndex[$r['ghost_role_id']] = [
+                'role_type' => $r['role_type'],
+                'rank_code' => $r['rank_code'],
+                'quantity'  => $r['quantity_needed'],
+            ];
+        }
+        $employeeIndex = [];
+        foreach ($employeePool as $e) {
+            $employeeIndex[$e['employee_id']] = $e;
+        }
+
+        // 5. Call AI or fall back to deterministic picker.
+        $apiKey = config('services.anthropic.api_key') ?? env('ANTHROPIC_API_KEY');
+        $result = null;
+
+        if ($apiKey) {
+            try {
+                $result = $this->callPlanTeamAi(
+                    $apiKey,
+                    $project,
+                    $deal,
+                    $kept,
+                    $rolesToFill,
+                    $employeePool,
+                    $ghostRoleIndex,
+                    $employeeIndex,
+                    $keptEmployeeIds,
+                );
+            } catch (\Throwable $e) {
+                Log::error('AI plan-team error, falling back to deterministic picker', ['message' => $e->getMessage()]);
+            }
+        }
+
+        if (! $result) {
+            $result = $this->demoPlanTeam($rolesToFill, $employeePool);
+        }
+
+        // 6. Decorate picks with display fields the frontend needs.
+        $picksDecorated = [];
+        foreach ($result['picks'] as $pick) {
+            $emp = $employeeIndex[$pick['employee_id']] ?? null;
+            $gr  = null;
+            foreach ($rolesToFill as $r) {
+                if ($r['ghost_role_id'] === $pick['ghost_role_id']) {
+                    $gr = $r;
+                    break;
+                }
+            }
+            if (! $emp || ! $gr) {
+                continue;
+            }
+            $picksDecorated[] = [
+                'ghost_role_id'   => $pick['ghost_role_id'],
+                'employee_id'     => $pick['employee_id'],
+                'employee_name'   => $emp['name'],
+                'employee_rank'   => $emp['rank_code'],
+                'capacity_role'   => $emp['capacity_role'],
+                'role_type'       => $gr['role_type'],
+                'needed_rank'     => $gr['rank_code'],
+                'allocated_hours' => (float) ($pick['allocated_hours'] ?? $emp['workable_hours']),
+                'rank_match'      => $pick['rank_match'] ?? 'exact',
+            ];
+        }
+
+        return response()->json([
+            'kept'          => $kept,
+            'proposed'      => $picksDecorated,
+            'unfilled'      => $result['unfilled'] ?? [],
+            'roles_to_fill' => $rolesToFill,
+        ]);
+    }
+
+    /**
+     * Confirm a previously-previewed team plan. Inserts only NEW rows into
+     * project_team_assignments; existing rows are untouched.
+     */
+    public function confirmTeamPlan(Request $request, Project $project)
+    {
+        $tenantId = app('tenant_id');
+
+        $validated = $request->validate([
+            'picks'                       => 'required|array|min:1',
+            'picks.*.employee_id'         => 'required|uuid|exists:employees,id',
+            'picks.*.allocated_hours'     => 'nullable|numeric|min:0|max:10000',
+        ]);
+
+        $existingIds = ProjectTeamAssignment::where('project_id', $project->id)
+            ->pluck('employee_id')
+            ->all();
+        $existingSet = array_flip($existingIds);
+
+        $inserted = 0;
+        DB::transaction(function () use ($validated, $project, $tenantId, $existingSet, &$inserted) {
+            foreach ($validated['picks'] as $pick) {
+                if (isset($existingSet[$pick['employee_id']])) {
+                    continue;
+                }
+                ProjectTeamAssignment::create([
+                    'tenant_id'         => $tenantId,
+                    'project_id'        => $project->id,
+                    'employee_id'       => $pick['employee_id'],
+                    'allocated_hours'   => $pick['allocated_hours'] ?? 160,
+                    'assignment_source' => 'ai',
+                ]);
+                $inserted++;
+            }
+        });
+
+        $project->load('teamAssignments.employee');
+
+        return response()->json([
+            'data'     => ProjectTeamAssignmentResource::collection($project->teamAssignments),
+            'inserted' => $inserted,
+        ]);
+    }
+
+    /**
+     * Calls Anthropic, parses the response, validates, retries once on
+     * violations, returns ['picks' => [...], 'unfilled' => [...]] or throws.
+     */
+    private function callPlanTeamAi(
+        string $apiKey,
+        Project $project,
+        $deal,
+        array $kept,
+        array $rolesToFill,
+        array $employeePool,
+        array $ghostRoleIndex,
+        array $employeeIndex,
+        array $keptEmployeeIds,
+    ): ?array {
+        $prompt = $this->buildPlanTeamPrompt($project, $deal, $kept, $rolesToFill, $employeePool);
+
+        $baseUrl = rtrim(config('services.anthropic.base_url') ?: 'https://api.anthropic.com', '/');
+        $model   = config('services.anthropic.model') ?: 'claude-3-5-sonnet-latest';
+
+        $messages = [
+            ['role' => 'user', 'content' => $prompt],
+        ];
+
+        $retries = (int) (config('services.anthropic.schedule_retries') ?? 1);
+        $validator = new \App\Services\Ai\AiTeamPlanValidator();
+
+        for ($attempt = 0; $attempt <= $retries; $attempt++) {
+            $response = Http::withHeaders([
+                'x-api-key'         => $apiKey,
+                'anthropic-version' => '2023-06-01',
+                'content-type'      => 'application/json',
+            ])->post($baseUrl.'/v1/messages', [
+                'model'      => $model,
+                'max_tokens' => 4096,
+                'system'     => 'You are an HR staffing assistant. Pick the best employees to fill each planned role on this project. Return ONLY a JSON object matching the schema in the user message — no markdown, no commentary.',
+                'messages'   => $messages,
+            ]);
+
+            $body = $response->json();
+            $text = trim($body['content'][0]['text'] ?? '');
+            if (str_starts_with($text, '```')) {
+                $text = preg_replace('/^```(?:json)?\s*/i', '', $text);
+                $text = preg_replace('/\s*```$/', '', $text);
+            }
+
+            $parsed = json_decode($text, true);
+            if (! is_array($parsed) || ! isset($parsed['picks']) || ! is_array($parsed['picks'])) {
+                Log::warning('AI plan-team: invalid JSON response', ['text' => substr($text, 0, 400)]);
+                if ($attempt === $retries) {
+                    return null;
+                }
+                $messages[] = ['role' => 'assistant', 'content' => $text];
+                $messages[] = ['role' => 'user', 'content' => 'Your last reply was not valid JSON matching the schema. Return ONLY the JSON object now.'];
+
+                continue;
+            }
+
+            $picks    = $parsed['picks'];
+            $unfilled = $parsed['unfilled'] ?? [];
+
+            $violations = $validator->validate($picks, $unfilled, $ghostRoleIndex, $employeeIndex, $keptEmployeeIds);
+            if (empty($violations)) {
+                return ['picks' => $picks, 'unfilled' => $unfilled];
+            }
+
+            if ($attempt === $retries) {
+                Log::warning('AI plan-team: validator rejected even after retry', ['violations' => $violations]);
+
+                return null;
+            }
+
+            $messages[] = ['role' => 'assistant', 'content' => $text];
+            $messages[] = ['role' => 'user', 'content' => 'Your previous response failed validation: '.$this->jsonEncode($violations).' Re-emit the JSON object correcting these issues.'];
+        }
+
+        return null;
+    }
+
+    /**
+     * Deterministic fallback when the AI call fails or returns nothing usable.
+     * Matches each ghost role to the closest-rank employee whose capacity_role
+     * matches role_type. Applies the rank-fallback ladder (Senior → Mid → Junior).
+     */
+    private function demoPlanTeam(array $rolesToFill, array $employeePool): array
+    {
+        $rankLevel = ['Junior' => 10, 'Mid' => 20, 'Senior' => 30, 'Lead' => 40];
+        $available = $employeePool; // by-value copy; we splice as we pick
+        $picks = [];
+        $unfilled = [];
+
+        foreach ($rolesToFill as $role) {
+            $needed = $role['quantity_needed'];
+            $wantedRankLevel = $rankLevel[$role['rank_code'] ?? ''] ?? null;
+
+            for ($i = 0; $i < $needed; $i++) {
+                // Score available employees: role_type match required; rank
+                // closeness preferred; lower-rank fallback allowed.
+                $bestIdx = null;
+                $bestScore = PHP_INT_MIN;
+
+                foreach ($available as $idx => $emp) {
+                    if ($emp['capacity_role'] !== $role['role_type']) {
+                        continue;
+                    }
+                    $score = 100;
+                    if ($wantedRankLevel !== null) {
+                        $empLevel = $rankLevel[$emp['rank_code'] ?? ''] ?? 0;
+                        $delta = abs($empLevel - $wantedRankLevel);
+                        $score -= $delta; // closer = better
+                        if ($empLevel > $wantedRankLevel) {
+                            $score -= 5; // gently prefer not over-paying
+                        }
+                    }
+                    if ($score > $bestScore) {
+                        $bestScore = $score;
+                        $bestIdx = $idx;
+                    }
+                }
+
+                if ($bestIdx === null) {
+                    $unfilled[] = [
+                        'ghost_role_id' => $role['ghost_role_id'],
+                        'reason'        => 'no available employee with capacity_role='.$role['role_type'],
+                    ];
+                    break;
+                }
+
+                $picked = $available[$bestIdx];
+                array_splice($available, $bestIdx, 1);
+
+                $pickedLevel = $rankLevel[$picked['rank_code'] ?? ''] ?? 0;
+                $rankMatch = 'exact';
+                if ($wantedRankLevel !== null && $pickedLevel < $wantedRankLevel) {
+                    $rankMatch = 'downgrade';
+                } elseif ($wantedRankLevel !== null && $pickedLevel > $wantedRankLevel) {
+                    $rankMatch = 'upgrade';
+                }
+
+                $picks[] = [
+                    'ghost_role_id'   => $role['ghost_role_id'],
+                    'employee_id'     => $picked['employee_id'],
+                    'allocated_hours' => $picked['workable_hours'],
+                    'rank_match'      => $rankMatch,
+                ];
+            }
+        }
+
+        return ['picks' => $picks, 'unfilled' => $unfilled];
+    }
+
+    private function buildPlanTeamPrompt(Project $project, $deal, array $kept, array $rolesToFill, array $employeePool): string
+    {
+        $projectMeta = [
+            'name'             => $project->name,
+            'client'           => $project->client,
+            'start_date'       => optional($project->start_date)->toDateString(),
+            'end_date'         => optional($project->end_date)->toDateString(),
+            'timeline_months'  => (int) ($deal?->timeline_months ?? 0),
+        ];
+
+        $keptJson         = $this->jsonEncode($kept);
+        $rolesJson        = $this->jsonEncode($rolesToFill);
+        $employeesJson    = $this->jsonEncode($employeePool);
+        $projectMetaJson  = $this->jsonEncode($projectMeta);
+
+        return <<<PROMPT
+Pick the best employees from the available pool to fill the planned roles
+on this project. DO NOT re-pick or evict anyone already on the team.
+
+PROJECT
+{$projectMetaJson}
+
+ALREADY-STAFFED MEMBERS (preserve as-is — these will be kept regardless):
+{$keptJson}
+
+PLANNED ROLES STILL TO FILL (after subtracting already-staffed counts):
+{$rolesJson}
+
+AVAILABLE EMPLOYEES (active, full-time, not already on this project's team):
+{$employeesJson}
+
+SELECTION RULES
+1. Match capacity_role exactly when possible (frontend → frontend, backend → backend, pm → pm, qa → qa, design → design).
+2. Prefer rank that matches the role's rank_code. When rank_code is null on the role, infer the target rank from the salary band (avg_salary closer to junior median → Junior; closer to senior median → Senior; etc.).
+3. FALLBACK LADDER when the target rank has no eligible employee:
+   - Missing Lead → use a Senior; mark "rank_match":"downgrade".
+   - Missing Senior → either use a Mid OR use 2 Juniors to cover the same slot. When you split one slot into two picks, both picks share the same ghost_role_id and you mark "rank_match":"split".
+   - Missing Mid → use a Junior (mark "downgrade").
+   - Missing Junior → use a Mid (mark "upgrade"); only as last resort.
+4. Never pick the same employee twice. Never pick anyone already in ALREADY-STAFFED MEMBERS.
+5. Set allocated_hours to the employee's workable_hours (full-time) unless you have a reason to reduce it.
+6. If a role still cannot be filled after applying the fallback ladder, report it in `unfilled` with a `reason` string. Do not invent UUIDs.
+
+OUTPUT — return ONLY this JSON object (no markdown fences, no commentary):
+{
+  "picks": [
+    { "ghost_role_id": "uuid", "employee_id": "uuid", "allocated_hours": 160, "rank_match": "exact|downgrade|upgrade|split" }
+  ],
+  "unfilled": [
+    { "ghost_role_id": "uuid", "reason": "no junior or mid available in tenant" }
+  ]
+}
+PROMPT;
+    }
+
     // ── Task-level AI assignment (Estimate.xlsx → per-phase assignee) ─────────
 
     // Canonical phase catalog keyed by the Japanese label that appears in row 3
@@ -373,7 +806,8 @@ PROMPT;
             ], 422);
         }
 
-        $sheet = $this->readEstimateSheet();
+        $resolvedPath = app(EstimateFileResolver::class)->latestForProject($project);
+        $sheet = $this->readEstimateSheet($resolvedPath);
         $tasks = $sheet['tasks'];
         $activePhases = $sheet['active_phases'];
         $rawSheet = $sheet['raw_markdown'] ?? '';
@@ -739,7 +1173,7 @@ PROMPT;
             ->orderBy('row_no')
             ->get();
 
-        $activePhases = $this->activePhasesFromRows($rows);
+        $activePhases = $this->activePhasesFromRows($rows, $project);
 
         return [
             'data' => ProjectTaskAssignmentResource::collection($rows),
@@ -773,11 +1207,19 @@ PROMPT;
         return new ProjectTaskPhaseAssignmentResource($phaseAssignment);
     }
 
-    private function readEstimateSheet(): array
+    private function readEstimateSheet(?string $absolutePath = null): array
     {
-        $path = public_path('storage/Estimate.xlsx');
+        if ($absolutePath !== null) {
+            $path = $absolutePath;
+        } else {
+            $path = public_path('storage/Estimate.xlsx');
+            Log::warning('readEstimateSheet: falling back to legacy hardcoded Estimate.xlsx path; no estimation_versions.xlsx_path resolved for this project', [
+                'fallback_path' => $path,
+            ]);
+        }
+
         if (! file_exists($path)) {
-            Log::error('Estimate.xlsx not found at '.$path);
+            Log::error('Estimate xlsx not found at '.$path);
 
             return ['tasks' => [], 'active_phases' => [], 'raw_markdown' => ''];
         }
@@ -1195,7 +1637,7 @@ PROMPT;
             ->orderBy('row_no')
             ->get();
 
-        $activePhases = $this->activePhasesFromRows($rows);
+        $activePhases = $this->activePhasesFromRows($rows, $project);
 
         return [
             'data' => ProjectTaskAssignmentResource::collection($rows),
@@ -1285,7 +1727,7 @@ PROMPT;
         return $this->persistTaskAssignments($project, $tasks, $assignments, $tenantId);
     }
 
-    private function activePhasesFromRows($rows): array
+    private function activePhasesFromRows($rows, ?Project $project = null): array
     {
         $byCode = [];
         foreach ($rows as $row) {
@@ -1302,9 +1744,11 @@ PROMPT;
         // headers but have zero hours across all tasks (so no DB rows exist
         // for them). PMs want to see "this phase exists in the template but
         // has no work yet" rather than have the column silently hidden.
-        // Cheap: one xlsx read; can move to a per-project cache later.
         try {
-            $declared = $this->readEstimateSheet()['active_phases'] ?? [];
+            $resolvedPath = $project
+                ? app(EstimateFileResolver::class)->latestForProject($project)
+                : null;
+            $declared = $this->readEstimateSheet($resolvedPath)['active_phases'] ?? [];
             foreach ($declared as $p) {
                 if (! isset($byCode[$p['code']])) {
                     $byCode[$p['code']] = [

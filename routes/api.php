@@ -216,7 +216,14 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::get('/projects/{project}/team', [AiAutoAssignController::class, 'index']);
     Route::post('/projects/{project}/team', [AiAutoAssignController::class, 'store']);
     Route::delete('/projects/{project}/team/{assignment}', [AiAutoAssignController::class, 'destroy']);
+    // @deprecated — replaced by the plan-team + confirm-team preview flow.
+    // No frontend consumer; retained until cleanup pass after the new flow ships.
     Route::post('/projects/{project}/auto-assign', [AiAutoAssignController::class, 'autoAssign']);
+
+    // AI team build — preview proposes employees for unfilled ghost roles;
+    // confirm writes only the picks the user accepted. No DB writes in preview.
+    Route::post('/projects/{project}/plan-team',    [AiAutoAssignController::class, 'planTeamPreview']);
+    Route::post('/projects/{project}/confirm-team', [AiAutoAssignController::class, 'confirmTeamPlan']);
 
     // Project Task Assignments (xlsx-driven AI task allocation, per-phase)
     Route::post('/projects/{project}/assign-tasks', [AiAutoAssignController::class, 'assignTasks']);
