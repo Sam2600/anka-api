@@ -49,6 +49,13 @@ class DealContractDraftController extends Controller
             // is treated as "explicitly leave blank for this draft".
             'signatory_name_override' => ['sometimes', 'nullable', 'string', 'max:255'],
             'signatory_title_override' => ['sometimes', 'nullable', 'string', 'max:255'],
+            // Customer-side signer captured at draft time. The deal's
+            // contact_* fields are the day-to-day liaison (often a sales
+            // rep / procurement contact) and are not the authorised signer.
+            // All three optional — blank values render '____' on the PDF.
+            'customer_signatory_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'customer_signatory_title' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'customer_signed_date' => ['sometimes', 'nullable', 'date'],
         ]);
 
         $template = ContractTemplate::findOrFail($validated['template_id']);
@@ -60,6 +67,9 @@ class DealContractDraftController extends Controller
             $request->user(),
             $validated['signatory_name_override'] ?? null,
             $validated['signatory_title_override'] ?? null,
+            $validated['customer_signatory_name'] ?? null,
+            $validated['customer_signatory_title'] ?? null,
+            $validated['customer_signed_date'] ?? null,
         );
 
         return new DealContractDraftResource($draft->load(['deal', 'template']));

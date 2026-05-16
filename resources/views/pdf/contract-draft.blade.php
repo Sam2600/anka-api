@@ -218,13 +218,13 @@
                 <div class="label">User</div>
                 <div class="line">{{ $deal->client ?: '—' }}</div>
                 <div class="signer-field"><span class="signer-label">Signed by:</span>
-                    <span class="signer-value">____________________</span>
+                    <span class="signer-value">{{ $customerSignerName ?? '____________________' }}</span>
                 </div>
                 <div class="signer-field"><span class="signer-label">Title:</span>
-                    <span class="signer-value">____________________</span>
+                    <span class="signer-value">{{ $customerSignerTitle ?? '____________________' }}</span>
                 </div>
                 <div class="signer-field"><span class="signer-label">Date:</span>
-                    <span class="signer-value">____________________</span>
+                    <span class="signer-value">{{ $customerSignedDate ?? '____________________' }}</span>
                 </div>
                 <div style="margin-top: 8pt; font-size: 9pt; color: #888;">Signature</div>
             </td>

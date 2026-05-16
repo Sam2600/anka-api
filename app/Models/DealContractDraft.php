@@ -51,6 +51,9 @@ class DealContractDraft extends Model
         'finalized_by_user_id',
         'signatory_name_override',
         'signatory_title_override',
+        'customer_signatory_name',
+        'customer_signatory_title',
+        'customer_signed_date',
     ];
 
     protected $casts = [
@@ -60,6 +63,7 @@ class DealContractDraft extends Model
         'sections' => 'array',
         'sent_at' => 'datetime',
         'signed_at' => 'datetime',
+        'customer_signed_date' => 'date',
         'template_version_at_generation' => 'integer',
         'version' => 'integer',
         'deleted_at' => 'datetime',

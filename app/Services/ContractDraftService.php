@@ -56,6 +56,9 @@ class ContractDraftService
         ?User $generatedBy = null,
         ?string $signatoryNameOverride = null,
         ?string $signatoryTitleOverride = null,
+        ?string $customerSignatoryName = null,
+        ?string $customerSignatoryTitle = null,
+        ?string $customerSignedDate = null,
     ): DealContractDraft {
         $this->assertEligible($deal);
         $this->assertTemplateUsable($template);
@@ -72,6 +75,9 @@ class ContractDraftService
             $generatedBy,
             $signatoryNameOverride,
             $signatoryTitleOverride,
+            $customerSignatoryName,
+            $customerSignatoryTitle,
+            $customerSignedDate,
         ) {
             // Newer drafts supersede older ones — preserve history for audit.
             DealContractDraft::where('deal_id', $deal->id)
@@ -95,6 +101,11 @@ class ContractDraftService
                 // PDF falls back to tenant.signatory_* at render time.
                 'signatory_name_override' => $signatoryNameOverride,
                 'signatory_title_override' => $signatoryTitleOverride,
+                // Customer signer captured at nego — separate from deal.contact_*
+                // (the day-to-day liaison). Blank values render '____' on the PDF.
+                'customer_signatory_name' => $customerSignatoryName,
+                'customer_signatory_title' => $customerSignatoryTitle,
+                'customer_signed_date' => $customerSignedDate,
             ]);
 
             // No rank flip here — the deal must already be at A (negotiation)

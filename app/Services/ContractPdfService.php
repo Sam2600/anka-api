@@ -56,6 +56,14 @@ class ContractPdfService
             'sections' => $this->sectionsForRender($draft),
             'generatedAt' => now()->toDayDateTimeString(),
             'providerSignDate' => now()->toFormattedDateString(),
+            // Customer signer block — pulled from the draft's per-contract
+            // capture. Null/empty values surface as '____' on the PDF so
+            // the customer can hand-fill.
+            'customerSignerName' => $draft->customer_signatory_name,
+            'customerSignerTitle' => $draft->customer_signatory_title,
+            'customerSignedDate' => $draft->customer_signed_date
+                ? $draft->customer_signed_date->toFormattedDateString()
+                : null,
         ])->setPaper('a4');
 
         // Ensure parent dir exists; Storage::put creates it implicitly.
