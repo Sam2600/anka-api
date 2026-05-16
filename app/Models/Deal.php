@@ -160,6 +160,17 @@ class Deal extends Model
         return $this->hasOne(Contract::class);
     }
 
+    /**
+     * The tenant that owns this deal. Used by the contract drafting flow
+     * to resolve per-tenant branding (provider name + logo) even from
+     * the queue worker, where the tenant scope isn't bound by middleware.
+     * The FK is set by the BelongsToTenant trait on create.
+     */
+    public function tenant()
+    {
+        return $this->belongsTo(Tenant::class);
+    }
+
     public function ghost_roles()
     {
         return $this->hasMany(DealGhostRole::class);
