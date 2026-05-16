@@ -11,6 +11,9 @@
 #   queue      — exec php artisan queue:work
 #   scheduler  — exec php artisan schedule:work
 #   migrate    — one-shot: run migrations, then exit 0
+#   seed       — one-shot: run migrations + DatabaseSeeder, then exit 0
+#                WARNING — DESTRUCTIVE. DatabaseSeeder::cleanDatabase() truncates
+#                every business table before re-seeding. First-deploy only.
 
 set -euo pipefail
 
@@ -92,6 +95,17 @@ case "$ROLE" in
         wait_for_db
         php artisan migrate --force
         echo "Migrations complete."
+        ;;
+
+    seed)
+        wait_for_db
+        # Make sure schema is current before seeding.
+        php artisan migrate --force
+        # DatabaseSeeder is destructive — it truncates every business table
+        # before re-inserting demo tenants. This is intentional for first
+        # deploy / demo refresh. NEVER run this on a live tenant DB.
+        php artisan db:seed --force
+        echo "Seed complete."
         ;;
 
     *)
