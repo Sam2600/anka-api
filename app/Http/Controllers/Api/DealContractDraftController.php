@@ -8,6 +8,7 @@ use App\Models\ContractTemplate;
 use App\Models\Deal;
 use App\Models\DealContractDraft;
 use App\Services\ContractDraftService;
+use App\Services\SignedContractVerifier;
 use Illuminate\Http\Request;
 
 /**
@@ -114,6 +115,23 @@ class DealContractDraftController extends Controller
         );
 
         return new DealContractDraftResource($draft->load(['deal', 'template']));
+    }
+
+    /**
+     * Run an AI-backed verification of the customer's returned signed PDF
+     * against the original we sent. Returns a verdict the wizard uses to
+     * gate the actual mark-signed action. This endpoint does NOT mutate
+     * the draft or store the uploaded file — it's a read-only check.
+     */
+    public function verifySigned(Request $request, DealContractDraft $contractDraft, SignedContractVerifier $verifier)
+    {
+        $request->validate([
+            'signed_pdf' => ['required', 'file', 'mimes:pdf', 'max:25600'],
+        ]);
+
+        $verdict = $verifier->verify($contractDraft, $request->file('signed_pdf'));
+
+        return response()->json(['data' => $verdict]);
     }
 
     public function markSigned(Request $request, DealContractDraft $contractDraft)

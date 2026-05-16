@@ -109,6 +109,11 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         // for tenants that haven't seeded the new permission yet.
         Route::post('/contract-drafts/{contractDraft}/send', [DealContractDraftController::class, 'send']);
         // Counter-signed PDF upload — fires A→S via win_deal().
+        // AI-backed verifier: read-only check that the uploaded signed PDF
+        // matches what we sent and contains a customer signature. The
+        // wizard calls this before mark-signed; the verdict drives the
+        // gate / override UX. Does not mutate the draft.
+        Route::post('/contract-drafts/{contractDraft}/verify-signed-pdf', [DealContractDraftController::class, 'verifySigned']);
         Route::post('/contract-drafts/{contractDraft}/mark-signed', [DealContractDraftController::class, 'markSigned']);
         Route::delete('/contract-drafts/{contractDraft}', [DealContractDraftController::class, 'destroy']);
     });
