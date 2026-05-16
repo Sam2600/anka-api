@@ -33,6 +33,8 @@ class EstimationAiService
 
     private const PROMPT_TEMPLATE_PATH = 'resources/prompts/estimation_generation.txt';
 
+    private const DELTA_PROMPT_TEMPLATE_PATH = 'resources/prompts/estimation_delta.txt';
+
     private const CONTRACT_TEXT_LIMIT = 50_000;
 
     private const FEW_SHOT_LIMIT = 3;
@@ -79,6 +81,58 @@ class EstimationAiService
                 $deal,
             );
         }
+    }
+
+    /**
+     * Suggest a structured diff (add / remove / modify) of scope rows and
+     * overheads based on customer meeting notes. Reads-only on the deal —
+     * the caller applies the accepted changes and persists a new version.
+     *
+     * $currentResources and $currentOverheads are the live deal state shaped
+     * as the controller passes them: each resource has feature_name + role +
+     * hours; each overhead has name + cost. Anything else is ignored.
+     */
+    public function generateDelta(
+        Deal $deal,
+        string $contextNotes,
+        array $currentResources,
+        array $currentOverheads,
+    ): array {
+        $apiKey = config('services.anthropic.api_key') ?? env('ANTHROPIC_API_KEY');
+        if (! $apiKey) {
+            throw new \RuntimeException('ANTHROPIC_API_KEY not configured.');
+        }
+
+        $prompt = $this->buildDeltaPrompt($deal, $contextNotes, $currentResources, $currentOverheads);
+
+        try {
+            $delta = $this->callClaudeRaw($apiKey, $prompt, $deal, 'estimation_delta');
+        } catch (Throwable $e) {
+            // Same retry policy as generateDraft: only retry JSON-shape failures
+            // because they're fixed by a strict "JSON only" preamble. Transport
+            // failures aren't.
+            $msg = $e->getMessage();
+            $isJsonFailure = str_contains($msg, 'returned non-JSON')
+                || str_contains($msg, 'delta missing key:');
+            if (! $isJsonFailure) {
+                throw $e;
+            }
+
+            Log::info('EstimationAi: delta first call returned bad JSON, retrying once', [
+                'deal_id' => $deal->id,
+                'error' => $msg,
+            ]);
+            $delta = $this->callClaudeRaw(
+                $apiKey,
+                "Respond with valid JSON only — no markdown, no preface, no fences.\n\n".$prompt,
+                $deal,
+                'estimation_delta',
+            );
+        }
+
+        $this->validateDeltaShape($delta);
+
+        return $delta;
     }
 
     private function callClaude(string $apiKey, string $prompt, Deal $deal): array
@@ -422,13 +476,13 @@ class EstimationAiService
         return implode("\n\n", $sections);
     }
 
-    private function logUsage(Deal $deal, array $usage): void
+    private function logUsage(Deal $deal, array $usage, string $feature = 'estimation_generation'): void
     {
         try {
             AiUsageLog::create([
                 'tenant_id' => $deal->tenant_id,
                 'user_id' => auth()->id(),
-                'feature' => 'estimation_generation',
+                'feature' => $feature,
                 'model' => self::MODEL,
                 'input_tokens' => (int) ($usage['input_tokens'] ?? 0),
                 'output_tokens' => (int) ($usage['output_tokens'] ?? 0),
@@ -446,5 +500,139 @@ class EstimationAiService
     {
         // Claude 3.5 Sonnet public pricing — same numbers as ContractAnalysisService.
         return round(($inputTokens / 1_000_000) * 3 + ($outputTokens / 1_000_000) * 15, 6);
+    }
+
+    // ── Delta flow helpers (Suggest Changes from Notes) ───────────────────
+
+    /**
+     * HTTP-only sibling of callClaude — does NOT run the full-draft validators
+     * (validateShape / suggestEmployees), so callers like generateDelta can
+     * apply their own shape checks. Same retries/timeouts/usage-logging.
+     */
+    private function callClaudeRaw(string $apiKey, string $prompt, Deal $deal, string $featureLabel): array
+    {
+        $baseUrl = rtrim(env('ANTHROPIC_BASE_URL') ?: self::DEFAULT_BASE_URL, '/');
+
+        $response = Http::timeout(180)
+            ->connectTimeout(15)
+            ->withHeaders([
+                'x-api-key' => $apiKey,
+                'authorization' => 'Bearer '.$apiKey,
+                'anthropic-version' => '2023-06-01',
+                'content-type' => 'application/json',
+            ])
+            ->post($baseUrl.'/v1/messages', [
+                'model' => self::MODEL,
+                'max_tokens' => 4096,
+                'messages' => [
+                    ['role' => 'user', 'content' => $prompt],
+                ],
+            ]);
+
+        if (! $response->successful()) {
+            throw new \RuntimeException("Claude API error ({$response->status()}): ".mb_substr($response->body(), 0, 400));
+        }
+
+        $body = $response->json();
+
+        if (isset($body['usage'])) {
+            $this->logUsage($deal, $body['usage'], $featureLabel);
+        }
+
+        $raw = trim($body['content'][0]['text'] ?? '');
+        if (str_starts_with($raw, '```')) {
+            $raw = preg_replace('/^```(?:json)?\s*/i', '', $raw);
+            $raw = preg_replace('/\s*```$/', '', $raw);
+        }
+
+        $parsed = json_decode($raw, true);
+        if (! is_array($parsed)) {
+            throw new \RuntimeException('Claude returned non-JSON: '.mb_substr($raw, 0, 200));
+        }
+
+        return $parsed;
+    }
+
+    private function buildDeltaPrompt(
+        Deal $deal,
+        string $contextNotes,
+        array $currentResources,
+        array $currentOverheads,
+    ): string {
+        $tplPath = base_path(self::DELTA_PROMPT_TEMPLATE_PATH);
+        if (! is_file($tplPath)) {
+            throw new \RuntimeException('Estimation delta prompt template missing at '.self::DELTA_PROMPT_TEMPLATE_PATH);
+        }
+
+        $template = file_get_contents($tplPath);
+
+        return strtr($template, [
+            '{{CLIENT_NAME}}' => $deal->client ?? '(unknown)',
+            '{{CLIENT_BUDGET}}' => $deal->client_budget !== null ? (string) $deal->client_budget : '(unknown)',
+            '{{CURRENCY}}' => $deal->final_currency ?? '(unset)',
+            '{{CURRENT_RESOURCES_BLOCK}}' => $this->formatResourcesForPrompt($currentResources),
+            '{{CURRENT_OVERHEADS_BLOCK}}' => $this->formatOverheadsForPrompt($currentOverheads),
+            '{{CONTEXT_NOTES}}' => trim($contextNotes) === '' ? '(empty)' : trim($contextNotes),
+            '{{ORG_ROLES_BLOCK}}' => $this->buildRolesBlock($deal),
+        ]);
+    }
+
+    private function formatResourcesForPrompt(array $resources): string
+    {
+        if (empty($resources)) {
+            return '(none — the deal has no scope rows yet)';
+        }
+        $lines = [];
+        foreach ($resources as $r) {
+            $name = $r['feature_name'] ?? $r['featureName'] ?? '?';
+            $role = $r['role'] ?? $r['role_title'] ?? $r['roleTitle'] ?? '?';
+            $hours = $r['hours'] ?? 0;
+            $lines[] = "- \"{$name}\" — role: {$role}, hours: {$hours}";
+        }
+
+        return implode("\n", $lines);
+    }
+
+    private function formatOverheadsForPrompt(array $overheads): string
+    {
+        if (empty($overheads)) {
+            return '(none)';
+        }
+        $lines = [];
+        foreach ($overheads as $o) {
+            $name = $o['name'] ?? '?';
+            $cost = $o['cost'] ?? 0;
+            $lines[] = "- \"{$name}\" — cost: {$cost}";
+        }
+
+        return implode("\n", $lines);
+    }
+
+    /**
+     * Asserts the AI delta JSON has the expected top-level shape so the
+     * frontend can render the review panel without defensive null-checks.
+     * Throws RuntimeException with "delta missing key:" prefix so the retry
+     * path in generateDelta picks it up.
+     */
+    private function validateDeltaShape(array $delta): void
+    {
+        foreach (['resources', 'overheads', 'summary', 'confidence'] as $key) {
+            if (! array_key_exists($key, $delta)) {
+                throw new \RuntimeException('delta missing key: '.$key);
+            }
+        }
+        foreach (['resources', 'overheads'] as $section) {
+            if (! is_array($delta[$section])) {
+                throw new \RuntimeException('delta missing key: '.$section.' (must be object)');
+            }
+            foreach (['add', 'remove', 'modify'] as $op) {
+                if (! array_key_exists($op, $delta[$section])) {
+                    throw new \RuntimeException('delta missing key: '.$section.'.'.$op);
+                }
+                if (! is_array($delta[$section][$op])) {
+                    throw new \RuntimeException('delta missing key: '.$section.'.'.$op.' (must be array)');
+                }
+            }
+        }
     }
 }
