@@ -135,6 +135,13 @@ class EstimationVersionController extends Controller
             ]);
         }
 
+        // C → B auto-advance: same trigger as DealController::update, applied
+        // here because Save Version writes estimation_resources via raw DB
+        // queries instead of going through the deal update path. Refresh
+        // first so the relation counts see what we just inserted.
+        $deal->refresh();
+        $deal->maybePromoteToQualified();
+
         // Generate the XLSX export for this version. Failures are logged but
         // never block the save — the user can still see the version in
         // history and a later download will lazy-regenerate.
@@ -219,6 +226,23 @@ class EstimationVersionController extends Controller
      */
     public function aiDraft(Request $request, Deal $deal): JsonResponse
     {
+        // Lift any inherited timeout (e.g. php artisan serve default 60s, php-fpm
+        // request_terminate_timeout). The Anthropic proxy can take up to ~180s
+        // for the structured draft and we don't want PHP to kill the process
+        // mid-flight. set_time_limit(0) = unlimited.
+        @set_time_limit(0);
+        @ignore_user_abort(true);
+        // Bump memory for this request only. The CLI default of 128M can be
+        // exhausted by the prompt builder when ORG_ROLES + few-shot deals +
+        // contract docs all stack up, causing a fatal error that drops the
+        // connection silently (no Laravel log, browser sees "cancelled").
+        @ini_set('memory_limit', '512M');
+
+        $startedAt = microtime(true);
+        Log::info('EstimationVersion: AI draft request received', [
+            'deal_id' => $deal->id,
+        ]);
+
         // Require at least one of the inputs the AI needs to generate something
         // sensible. workload_description is the cheap signal; a contract doc
         // is the rich one. Without either, the draft would be pure guesswork.
@@ -238,6 +262,7 @@ class EstimationVersionController extends Controller
         } catch (Throwable $e) {
             Log::error('EstimationVersion: AI draft generation failed', [
                 'deal_id' => $deal->id,
+                'elapsed_s' => round(microtime(true) - $startedAt, 1),
                 'error' => $e->getMessage(),
             ]);
 
@@ -246,6 +271,11 @@ class EstimationVersionController extends Controller
                 'detail' => app()->environment('production') ? null : $e->getMessage(),
             ], 503);
         }
+
+        Log::info('EstimationVersion: AI draft generated', [
+            'deal_id' => $deal->id,
+            'elapsed_s' => round(microtime(true) - $startedAt, 1),
+        ]);
 
         return response()->json(['data' => $draft]);
     }
