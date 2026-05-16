@@ -54,6 +54,10 @@ class ContractDraftService
         ContractTemplate $template,
         array $wizardInputs,
         ?User $generatedBy = null,
+        ?string $signatoryNameOverride = null,
+        ?string $signatoryTitleOverride = null,
+        ?string $customerSignatoryName = null,
+        ?string $customerSignatoryTitle = null,
     ): DealContractDraft {
         $this->assertEligible($deal);
         $this->assertTemplateUsable($template);
@@ -61,7 +65,18 @@ class ContractDraftService
         $aiOutputs = $this->callClaude($deal, $template, $wizardInputs);
         $merged = $this->mergeSections($template, $aiOutputs, $deal, $wizardInputs);
 
-        return DB::transaction(function () use ($deal, $template, $aiOutputs, $merged, $wizardInputs, $generatedBy) {
+        return DB::transaction(function () use (
+            $deal,
+            $template,
+            $aiOutputs,
+            $merged,
+            $wizardInputs,
+            $generatedBy,
+            $signatoryNameOverride,
+            $signatoryTitleOverride,
+            $customerSignatoryName,
+            $customerSignatoryTitle,
+        ) {
             // Newer drafts supersede older ones — preserve history for audit.
             DealContractDraft::where('deal_id', $deal->id)
                 ->where('status', DealContractDraft::STATUS_DRAFT)
@@ -80,6 +95,16 @@ class ContractDraftService
                 'ai_outputs' => $aiOutputs,
                 'sections' => $merged,
                 'generated_by_user_id' => $generatedBy?->id,
+                // Per-draft Provider signatory override. Null/empty here →
+                // PDF falls back to tenant.signatory_* at render time.
+                'signatory_name_override' => $signatoryNameOverride,
+                'signatory_title_override' => $signatoryTitleOverride,
+                // Customer signer captured at nego — separate from deal.contact_*
+                // (the day-to-day liaison). Blank values render '____' on the PDF.
+                // No date field — we don't know when they'll actually sign;
+                // the PDF prints a blank Date line for them to hand-fill.
+                'customer_signatory_name' => $customerSignatoryName,
+                'customer_signatory_title' => $customerSignatoryTitle,
             ]);
 
             // No rank flip here — the deal must already be at A (negotiation)
@@ -109,9 +134,12 @@ class ContractDraftService
         string $sectionKey,
         array $newWizardInputs,
     ): DealContractDraft {
-        if (! $draft->isEditable()) {
+        // Same policy as updateSectionContent: sent_to_customer drafts can
+        // still regenerate sections in preparation for a re-send. Only
+        // truly final states are immutable.
+        if ($draft->isSigned() || $draft->status === DealContractDraft::STATUS_SUPERSEDED) {
             throw ValidationException::withMessages([
-                'status' => ['Only drafts in "draft" status can be regenerated. Current: '.$draft->status],
+                'status' => ['Cannot regenerate sections of a draft that is '.$draft->status.'.'],
             ]);
         }
 
@@ -194,21 +222,34 @@ class ContractDraftService
             'sections' => $sections,
         ]);
 
+        // Invalidate the cached PDF so the next markSent re-renders with
+        // the regenerated section content. See updateSectionContent for
+        // the same rationale.
+        app(ContractPdfService::class)->clearCache($draft);
+
         return $draft->fresh();
     }
 
     /**
      * Apply user edits to a single section's rendered content. The wizard
      * step 2 calls this when the operator hand-edits AI output.
+     *
+     * Allowed on sent_to_customer drafts too — the operator may want to
+     * tweak a clause and re-send. Only signed / superseded drafts are
+     * immutable. The PDF cache is invalidated so the next markSent
+     * re-renders from the updated content.
      */
     public function updateSectionContent(
         DealContractDraft $draft,
         string $sectionKey,
         string $newContent,
     ): DealContractDraft {
-        if (! $draft->isEditable()) {
+        // Block edits on truly final drafts only. sent_to_customer is
+        // editable because the operator might want to fix a clause and
+        // re-send a corrected version.
+        if ($draft->isSigned() || $draft->status === DealContractDraft::STATUS_SUPERSEDED) {
             throw ValidationException::withMessages([
-                'status' => ['Only drafts in "draft" status can be edited.'],
+                'status' => ['Cannot edit a draft that is '.$draft->status.'.'],
             ]);
         }
 
@@ -231,6 +272,12 @@ class ContractDraftService
         }
 
         $draft->update(['sections' => $sections]);
+
+        // Invalidate the cached PDF so the next markSent re-renders from
+        // the updated content. Without this, the operator hand-edits a
+        // section, clicks Re-send, and the customer receives the stale
+        // PDF that was cached on the original send.
+        app(ContractPdfService::class)->clearCache($draft);
 
         return $draft->fresh();
     }
@@ -606,6 +653,13 @@ OUTPUT RULES (absolute):
 3. Formal, precise contract English. Use "shall" for binding obligations, "will"
    for expected behaviour, "may" for permissions. Attribute every obligation to
    a named party — no passive-voice ambiguity about who is responsible.
+3a. PARTY NAMING (important): use the concrete party names provided in DEAL
+   CONTEXT throughout the section body — refer to the agency by its actual
+   provider name and to the customer by its actual customer name. Do NOT use
+   the abstract role labels "Provider" or "User" as bare nouns in body text.
+   The ONLY exceptions are: (i) the "Provider:" and "User:" header labels
+   inside bulleted_pair sections (these are layout markers, not body prose);
+   (ii) verbatim quotes from the customer's own text.
 4. Do NOT include the section title in your output — the renderer prepends it.
 5. Never expose internal field names (snake_case keys), placeholder syntax, or
    system identifiers in human-readable text. The customer reads this directly.
@@ -844,10 +898,12 @@ TXT;
     {
         $slots = $this->resolveSlots($deal, $wizardInputs);
 
-        // Custom slot: trial period clause.
+        // Custom slot: trial period clause. Uses the customer's name for
+        // readability (matches the rest of the contract body).
         $trialMonths = (int) ($wizardInputs['trial_months'] ?? 0);
+        $customerName = $slots['customer_name'] ?? 'User';
         $slots['trial_period_clause'] = $trialMonths > 0
-            ? "User can use {$trialMonths} month(s) as a free trial of the service starting from the Commencement Date."
+            ? "{$customerName} can use {$trialMonths} month(s) as a free trial of the service starting from the Commencement Date."
             : 'No trial period applies.';
 
         return preg_replace_callback(
@@ -869,9 +925,18 @@ TXT;
     {
         $currency = $deal->final_currency ?? 'USD';
         $fmtMoney = function ($value) use ($currency) {
-            if ($value === null) return null;
+            if ($value === null) {
+                return null;
+            }
             return $currency.' '.number_format((float) $value, 2);
         };
+
+        // Resolve party names per draft. provider_name is the tenant
+        // (config fallback when tenant has no name); customer_name is the
+        // deal's client. These slot into the template's fixed_text so the
+        // contract body refers to parties by their actual names.
+        $providerName = $deal->tenant?->name
+            ?: config('contract.provider_fallback.name', 'Provider');
 
         return array_merge([
             'final_monthly_fee' => $fmtMoney($deal->final_monthly_fee),
@@ -880,6 +945,7 @@ TXT;
             'final_ot_policy' => $deal->final_ot_policy,
             'final_support_hours_per_month' => $deal->final_support_hours_per_month ?? self::DEFAULT_SUPPORT_HOURS,
             'final_team_summary' => $deal->final_team_summary,
+            'provider_name' => $providerName,
             'customer_name' => $deal->client,
             'project_name' => $deal->name,
             'payment_terms_days' => 7,

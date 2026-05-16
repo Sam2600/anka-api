@@ -113,8 +113,22 @@
             border-top: 0.7pt solid #555;
             margin-top: 30pt;
             padding-top: 3pt;
-            font-size: 9pt;
-            color: #555;
+            font-size: 10pt;
+            color: #222;
+            font-weight: 600;
+        }
+        .signatures .signer-field {
+            margin-top: 6pt;
+            font-size: 9.5pt;
+            color: #333;
+        }
+        .signatures .signer-label {
+            display: inline-block;
+            min-width: 56pt;
+            color: #666;
+        }
+        .signatures .signer-value {
+            color: #1a1a1a;
         }
 
         .footer {
@@ -188,17 +202,31 @@
         <tr>
             <td>
                 <div class="label">Provider</div>
-                <div class="line">{{ $provider['name'] ?? 'Brycen Myanmar Ltd.' }}</div>
-                <div style="margin-top: 12pt; font-size: 9pt; color: #555;">
-                    Signature · Name · Date
+                <div class="line">{{ $provider['name'] ?? 'Provider' }}</div>
+                <div class="signer-field"><span class="signer-label">Signed by:</span>
+                    <span class="signer-value">{{ $provider['signatory_name'] ?? '____________________' }}</span>
                 </div>
+                <div class="signer-field"><span class="signer-label">Title:</span>
+                    <span class="signer-value">{{ $provider['signatory_title'] ?? '____________________' }}</span>
+                </div>
+                <div class="signer-field"><span class="signer-label">Date:</span>
+                    <span class="signer-value">{{ $providerSignDate }}</span>
+                </div>
+                <div style="margin-top: 8pt; font-size: 9pt; color: #888;">Signature</div>
             </td>
             <td>
                 <div class="label">User</div>
                 <div class="line">{{ $deal->client ?: '—' }}</div>
-                <div style="margin-top: 12pt; font-size: 9pt; color: #555;">
-                    Signature · Name · Title · Date
+                <div class="signer-field"><span class="signer-label">Signed by:</span>
+                    <span class="signer-value">{{ $customerSignerName ?? '____________________' }}</span>
                 </div>
+                <div class="signer-field"><span class="signer-label">Title:</span>
+                    <span class="signer-value">{{ $customerSignerTitle ?? '____________________' }}</span>
+                </div>
+                <div class="signer-field"><span class="signer-label">Date:</span>
+                    <span class="signer-value">____________________</span>
+                </div>
+                <div style="margin-top: 8pt; font-size: 9pt; color: #888;">Signature</div>
             </td>
         </tr>
     </table>

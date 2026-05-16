@@ -16,6 +16,8 @@ class Tenant extends Model
         'slug',
         'plan',
         'logo_path',
+        'signatory_name',
+        'signatory_title',
         'currency',
         'tax_rate',
         'avg_delivery_lag_months',

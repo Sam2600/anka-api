@@ -49,6 +49,10 @@ class DealContractDraft extends Model
         'signed_pdf_path',
         'generated_by_user_id',
         'finalized_by_user_id',
+        'signatory_name_override',
+        'signatory_title_override',
+        'customer_signatory_name',
+        'customer_signatory_title',
     ];
 
     protected $casts = [
