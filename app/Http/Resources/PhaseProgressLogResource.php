@@ -17,6 +17,12 @@ class PhaseProgressLogResource extends JsonResource
             'log_date'            => optional($this->log_date)->toDateString(),
             'progress_hours'      => $this->progress_hours,
             'used_hours'          => $this->used_hours,
+            // Daily effort overage: when used_hours > progress_hours the
+            // employee spent more clock-time than they earned in delivery.
+            // Finance multiplies this by cost_per_hour to estimate overtime
+            // cost. Clamped to ≥0 so days where they made up time aren't
+            // double-counted as negative late_hours.
+            'late_hours'          => round(max(0.0, (float) $this->used_hours - (float) $this->progress_hours), 2),
             'note'                => $this->note,
             'locked_at'           => optional($this->locked_at)->toIso8601String(),
             'is_locked'           => $this->locked_at !== null,
