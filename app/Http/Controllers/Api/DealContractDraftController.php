@@ -106,12 +106,12 @@ class DealContractDraftController extends Controller
             'message' => ['sometimes', 'nullable', 'string', 'max:2000'],
         ]);
 
-        $draft = $this->service->markSent($contractDraft, $validated['to_email']);
-
-        // ContractEmailService email-send is queued in a follow-up — Phase C
-        // ships the status flip; the actual SMTP path is wired in chg-012.
-        // The frontend can disable [Send] when ContractEmailService is not
-        // configured (check via /tenant settings).
+        $draft = $this->service->markSent(
+            $contractDraft,
+            $validated['to_email'],
+            $request->user(),
+            $validated['message'] ?? null,
+        );
 
         return new DealContractDraftResource($draft->load(['deal', 'template']));
     }
