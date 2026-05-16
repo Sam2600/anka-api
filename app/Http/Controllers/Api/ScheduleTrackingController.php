@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Resources\PhaseProgressLogResource;
+use App\Models\PhaseProgressLog;
 use App\Models\Project;
 use App\Models\ProjectTaskPhaseAssignment;
 use App\Services\Scheduling\CalendarFactory;
@@ -182,6 +183,109 @@ class ScheduleTrackingController extends Controller
             'meta' => [
                 'project_id' => $project->id,
                 'as_of'      => $asOf->toDateString(),
+            ],
+        ];
+    }
+
+    /**
+     * Per-day per-developer late-hours breakdown for a project.
+     *
+     * Late hours = max(0, used_hours - progress_hours) on each daily
+     * phase_progress_logs row. Surfaced for Finance to compute overtime
+     * cost (sum × cost_per_hour) without re-summing time_entries.
+     *
+     * Returns:
+     *   data:        [{log_date, employee_id, ..., late_hours, late_cost}, ...]  per-day rows
+     *   by_employee: [{employee_id, ..., total_late_hours, total_late_cost}, ...] aggregates
+     *   meta:        {project_id, total_late_hours, total_late_cost}
+     */
+    public function lateHoursByDay(Request $request, Project $project)
+    {
+        $asOf = $request->filled('as_of') ? Carbon::parse($request->input('as_of')) : null;
+
+        $logs = PhaseProgressLog::with(['employee.rank', 'employee.capacityRole'])
+            ->whereHas('phaseAssignment.taskAssignment', fn ($q) => $q->where('project_id', $project->id))
+            ->when($asOf, fn ($q) => $q->whereDate('log_date', '<=', $asOf->toDateString()))
+            ->orderByDesc('log_date')
+            ->get();
+
+        $perDay = [];
+        $aggregateByEmployee = [];
+        $totalLateHours = 0.0;
+        $totalLateCost = 0.0;
+
+        foreach ($logs as $log) {
+            $progress = (float) $log->progress_hours;
+            $used     = (float) $log->used_hours;
+            $late     = max(0.0, $used - $progress);
+
+            $emp = $log->employee;
+            $costPerHour = $emp ? (float) ($emp->cost_per_hour ?? 0) : 0.0;
+            $lateCost = round($late * $costPerHour, 2);
+
+            $rankCode    = optional(optional($emp)->rank)->code;
+            $capacityRole = optional(optional($emp)->capacityRole)->code ?? optional($emp)->capacity_role;
+            $empName     = optional($emp)->name;
+
+            $perDay[] = [
+                'log_date'       => optional($log->log_date)->toDateString(),
+                'employee_id'    => $log->employee_id,
+                'employee_name'  => $empName,
+                'rank_code'      => $rankCode,
+                'capacity_role'  => $capacityRole,
+                'progress_hours' => round($progress, 2),
+                'used_hours'     => round($used, 2),
+                'late_hours'     => round($late, 2),
+                'cost_per_hour'  => round($costPerHour, 2),
+                'late_cost'      => $lateCost,
+            ];
+
+            $totalLateHours += $late;
+            $totalLateCost  += $lateCost;
+
+            $bucket = $log->employee_id;
+            if (! isset($aggregateByEmployee[$bucket])) {
+                $aggregateByEmployee[$bucket] = [
+                    'employee_id'         => $log->employee_id,
+                    'employee_name'       => $empName,
+                    'rank_code'           => $rankCode,
+                    'capacity_role'       => $capacityRole,
+                    'cost_per_hour'       => round($costPerHour, 2),
+                    'total_progress_hours' => 0.0,
+                    'total_used_hours'    => 0.0,
+                    'total_late_hours'    => 0.0,
+                    'total_late_cost'     => 0.0,
+                    'days_count'          => 0,
+                ];
+            }
+            $aggregateByEmployee[$bucket]['total_progress_hours'] += $progress;
+            $aggregateByEmployee[$bucket]['total_used_hours']     += $used;
+            $aggregateByEmployee[$bucket]['total_late_hours']     += $late;
+            $aggregateByEmployee[$bucket]['total_late_cost']      += $lateCost;
+            $aggregateByEmployee[$bucket]['days_count']           += 1;
+        }
+
+        // Round aggregates and sort by total_late_hours DESC.
+        $byEmployee = array_map(function ($row) {
+            $row['total_progress_hours'] = round($row['total_progress_hours'], 2);
+            $row['total_used_hours']     = round($row['total_used_hours'], 2);
+            $row['total_late_hours']     = round($row['total_late_hours'], 2);
+            $row['total_late_cost']      = round($row['total_late_cost'], 2);
+
+            return $row;
+        }, array_values($aggregateByEmployee));
+        usort($byEmployee, fn ($a, $b) => $b['total_late_hours'] <=> $a['total_late_hours']);
+
+        return [
+            'data'        => $perDay,
+            'by_employee' => $byEmployee,
+            'meta'        => [
+                'project_id'        => $project->id,
+                'project_name'      => $project->name,
+                'as_of'             => $asOf?->toDateString(),
+                'total_late_hours'  => round($totalLateHours, 2),
+                'total_late_cost'   => round($totalLateCost, 2),
+                'log_count'         => count($perDay),
             ],
         ];
     }

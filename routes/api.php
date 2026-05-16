@@ -246,4 +246,7 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::get('/projects/{project}/schedule-tracking',             [ScheduleTrackingController::class, 'index']);
     Route::get('/projects/{project}/schedule-tracking/summary',     [ScheduleTrackingController::class, 'summary']);
     Route::get('/projects/{project}/schedule-tracking/by-assignee', [ScheduleTrackingController::class, 'byAssignee']);
+    // Per-day per-developer late-hours breakdown. Drives the Finance page's
+    // overtime calc and the "Late Hours by Developer" table.
+    Route::get('/projects/{project}/late-hours-by-day',             [ScheduleTrackingController::class, 'lateHoursByDay']);
 });

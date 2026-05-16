@@ -40,6 +40,7 @@ class VarianceCalculator
      *     expected_progress_hours: float,
      *     variance_hours: float,
      *     over_delivered_hours: float,
+     *     late_hours: float,
      *     schedule_state: string,
      *     health: string,
      *     is_completed: bool,
@@ -53,6 +54,13 @@ class VarianceCalculator
 
         $cumulativeProgress = (float) $logs->sum('progress_hours');
         $cumulativeUsed     = (float) $logs->sum('used_hours');
+        // Per-log effort overage summed across days. Used by Finance to
+        // estimate overtime cost (sum × cost_per_hour). Differs from
+        // `over_delivered_hours` (which compares delivery vs estimate)
+        // and from `variance_hours` (which compares delivery vs plan-to-date).
+        $lateHoursPerLogSum = (float) $logs->sum(function ($log) {
+            return max(0.0, (float) $log->used_hours - (float) $log->progress_hours);
+        });
         $estimated          = (float) $phase->estimated_hours;
         $isCompleted        = $phase->actual_end !== null;
         $expectedProgress   = $this->expectedProgressForPhase($phase, $estimated);
@@ -92,6 +100,7 @@ class VarianceCalculator
             'expected_progress_hours'   => round($expectedProgress, 2),
             'variance_hours'            => round($varianceHours, 2),
             'over_delivered_hours'      => round($overDelivered, 2),
+            'late_hours'                => round($lateHoursPerLogSum, 2),
             'schedule_state'            => $state,
             'health'                    => $this->classifyHealth($varianceHours, $estimated, $state),
             'is_completed'              => $isCompleted,
@@ -115,6 +124,7 @@ class VarianceCalculator
         $totalExpected    = 0.0;
         $totalVariance    = 0.0;
         $totalOver        = 0.0;
+        $totalLate        = 0.0;
         $completed        = 0;
         $count            = count($perPhase);
 
@@ -124,6 +134,7 @@ class VarianceCalculator
             $totalExpected += $row['expected_progress_hours'];
             $totalVariance += $row['variance_hours'];
             $totalOver     += $row['over_delivered_hours'];
+            $totalLate     += $row['late_hours'] ?? 0.0;
             if (! empty($row['is_completed'])) {
                 $completed++;
             }
@@ -136,6 +147,7 @@ class VarianceCalculator
             'expected_progress_hours' => round($totalExpected, 2),
             'variance_hours'        => round($totalVariance, 2),
             'over_delivered_hours'  => round($totalOver, 2),
+            'late_hours'            => round($totalLate, 2),
             'phase_count'           => $count,
             'completed_count'       => $completed,
             'health'                => $this->classifyHealth($totalVariance, $totalEstimated, $completed === $count && $count > 0 ? 'completed_on_time' : 'on_track'),
