@@ -22,6 +22,7 @@ class EstimationVersion extends Model
         'overheads',
         'target_margin',
         'notes',
+        'context_notes',
         'created_by',
         'created_at',
         'xlsx_path',

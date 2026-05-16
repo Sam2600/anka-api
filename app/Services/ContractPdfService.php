@@ -43,11 +43,16 @@ class ContractPdfService
             $deal = Deal::findOrFail($draft->deal_id);
         }
 
+        // Provider details: prefer per-tenant data, fall back to global
+        // config when the tenant hasn't uploaded a logo / set fields yet.
+        $tenant = $deal->tenant()->first();
+        $provider = $this->resolveProvider($tenant);
+
         $pdf = Pdf::loadView('pdf.contract-draft', [
             'draft' => $draft,
             'deal' => $deal,
-            'provider' => config('contract.provider'),
-            'logoDataUri' => $this->logoDataUri(),
+            'provider' => $provider,
+            'logoDataUri' => $this->logoDataUri($tenant),
             'sections' => $this->sectionsForRender($draft),
             'generatedAt' => now()->toDayDateTimeString(),
         ])->setPaper('a4');
@@ -56,6 +61,24 @@ class ContractPdfService
         Storage::disk('local')->put($relativePath, $pdf->output());
 
         return $absolutePath;
+    }
+
+    /**
+     * Merge per-tenant provider info with the config-level fallback. Tenant
+     * fields win when set; config fills the gaps. Returns the same shape
+     * the Blade view expects (name/address/phone/email).
+     *
+     * @return array{name:string,address:string,phone:string,email:string}
+     */
+    private function resolveProvider(?\App\Models\Tenant $tenant): array
+    {
+        $fallback = config('contract.provider_fallback', []);
+        return [
+            'name'    => $tenant?->name ?: ($fallback['name'] ?? 'Provider'),
+            'address' => $fallback['address'] ?? '',
+            'phone'   => $fallback['phone'] ?? '',
+            'email'   => $fallback['email'] ?? '',
+        ];
     }
 
     /**
@@ -79,12 +102,16 @@ class ContractPdfService
 
     /**
      * Inline the logo as a base64 data URI. Dompdf's `chroot` doesn't help
-     * with files under storage/, so we embed directly. Falls back to null
-     * when the file is missing — Blade view conditionally renders the img.
+     * with files under storage/, so we embed directly. Prefers the tenant's
+     * uploaded logo; falls back to the global config logo if the tenant
+     * has none. Returns null only when neither resolves to a real file —
+     * the Blade view then renders a [logo] placeholder.
      */
-    private function logoDataUri(): ?string
+    private function logoDataUri(?\App\Models\Tenant $tenant): ?string
     {
-        $path = config('contract.provider.logo_path');
+        $path = $tenant?->logoAbsolutePath()
+            ?? config('contract.provider_fallback.logo_path');
+
         if (! $path || ! is_string($path) || ! is_file($path)) {
             return null;
         }
@@ -98,6 +125,7 @@ class ContractPdfService
             'jpg', 'jpeg' => 'image/jpeg',
             'png' => 'image/png',
             'gif' => 'image/gif',
+            'webp' => 'image/webp',
             default => 'image/png',
         };
 

@@ -160,6 +160,17 @@ class Deal extends Model
         return $this->hasOne(Contract::class);
     }
 
+    /**
+     * The tenant that owns this deal. Used by the contract drafting flow
+     * to resolve per-tenant branding (provider name + logo) even from
+     * the queue worker, where the tenant scope isn't bound by middleware.
+     * The FK is set by the BelongsToTenant trait on create.
+     */
+    public function tenant()
+    {
+        return $this->belongsTo(Tenant::class);
+    }
+
     public function ghost_roles()
     {
         return $this->hasMany(DealGhostRole::class);
@@ -249,6 +260,40 @@ class Deal extends Model
             self::REQUIRED_ESTIMATION_FIELDS,
             fn (string $field) => blank($this->{$field})
         ));
+    }
+
+    /**
+     * Whether the deal has any estimation rows or overhead lines persisted.
+     * The Estimation menu writes both via DealController::update (auto-save +
+     * AI Generate) and EstimationVersionController::store (Save Version);
+     * either path counts as "user has started estimating."
+     */
+    public function hasStartedEstimation(): bool
+    {
+        return $this->estimation_resources()->exists()
+            || $this->deal_overheads()->exists();
+    }
+
+    /**
+     * C → B auto-advance when the user starts estimating. Mirrors the inline
+     * B → A trigger in DealController::update — the lead's rank flips up the
+     * moment a row lands on estimation_resources or deal_overheads, with the
+     * win_probability bumped to the B-rank value. Forward-only and no-op for
+     * dropped deals, deals already past C, or deals with no estimation rows.
+     */
+    public function maybePromoteToQualified(): void
+    {
+        if (
+            $this->status === 'lead'
+            && ! $this->isDropped()
+            && $this->canTransitionTo('qualified')
+            && $this->hasStartedEstimation()
+        ) {
+            $this->update([
+                'status' => 'qualified',
+                'win_probability' => self::RANK_PROBABILITY['B'],
+            ]);
+        }
     }
 
     /**

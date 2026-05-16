@@ -4,27 +4,27 @@ return [
 
     /*
     |---------------------------------------------------------------------------
-    | Contract Provider (Issuer)
+    | Contract Provider — fallback (used only when the tenant has no data)
     |---------------------------------------------------------------------------
     |
-    | Hard-coded issuer block that appears at the top of every generated
-    | contract PDF and in the Parties block. Pulled from config (not from
-    | tenant data) for v1 because Brycen Myanmar is the only issuer today.
+    | Per-tenant branding lives on the tenants table (tenants.name +
+    | tenants.logo_path). The contract PDF + customer email pull from there
+    | first. These values only kick in when the tenant has no name or no
+    | logo set — for example during local dev with the seeded demo tenant.
     |
-    | When we go multi-tenant: replace these reads with $tenant->* fields and
-    | seed the equivalent columns on the tenants table. The Blade view + PDF
-    | service touch this config in exactly one place each.
+    | The env overrides (CONTRACT_PROVIDER_*) keep environments where you
+    | want a single global identity working without touching the database.
     |
     */
 
-    'provider' => [
+    'provider_fallback' => [
         'name'    => env('CONTRACT_PROVIDER_NAME', 'Brycen Myanmar Ltd.'),
         'address' => env('CONTRACT_PROVIDER_ADDRESS', ''),
         'phone'   => env('CONTRACT_PROVIDER_PHONE', ''),
         'email'   => env('CONTRACT_PROVIDER_EMAIL', ''),
-        // Absolute filesystem path resolved at runtime. Drop the file at
-        // anka-api/storage/app/public/contract-assets/brycen-logo.png.
-        // PNG or JPG, ~200–400 px wide. SVG won't render in Dompdf.
+        // Absolute filesystem path. Defaults to the legacy seed location
+        // (storage/app/public/contract-assets/brycen-logo.png). Only used
+        // when the tenant has no logo_path of its own.
         'logo_path' => env(
             'CONTRACT_PROVIDER_LOGO_PATH',
             storage_path('app/public/contract-assets/brycen-logo.png'),
