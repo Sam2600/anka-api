@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Mail\ContractDraftEmail;
 use App\Models\ContractTemplate;
 use App\Models\Deal;
 use App\Models\DealContractDraft;
@@ -12,6 +13,7 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Throwable;
@@ -202,24 +204,91 @@ class ContractDraftService
     }
 
     /**
-     * Flip status to sent_to_customer. The actual email send is delegated
-     * to ContractEmailService — this method only mutates the draft.
+     * Render the draft as a PDF, queue the customer email, and flip status
+     * to sent_to_customer. Re-sends are supported — the same PDF is reused
+     * (cached by draft_id + version) and the recipient + timestamp are
+     * overwritten on each call.
+     *
+     * Rejects:
+     *   - signed / superseded drafts (can't re-send a finalised draft)
+     *   - drafts that still contain {{TODO markers in any rendered section
+     *     (the wizard warns the user but doesn't block; this is the
+     *     server-side guard so we never send an unfinished contract)
      */
-    public function markSent(DealContractDraft $draft, string $email): DealContractDraft
-    {
+    public function markSent(
+        DealContractDraft $draft,
+        string $email,
+        ?User $sender = null,
+        ?string $message = null,
+    ): DealContractDraft {
         if ($draft->isSigned() || $draft->status === DealContractDraft::STATUS_SUPERSEDED) {
             throw ValidationException::withMessages([
                 'status' => ['Cannot send a draft that is '.$draft->status.'.'],
             ]);
         }
 
+        // TODO-block guard — refuse to email a contract with unresolved
+        // `{{TODO}}` placeholders. Reports which section keys still have
+        // unresolved markers so the salesperson knows where to look.
+        $todoSections = $this->findSectionsWithTodos($draft);
+        if (! empty($todoSections)) {
+            throw ValidationException::withMessages([
+                'sections' => [
+                    'Resolve the {{TODO}} markers before sending. Unresolved sections: '
+                    .implode(', ', $todoSections).'.',
+                ],
+            ]);
+        }
+
+        // Load the deal once; the PDF service and Mailable both need it.
+        $deal = $draft->deal()->first() ?? Deal::findOrFail($draft->deal_id);
+
+        // Render (or reuse cached) PDF.
+        $pdfService = app(ContractPdfService::class);
+        $pdfPath = $pdfService->renderDraft($draft);
+        $pdfFilename = $pdfService->suggestedFilename($draft, $deal);
+
+        // Queue the email. ShouldQueue makes this return immediately; the
+        // worker handles SMTP. If the queue fails the worker will log it
+        // — we don't want to block status flip on transient SMTP problems.
+        Mail::to($email)->queue(new ContractDraftEmail(
+            deal: $deal,
+            draft: $draft,
+            pdfPath: $pdfPath,
+            pdfFilename: $pdfFilename,
+            sender: $sender,
+            message: $message,
+        ));
+
+        // Persist the PDF path on the draft so the frontend can link to it.
+        // Storage::disk('local') prefixes storage/app/ — store the relative
+        // path so the disk reference is portable across environments.
         $draft->update([
             'status' => DealContractDraft::STATUS_SENT,
             'sent_at' => now(),
             'sent_to_email' => $email,
+            'generated_pdf_path' => $pdfService->relativePathFor($draft),
         ]);
 
         return $draft->fresh();
+    }
+
+    /**
+     * Returns the keys of sections whose rendered text still contains a
+     * {{TODO marker. Used by markSent's guard.
+     *
+     * @return array<int, string>
+     */
+    private function findSectionsWithTodos(DealContractDraft $draft): array
+    {
+        $hits = [];
+        foreach ($draft->sections ?? [] as $section) {
+            $rendered = $section['rendered'] ?? '';
+            if (str_contains($rendered, '{{TODO')) {
+                $hits[] = $section['key'] ?? 'unknown';
+            }
+        }
+        return $hits;
     }
 
     /**
