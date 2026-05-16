@@ -58,12 +58,10 @@ class ContractPdfService
             'providerSignDate' => now()->toFormattedDateString(),
             // Customer signer block — pulled from the draft's per-contract
             // capture. Null/empty values surface as '____' on the PDF so
-            // the customer can hand-fill.
+            // the customer can hand-fill. Date is always blank — we don't
+            // know when the customer will sign; they write it on signing.
             'customerSignerName' => $draft->customer_signatory_name,
             'customerSignerTitle' => $draft->customer_signatory_title,
-            'customerSignedDate' => $draft->customer_signed_date
-                ? $draft->customer_signed_date->toFormattedDateString()
-                : null,
         ])->setPaper('a4');
 
         // Ensure parent dir exists; Storage::put creates it implicitly.

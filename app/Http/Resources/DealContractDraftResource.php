@@ -38,10 +38,11 @@ class DealContractDraftResource extends JsonResource
             'signatory_title_override' => $this->signatory_title_override,
             // Customer-side signer captured at draft time. Distinct from
             // deal.contact_* (day-to-day liaison). Null/empty → PDF prints
-            // blank '____' lines for the customer to hand-fill.
+            // blank '____' lines for the customer to hand-fill. No date —
+            // we never pre-fill the customer's signing date since we don't
+            // know when they'll sign.
             'customer_signatory_name' => $this->customer_signatory_name,
             'customer_signatory_title' => $this->customer_signatory_title,
-            'customer_signed_date' => $this->customer_signed_date?->toDateString(),
             // Lightweight deal summary when eager-loaded — lets the wizard
             // avoid a separate fetch for breadcrumb / context display.
             'deal' => $this->whenLoaded('deal', fn () => $this->deal ? [

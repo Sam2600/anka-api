@@ -55,7 +55,6 @@ class DealContractDraftController extends Controller
             // All three optional — blank values render '____' on the PDF.
             'customer_signatory_name' => ['sometimes', 'nullable', 'string', 'max:255'],
             'customer_signatory_title' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'customer_signed_date' => ['sometimes', 'nullable', 'date'],
         ]);
 
         $template = ContractTemplate::findOrFail($validated['template_id']);
@@ -69,7 +68,6 @@ class DealContractDraftController extends Controller
             $validated['signatory_title_override'] ?? null,
             $validated['customer_signatory_name'] ?? null,
             $validated['customer_signatory_title'] ?? null,
-            $validated['customer_signed_date'] ?? null,
         );
 
         return new DealContractDraftResource($draft->load(['deal', 'template']));
