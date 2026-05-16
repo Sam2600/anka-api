@@ -43,6 +43,11 @@ class DealContractDraftController extends Controller
         $validated = $request->validate([
             'template_id' => ['required', 'string', 'exists:contract_templates,id'],
             'wizard_inputs' => ['sometimes', 'array'],
+            // Per-draft override of the Provider signatory on the PDF.
+            // Null/missing → fall back to tenant.signatory_*. Empty string
+            // is treated as "explicitly leave blank for this draft".
+            'signatory_name_override' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'signatory_title_override' => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);
 
         $template = ContractTemplate::findOrFail($validated['template_id']);
@@ -52,6 +57,8 @@ class DealContractDraftController extends Controller
             $template,
             $validated['wizard_inputs'] ?? [],
             $request->user(),
+            $validated['signatory_name_override'] ?? null,
+            $validated['signatory_title_override'] ?? null,
         );
 
         return new DealContractDraftResource($draft->load(['deal', 'template']));

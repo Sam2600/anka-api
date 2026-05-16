@@ -54,6 +54,8 @@ class ContractDraftService
         ContractTemplate $template,
         array $wizardInputs,
         ?User $generatedBy = null,
+        ?string $signatoryNameOverride = null,
+        ?string $signatoryTitleOverride = null,
     ): DealContractDraft {
         $this->assertEligible($deal);
         $this->assertTemplateUsable($template);
@@ -61,7 +63,16 @@ class ContractDraftService
         $aiOutputs = $this->callClaude($deal, $template, $wizardInputs);
         $merged = $this->mergeSections($template, $aiOutputs, $deal, $wizardInputs);
 
-        return DB::transaction(function () use ($deal, $template, $aiOutputs, $merged, $wizardInputs, $generatedBy) {
+        return DB::transaction(function () use (
+            $deal,
+            $template,
+            $aiOutputs,
+            $merged,
+            $wizardInputs,
+            $generatedBy,
+            $signatoryNameOverride,
+            $signatoryTitleOverride,
+        ) {
             // Newer drafts supersede older ones — preserve history for audit.
             DealContractDraft::where('deal_id', $deal->id)
                 ->where('status', DealContractDraft::STATUS_DRAFT)
@@ -80,6 +91,10 @@ class ContractDraftService
                 'ai_outputs' => $aiOutputs,
                 'sections' => $merged,
                 'generated_by_user_id' => $generatedBy?->id,
+                // Per-draft Provider signatory override. Null/empty here →
+                // PDF falls back to tenant.signatory_* at render time.
+                'signatory_name_override' => $signatoryNameOverride,
+                'signatory_title_override' => $signatoryTitleOverride,
             ]);
 
             // No rank flip here — the deal must already be at A (negotiation)
