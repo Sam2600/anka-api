@@ -207,12 +207,11 @@ class MailTestSeeder extends Seeder
                 'type' => 'ai_written',
                 'output_format' => 'paragraph',
                 'rendered' =>
-                    'Brycen Myanmar Ltd. ("Provider") shall provide centralized cloud backup '
-                    .'services to Test Customer Co., Ltd. ("User"), comprising secure off-site '
-                    .'storage of the User\'s server data with protection against unauthorized '
-                    .'modification and deletion. The service includes initial setup, ongoing '
-                    .'monitoring, and quarterly restore validation as detailed in the sections '
-                    .'that follow.',
+                    'Provider shall provide centralized cloud backup services to Test Customer '
+                    .'Co., Ltd. ("User"), comprising secure off-site storage of the User\'s '
+                    .'server data with protection against unauthorized modification and deletion. '
+                    .'The service includes initial setup, ongoing monitoring, and quarterly '
+                    .'restore validation as detailed in the sections that follow.',
                 'has_todo' => false,
                 'user_edited' => false,
             ],

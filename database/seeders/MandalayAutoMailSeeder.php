@@ -198,12 +198,12 @@ class MandalayAutoMailSeeder extends Seeder
                 'type' => 'ai_written',
                 'output_format' => 'paragraph',
                 'rendered' =>
-                    'Brycen Myanmar Ltd. ("Provider") shall deliver an off-site backup service '
-                    .'to Mandalay Auto Parts Distribution Co., Ltd. ("User") covering the User\'s '
-                    .'ERP, inventory, and finance systems hosted on three Windows Server 2019 '
-                    .'nodes. The service comprises centralized configuration of backup jobs to '
-                    .'Microsoft Azure (Southeast Asia region), automated nightly transfers, and '
-                    .'safeguards against unauthorized modification or deletion of the off-site copies.',
+                    'Provider shall deliver an off-site backup service to Mandalay Auto Parts '
+                    .'Distribution Co., Ltd. ("User") covering the User\'s ERP, inventory, and '
+                    .'finance systems hosted on three Windows Server 2019 nodes. The service '
+                    .'comprises centralized configuration of backup jobs to Microsoft Azure '
+                    .'(Southeast Asia region), automated nightly transfers, and safeguards '
+                    .'against unauthorized modification or deletion of the off-site copies.',
                 'has_todo' => false,
                 'user_edited' => false,
             ],
