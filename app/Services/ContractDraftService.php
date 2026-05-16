@@ -109,9 +109,12 @@ class ContractDraftService
         string $sectionKey,
         array $newWizardInputs,
     ): DealContractDraft {
-        if (! $draft->isEditable()) {
+        // Same policy as updateSectionContent: sent_to_customer drafts can
+        // still regenerate sections in preparation for a re-send. Only
+        // truly final states are immutable.
+        if ($draft->isSigned() || $draft->status === DealContractDraft::STATUS_SUPERSEDED) {
             throw ValidationException::withMessages([
-                'status' => ['Only drafts in "draft" status can be regenerated. Current: '.$draft->status],
+                'status' => ['Cannot regenerate sections of a draft that is '.$draft->status.'.'],
             ]);
         }
 
@@ -194,21 +197,34 @@ class ContractDraftService
             'sections' => $sections,
         ]);
 
+        // Invalidate the cached PDF so the next markSent re-renders with
+        // the regenerated section content. See updateSectionContent for
+        // the same rationale.
+        app(ContractPdfService::class)->clearCache($draft);
+
         return $draft->fresh();
     }
 
     /**
      * Apply user edits to a single section's rendered content. The wizard
      * step 2 calls this when the operator hand-edits AI output.
+     *
+     * Allowed on sent_to_customer drafts too — the operator may want to
+     * tweak a clause and re-send. Only signed / superseded drafts are
+     * immutable. The PDF cache is invalidated so the next markSent
+     * re-renders from the updated content.
      */
     public function updateSectionContent(
         DealContractDraft $draft,
         string $sectionKey,
         string $newContent,
     ): DealContractDraft {
-        if (! $draft->isEditable()) {
+        // Block edits on truly final drafts only. sent_to_customer is
+        // editable because the operator might want to fix a clause and
+        // re-send a corrected version.
+        if ($draft->isSigned() || $draft->status === DealContractDraft::STATUS_SUPERSEDED) {
             throw ValidationException::withMessages([
-                'status' => ['Only drafts in "draft" status can be edited.'],
+                'status' => ['Cannot edit a draft that is '.$draft->status.'.'],
             ]);
         }
 
@@ -231,6 +247,12 @@ class ContractDraftService
         }
 
         $draft->update(['sections' => $sections]);
+
+        // Invalidate the cached PDF so the next markSent re-renders from
+        // the updated content. Without this, the operator hand-edits a
+        // section, clicks Re-send, and the customer receives the stale
+        // PDF that was cached on the original send.
+        app(ContractPdfService::class)->clearCache($draft);
 
         return $draft->fresh();
     }

@@ -91,6 +91,20 @@ class ContractPdfService
     }
 
     /**
+     * Delete the cached PDF for this draft+version (if any). Called from
+     * ContractDraftService whenever the rendered sections change, so the
+     * next markSent re-renders from the updated content instead of
+     * re-sending the stale cached PDF.
+     */
+    public function clearCache(DealContractDraft $draft): void
+    {
+        $path = $this->relativePathFor($draft);
+        if (Storage::disk('local')->exists($path)) {
+            Storage::disk('local')->delete($path);
+        }
+    }
+
+    /**
      * The customer-facing filename when attached to email. Embeds the deal
      * name (slugified) so the customer's inbox isn't full of "v1.pdf"s.
      */
