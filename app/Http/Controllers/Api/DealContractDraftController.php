@@ -8,6 +8,7 @@ use App\Models\ContractTemplate;
 use App\Models\Deal;
 use App\Models\DealContractDraft;
 use App\Services\ContractDraftService;
+use App\Services\ContractPdfService;
 use App\Services\SignedContractVerifier;
 use Illuminate\Http\Request;
 
@@ -67,6 +68,33 @@ class DealContractDraftController extends Controller
     public function show(DealContractDraft $contractDraft)
     {
         return new DealContractDraftResource($contractDraft->load(['deal', 'template']));
+    }
+
+    /**
+     * Stream the rendered PDF inline so the wizard can preview the actual
+     * customer-facing document (logo, layout, signature block) before
+     * sending. Reuses the per-draft+version cache — edits/regenerates
+     * already invalidate it via ContractPdfService::clearCache, so the
+     * preview always reflects the current sections.
+     */
+    public function previewPdf(DealContractDraft $contractDraft, ContractPdfService $pdfService)
+    {
+        $absolutePath = $pdfService->renderDraft($contractDraft);
+
+        if (! is_file($absolutePath)) {
+            return response()->json(['message' => 'Could not render the preview PDF.'], 500);
+        }
+
+        $slug = \Illuminate\Support\Str::slug($contractDraft->deal?->name ?? 'contract');
+        $filename = "{$slug}-v{$contractDraft->version}.pdf";
+
+        return response()->file($absolutePath, [
+            'Content-Type' => 'application/pdf',
+            // 'inline' = render in browser; the iframe in the wizard reads it
+            // straight from the blob URL the frontend builds after fetch.
+            'Content-Disposition' => 'inline; filename="'.$filename.'"',
+            'Cache-Control' => 'private, max-age=0, no-store',
+        ]);
     }
 
     public function updateSection(Request $request, DealContractDraft $contractDraft, string $sectionKey)

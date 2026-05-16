@@ -89,6 +89,10 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     // from the Yazaki-modelled template variants. Generates A→S via
     // ContractDraftService::markSigned (counter-signed PDF upload).
     Route::middleware('permission:view_crm')->group(function () {
+        // Stream the rendered contract PDF inline for the wizard's preview
+        // modal. Cached per draft+version on the local disk; cache invalidates
+        // automatically on section edit/regenerate.
+        Route::get('/contract-drafts/{contractDraft}/preview-pdf', [DealContractDraftController::class, 'previewPdf']);
         Route::get('/contract-templates', [ContractTemplateController::class, 'index'])
             ->name('contract-templates.index');
         Route::get('/contract-templates/{contractTemplate}', [ContractTemplateController::class, 'show'])
