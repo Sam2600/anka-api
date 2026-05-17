@@ -110,6 +110,12 @@ class DealController extends Controller
 
             $this->replaceDealChildren($deal, $request);
 
+            // Spec ⑥.B — sync hard_assignments from estimation rows
+            // (no-op if no estimation_resources with employee_id were
+            // posted on create, which is the common case for a fresh deal).
+            $deal->refresh();
+            $deal->syncHardAssignmentsFromEstimation();
+
             return $deal;
         });
 
@@ -254,6 +260,14 @@ class DealController extends Controller
                     'win_probability' => Deal::RANK_PROBABILITY['A'],
                 ]);
             }
+
+            // Spec ⑥.B — Estimation's per-feature resource rows become the
+            // structured team that win_deal() will copy into the post-win
+            // Project. Without this, the team only exists as a string in
+            // the contract; the Project page shows an empty team. Skipped
+            // once the deal is won (Project already built) or dropped.
+            $deal->refresh();
+            $deal->syncHardAssignmentsFromEstimation();
         });
 
         return new DealResource($deal->load(['ghost_roles', 'hard_assignments', 'estimation_resources', 'deal_overheads']));

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Mail\EstimateApprovedEmail;
 use App\Models\Deal;
 use App\Models\DealContractDocument;
 use App\Models\EstimationVersion;
@@ -12,6 +13,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -225,6 +227,88 @@ class EstimationVersionController extends Controller
             $version->xlsx_path,
             basename($version->xlsx_path),
         );
+    }
+
+    /**
+     * Spec ④.G — email the saved estimate XLSX to the customer. Lazy-
+     * generates the XLSX if it's missing (e.g. version was created
+     * before xlsx_path was a thing). Queues via Mailgun using
+     * EstimateApprovedEmail; mirrors the contract-draft send flow.
+     *
+     * Records the send on the version (`sent_at`, `sent_to_email`) so
+     * the UI can show "Sent on X to Y" and the user can re-send by
+     * calling again (overwrites the timestamp).
+     *
+     * Body shape: { to_email: string, message?: string }
+     */
+    public function sendXlsx(Request $request, string $id): JsonResponse
+    {
+        $request->validate([
+            'to_email' => 'required|email|max:255',
+            'message'  => 'sometimes|nullable|string|max:2000',
+        ]);
+
+        $version = EstimationVersion::findOrFail($id);
+        $deal = Deal::findOrFail($version->deal_id);
+
+        if (! $this->xlsxAvailable($version)) {
+            try {
+                app(EstimationXlsxService::class)->generateAndStore($version);
+                $version = $version->fresh();
+            } catch (Throwable $e) {
+                Log::error('EstimationVersion: lazy XLSX regeneration failed during send', [
+                    'version_id' => $version->id,
+                    'error' => $e->getMessage(),
+                ]);
+                abort(503, 'Could not generate the estimation XLSX. Please try again.');
+            }
+        }
+
+        $absolutePath = Storage::disk('local')->path($version->xlsx_path);
+        $filename = $this->buildAttachmentFilename($deal, $version);
+        $toEmail = (string) $request->input('to_email');
+        $message = $request->filled('message') ? (string) $request->input('message') : null;
+
+        try {
+            Mail::to($toEmail)->queue(new EstimateApprovedEmail(
+                deal: $deal,
+                version: $version,
+                xlsxPath: $absolutePath,
+                xlsxFilename: $filename,
+                sender: $request->user(),
+                message: $message,
+            ));
+        } catch (Throwable $e) {
+            Log::error('EstimationVersion: queue email failed', [
+                'version_id' => $version->id,
+                'to' => $toEmail,
+                'error' => $e->getMessage(),
+            ]);
+            abort(503, 'Could not queue the estimate email. Please try again.');
+        }
+
+        $version->forceFill([
+            'sent_at' => now(),
+            'sent_to_email' => $toEmail,
+        ])->save();
+
+        return response()->json([
+            'data' => [
+                'id' => $version->id,
+                'sent_at' => $version->sent_at?->toIso8601String(),
+                'sent_to_email' => $version->sent_to_email,
+                'version_number' => $version->version_number,
+            ],
+        ]);
+    }
+
+    /**
+     * Build a customer-friendly XLSX filename — readable, no UUIDs.
+     */
+    private function buildAttachmentFilename(Deal $deal, EstimationVersion $version): string
+    {
+        $dealSlug = Str::slug($deal->name ?: 'estimate', '_') ?: 'estimate';
+        return sprintf('%s_estimate_v%d.xlsx', $dealSlug, $version->version_number);
     }
 
     /**

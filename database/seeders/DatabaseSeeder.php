@@ -16,6 +16,7 @@ use App\Models\EmployeeSkill;
 use App\Models\EstimationResource;
 use App\Models\EstimationVersion;
 use App\Models\GlobalOverhead;
+use App\Models\InitialBudget;
 use App\Models\Invoice;
 use App\Models\Milestone;
 use App\Models\Project;
@@ -72,6 +73,7 @@ class DatabaseSeeder extends Seeder
             'deal_ghost_roles',
             'deals',
             'employee_skills',
+            'employee_salary_history',
             'users',
             'employees',
             'skills',
@@ -80,6 +82,7 @@ class DatabaseSeeder extends Seeder
             'roles',
             'departments',
             'global_overheads',
+            'initial_budgets',
             'company_settings',
             'tenants',
         ] as $table) {
@@ -292,7 +295,12 @@ class DatabaseSeeder extends Seeder
                 'capacity_role' => $row['capacity'],
                 'capacity_role_id' => $capacityRoles[$row['capacity']]->id,
                 'rank_id' => $ranks[$rankCode]->id,
-                'monthly_salary' => $row['salary'],
+                // Spec ①.2 — salary structurally split. Seed data only tracks
+                // the total per employee; treat it all as basic_salary with
+                // allowance=0. The model save hook then derives monthly_salary
+                // = basic + allowance, so legacy readers still see $row['salary'].
+                'basic_salary' => $row['salary'],
+                'allowance' => 0,
                 'workable_hours' => $row['hours'],
                 'status' => $row['status'] ?? 'Active',
             ]);
@@ -364,18 +372,29 @@ class DatabaseSeeder extends Seeder
 
     private function createCompanySettings(Tenant $tenant, array $settings): void
     {
+        $annualBudget = $settings['annual_initial_budget'] ?? 1_000_000_000;
+
         CompanySetting::create([
             'id' => $tenant->id,
             'tenant_id' => $tenant->id,
             'overhead_percentage' => $settings['overhead_percentage'],
             'buffer_percentage' => $settings['buffer_percentage'],
             'yearly_fixed_cost' => $settings['yearly_fixed_cost'],
-            'annual_initial_budget' => $settings['annual_initial_budget'] ?? 1_000_000_000,
+            // Legacy column kept during soft cutover to initial_budgets table.
+            // Phase 2 drops this column once everything reads from the new model.
+            'annual_initial_budget' => $annualBudget,
             'employer_tax_percentage' => $settings['employer_tax_percentage'],
             'benefits_percentage' => $settings['benefits_percentage'],
             'cost_to_bill_ratio' => $settings['cost_to_bill_ratio'],
             'default_monthly_capacity_hours' => 160,
             'fallback_hourly_cost' => $settings['fallback_hourly_cost'],
+        ]);
+
+        // Year-scoped budget (process ①.3). Forecast page reads this.
+        InitialBudget::create([
+            'tenant_id' => $tenant->id,
+            'fiscal_year' => (int) date('Y'),
+            'amount' => $annualBudget,
         ]);
     }
 
@@ -437,9 +456,12 @@ class DatabaseSeeder extends Seeder
             'total_estimated_cost' => $totalCost,
             'estimated_gross_profit' => $grossProfit,
             'won_at' => $row['status'] === 'won' ? Carbon::parse($row['won_at']) : null,
-            'lost_at' => $row['status'] === 'lost' ? Carbon::parse($row['lost_at']) : null,
+            'lost_at' => isset($row['lost_at']) ? Carbon::parse($row['lost_at']) : null,
             'win_reason' => $row['win_reason'] ?? null,
             'loss_reason' => $row['loss_reason'] ?? null,
+            'lifecycle_status' => $row['lifecycle_status'] ?? 'active',
+            'dropped_at_stage' => $row['dropped_at_stage'] ?? null,
+            'dropped_at' => isset($row['dropped_at']) ? Carbon::parse($row['dropped_at']) : null,
             'wizard_step' => $row['wizard_step'] ?? 'complete',
         ]);
 
@@ -1046,7 +1068,13 @@ class DatabaseSeeder extends Seeder
 
     private function lostDeal(string $name, string $client, float $budget, float $hours, string $lostAt, string $reason): array
     {
-        $deal = $this->pipelineDeal($name, $client, $budget, $hours, 'lost', 0, $lostAt, 'cold_outreach', []);
+        // Migration 2026_05_15_000007 removed 'lost' from deals.status. A dropped
+        // deal now lives as status='qualified' + lifecycle_status='dropped' so
+        // it shows up greyed on the Kanban under "Show dropped".
+        $deal = $this->pipelineDeal($name, $client, $budget, $hours, 'qualified', 0, $lostAt, 'cold_outreach', []);
+        $deal['lifecycle_status'] = 'dropped';
+        $deal['dropped_at_stage'] = 'qualified';
+        $deal['dropped_at'] = $lostAt;
         $deal['lost_at'] = $lostAt;
         $deal['loss_reason'] = $reason;
 

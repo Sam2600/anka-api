@@ -18,6 +18,7 @@ use App\Http\Controllers\Api\PhaseProgressLogController;
 use App\Http\Controllers\Api\ProjectController;
 use App\Http\Controllers\Api\ScheduleTrackingController;
 use App\Http\Controllers\Api\RankController;
+use App\Http\Controllers\Api\TenantAppRoleController;
 use App\Http\Controllers\Api\TenantController;
 use App\Http\Controllers\Api\TimeEntryController;
 use Illuminate\Support\Facades\Route;
@@ -136,6 +137,8 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         Route::post('/deals/{deal}/estimation-versions/ai-draft', [EstimationVersionController::class, 'aiDraft']);
         Route::post('/deals/{deal}/estimation-versions/ai-delta', [EstimationVersionController::class, 'aiDelta']);
         Route::post('/estimation-versions/{id}/restore', [EstimationVersionController::class, 'restore']);
+        // Spec ④.G — email the estimate XLSX to the customer (manual confirm).
+        Route::post('/estimation-versions/{id}/send', [EstimationVersionController::class, 'sendXlsx']);
     });
 
     // Contracts (created only via win_deal; no store route)
@@ -173,6 +176,12 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::put('/employees/{employee}', [OrganizationController::class, 'updateEmployee']);
     Route::delete('/employees/{employee}', [OrganizationController::class, 'destroyEmployee']);
 
+    // Salary history (spec ②.1.B) — one row per (employee, target_month).
+    Route::get('/employees/{employee}/salary-history', [OrganizationController::class, 'indexSalaryHistory']);
+    Route::post('/employees/{employee}/salary-history', [OrganizationController::class, 'storeSalaryHistory']);
+    Route::put('/employees/{employee}/salary-history/{history}', [OrganizationController::class, 'updateSalaryHistory']);
+    Route::delete('/employees/{employee}/salary-history/{history}', [OrganizationController::class, 'destroySalaryHistory']);
+
     Route::get('/global-overheads', [OrganizationController::class, 'indexOverheads']);
     Route::post('/global-overheads', [OrganizationController::class, 'storeOverhead']);
     Route::put('/global-overheads/{globalOverhead}', [OrganizationController::class, 'updateOverhead']);
@@ -180,6 +189,15 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
 
     Route::get('/company-settings', [OrganizationController::class, 'getSettings']);
     Route::put('/company-settings', [OrganizationController::class, 'upsertSettings']);
+
+    // Initial Budgets — year-scoped target profit, replaces the singleton
+    // company_settings.annual_initial_budget. Routed on fiscal_year so the
+    // frontend can upsert without first looking up the row id.
+    Route::get('/initial-budgets', [OrganizationController::class, 'indexInitialBudgets']);
+    Route::put('/initial-budgets/{fiscal_year}', [OrganizationController::class, 'upsertInitialBudget'])
+        ->whereNumber('fiscal_year');
+    Route::delete('/initial-budgets/{fiscal_year}', [OrganizationController::class, 'destroyInitialBudget'])
+        ->whereNumber('fiscal_year');
 
     // Capacity Roles
     Route::get('/capacity-roles', [OrganizationController::class, 'indexCapacityRoles']);
@@ -220,6 +238,18 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     // Multipart logo upload + remove. Used by the Organization → Company tab.
     Route::post('/tenant/logo', [TenantController::class, 'uploadLogo']);
     Route::delete('/tenant/logo', [TenantController::class, 'deleteLogo']);
+
+    // Tenant-managed app roles + admin-editable permissions. List/catalog
+    // are readable by anyone in the tenant (sidebar + role pickers); writes
+    // require manage_tenant. The permission catalog itself is code-defined
+    // in App\Support\PermissionCatalog — admins compose, they don't invent.
+    Route::get('/tenant/app-roles',          [TenantAppRoleController::class, 'index']);
+    Route::get('/tenant/permission-catalog', [TenantAppRoleController::class, 'catalog']);
+    Route::middleware('permission:manage_tenant')->group(function () {
+        Route::post('/tenant/app-roles',              [TenantAppRoleController::class, 'store']);
+        Route::patch('/tenant/app-roles/{appRoleId}', [TenantAppRoleController::class, 'update']);
+        Route::delete('/tenant/app-roles/{appRoleId}', [TenantAppRoleController::class, 'destroy']);
+    });
 
     // Milestones
     Route::apiResource('milestones', MilestoneController::class);

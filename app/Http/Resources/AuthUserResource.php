@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources;
 
+use App\Http\Middleware\CheckPermission;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -10,6 +11,12 @@ class AuthUserResource extends JsonResource
     public function toArray(Request $request): array
     {
         $tenant = $this->relationLoaded('tenant') ? $this->tenant : null;
+
+        // Super admins are treated as having every permission on the frontend.
+        // For org users the list comes from tenant_app_roles via CheckPermission.
+        $permissions = $this->is_super_admin
+            ? ['all']
+            : CheckPermission::permissionsFor($this->resource);
 
         return [
             'id' => $this->id,
@@ -20,6 +27,7 @@ class AuthUserResource extends JsonResource
             'app_role' => $this->app_role,
             'system_role' => $this->system_role,
             'is_super_admin' => (bool) $this->is_super_admin,
+            'permissions' => $permissions,
             'tenant' => $tenant
                 ? [
                     'id' => $tenant->id,

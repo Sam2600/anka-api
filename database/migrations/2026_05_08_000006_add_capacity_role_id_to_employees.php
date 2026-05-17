@@ -15,7 +15,7 @@ return new class extends Migration
         });
 
         if (DB::connection()->getDriverName() === 'pgsql') {
-            DB::statement('DROP CONSTRAINT IF EXISTS check_employees_capacity_role');
+            DB::statement('ALTER TABLE employees DROP CONSTRAINT IF EXISTS check_employees_capacity_role');
         }
     }
 
