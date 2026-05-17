@@ -30,6 +30,11 @@ class EmployeeResource extends JsonResource
                 'name' => $this->rank->name,
                 'level' => (int) $this->rank->level,
             ] : null),
+            // Spec ①.2 — salary split into Basic + Allowance. monthly_salary
+            // remains as the derived total (basic + allowance) for legacy
+            // readers; it's always recomputed server-side on save.
+            'basic_salary' => $this->basic_salary,
+            'allowance' => $this->allowance,
             'monthly_salary' => $this->monthly_salary,
             'workable_hours' => $this->workable_hours,
             'cost_per_hour' => $this->cost_per_hour,
