@@ -315,23 +315,35 @@ class EstimationXlsxService
             $sheet->setCellValue(self::SHEET3_COL_FUNCTION_ID.$row, $f['function_id']);
             $sheet->setCellValue(self::SHEET3_COL_NAME.$row, $f['name']);
             $sheet->setCellValue(self::SHEET3_COL_STATUS.$row, $f['status'] ?? '');
-            $sheet->setCellValue(self::SHEET3_COL_DEV_HOURS.$row, (float) $f['dev_hours']);
+            // Dev hours rounded UP to the next whole hour — matches the
+            // CEILING wrapper on the phase formulas below so every column
+            // on the sheet is an integer count of hours, consistent with
+            // the request to "round up the hours display".
+            $devHours = (int) ceil((float) $f['dev_hours']);
+            $sheet->setCellValue(self::SHEET3_COL_DEV_HOURS.$row, $devHours);
 
-            // Phase columns: =$D{row}*{multiplier-cell}. Anchor on the
-            // multiplier ROW so each feature row picks up the same ratio
-            // (E$2, F$2, …). Some template columns are flagged as
-            // manual-input (e.g. AD2 = "入力列"); for those we leave 0 so
-            // the user can type real hours in, and we avoid the #VALUE!
-            // cascade from multiplying numbers by text.
+            // Phase columns: =CEILING($D{row}*{multiplier-cell}, 1). The
+            // ratios (0.1, 0.15, 0.03, …) produce fractional values; CEILING
+            // rounds each one up to the next whole hour so quotes don't show
+            // "0.4h" alongside "8h". Anchor on the multiplier ROW so each
+            // feature row picks up the same ratio (E$2, F$2, …). Some columns
+            // are flagged as manual-input (e.g. AD2 = "入力列"); for those
+            // we leave 0 so the user can type real hours in, and we avoid
+            // the #VALUE! cascade from multiplying numbers by text.
             foreach ($phaseCols as $col) {
                 $m = $multipliers[$col];
                 if (is_numeric($m)) {
-                    $sheet->setCellValue($col.$row, '='.self::SHEET3_COL_DEV_HOURS.$row.'*'.$col.'$'.self::SHEET3_MULTIPLIER_ROW);
+                    $sheet->setCellValue(
+                        $col.$row,
+                        '=CEILING('.self::SHEET3_COL_DEV_HOURS.$row.'*'.$col.'$'.self::SHEET3_MULTIPLIER_ROW.',1)',
+                    );
                 } else {
                     $sheet->setCellValue($col.$row, 0);
                 }
             }
 
+            // Row total — sums the already-rounded phase + dev cells, so the
+            // grand total is also an integer count of hours.
             $sheet->setCellValue(
                 self::SHEET3_TOTAL_COL.$row,
                 '=SUM('.self::SHEET3_COL_DEV_HOURS.$row.':'.self::SHEET3_LAST_PHASE_COL.$row.')',
@@ -409,14 +421,17 @@ class EstimationXlsxService
         foreach ($members as $i => $m) {
             $row = self::SHEET5_FIRST_MEMBER_ROW + $i;
             $sheet->setCellValue(self::SHEET5_MEMBER_NAME_COL.$row, $m['name']);
-            // Push the monthly allocation. AI-sourced rows carry an array
-            // aligned to SHEET5_MONTH_COLS; hard_assignment / role-fallback
-            // rows leave this empty so the cells stay 0 for manual entry.
+            // Push the monthly allocation, rounded UP to the next whole
+            // person-month so the column shows "1" instead of "0.6". Matches
+            // the rounding policy applied to Web_Manhour_Detail above.
+            // AI-sourced rows carry an array aligned to SHEET5_MONTH_COLS;
+            // hard_assignment / role-fallback rows leave this empty so the
+            // cells stay 0 for manual entry.
             $alloc = $m['monthly_allocation'] ?? [];
             foreach (self::SHEET5_MONTH_COLS as $idx => $col) {
                 $val = (float) ($alloc[$idx] ?? 0);
-                if ($val !== 0.0) {
-                    $sheet->setCellValue($col.$row, $val);
+                if ($val > 0) {
+                    $sheet->setCellValue($col.$row, (int) ceil($val));
                 }
             }
         }
