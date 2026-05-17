@@ -297,6 +297,56 @@ class Deal extends Model
     }
 
     /**
+     * Spec ⑥.B — translate Estimation's per-feature resource rows into
+     * deal_hard_assignments (the structured team list `win_deal()` copies
+     * into ProjectTeamAssignment). Without this step, Estimation's team
+     * suggestion lives only as a string in the contract; the post-win
+     * Project team would be empty for any deal not seeded directly.
+     *
+     * Aggregates estimation_resources by employee_id (rows without an
+     * employee_id are skipped — those are role-only sketches, not
+     * concrete assignments). Idempotent: wipes existing
+     * hard_assignments and rewrites from the current resources. Safe to
+     * call after every estimation save while the deal is still active
+     * (lead → negotiation). Skips once the deal is won so the Project's
+     * team isn't retroactively reshuffled.
+     */
+    public function syncHardAssignmentsFromEstimation(): void
+    {
+        if ($this->status === 'won' || $this->isDropped()) {
+            return;
+        }
+
+        $totals = $this->estimation_resources()
+            ->whereNotNull('employee_id')
+            ->get(['employee_id', 'hours'])
+            ->groupBy('employee_id')
+            ->map(fn ($group) => (float) $group->sum('hours'));
+
+        // No estimation rows with concrete employee_id → don't touch
+        // hard_assignments. Seeded deals + deals where the user only
+        // sketched roles (no specific people) keep whatever hard
+        // assignments were set manually.
+        if ($totals->isEmpty()) {
+            return;
+        }
+
+        $this->hard_assignments()->delete();
+
+        foreach ($totals as $employeeId => $hours) {
+            if ($hours <= 0) {
+                continue;
+            }
+            DealHardAssignment::create([
+                'tenant_id'       => $this->tenant_id,
+                'deal_id'         => $this->id,
+                'employee_id'     => $employeeId,
+                'allocated_hours' => $hours,
+            ]);
+        }
+    }
+
+    /**
      * True when the agency absorbs the OT cost. ⑦ Profit Calculate
      * subtracts the actual overtime hours × the engineer's cost rate
      * from the deal's profit when this returns true.
