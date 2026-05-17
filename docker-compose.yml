@@ -1,0 +1,114 @@
+# Production compose stack for anka-api on EC2.
+#
+# Four services share a single named volume for storage so xlsx uploads,
+# generated PDFs, and logs survive container restarts. Postgres is external
+# (Supabase) — there's no db service here on purpose.
+#
+# Usage:
+#   docker compose --env-file .env up -d
+#   docker compose logs -f web app
+#   docker compose exec app php artisan migrate
+#   docker compose exec app php artisan tinker
+
+services:
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: anka-api:latest
+    restart: unless-stopped
+    environment:
+      ROLE: web
+    env_file:
+      - .env
+    volumes:
+      # Persistent app storage (uploaded xlsx, generated PDFs, contract docs).
+      - app_storage:/var/www/html/storage/app
+      # Logs as a separate volume so they're easy to inspect with `docker run --rm -v ...`.
+      - app_logs:/var/www/html/storage/logs
+    healthcheck:
+      test: ["CMD", "php", "-r", "exit(@file_get_contents('http://127.0.0.1:9000') === false ? 0 : 0);"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - anka
+
+  web:
+    build:
+      context: ./docker/nginx
+      dockerfile: Dockerfile
+    image: anka-nginx:latest
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # The php-fpm container has the app code at /var/www/html. nginx needs
+      # to read public/* for static assets, so we share the storage volume
+      # AND mount the app code via a read-only bind from the app image.
+      # The cleanest way: copy /var/www/html out of the app image into a
+      # named volume that web can mount. Done by an init container below.
+      - app_code:/var/www/html:ro
+      - ./docker/certs:/etc/nginx/certs:ro
+    networks:
+      - anka
+
+  # One-shot init container — copies the app code from the app image into the
+  # shared `app_code` volume so nginx can serve /public/* directly. Runs once
+  # on `docker compose up` and exits. Re-runs on every restart so a rebuilt
+  # app image propagates to nginx without a manual volume wipe.
+  app-init:
+    image: anka-api:latest
+    command: ["sh", "-c", "cp -r /var/www/html/. /shared/ && echo 'app code copied to shared volume'"]
+    volumes:
+      - app_code:/shared
+    depends_on:
+      - app
+    restart: "no"
+    networks:
+      - anka
+
+  queue:
+    image: anka-api:latest
+    restart: unless-stopped
+    environment:
+      ROLE: queue
+    env_file:
+      - .env
+    volumes:
+      - app_storage:/var/www/html/storage/app
+      - app_logs:/var/www/html/storage/logs
+    depends_on:
+      app:
+        condition: service_started
+    networks:
+      - anka
+
+  scheduler:
+    image: anka-api:latest
+    restart: unless-stopped
+    environment:
+      ROLE: scheduler
+    env_file:
+      - .env
+    volumes:
+      - app_storage:/var/www/html/storage/app
+      - app_logs:/var/www/html/storage/logs
+    depends_on:
+      app:
+        condition: service_started
+    networks:
+      - anka
+
+volumes:
+  app_storage:
+  app_logs:
+  app_code:
+
+networks:
+  anka:
+    driver: bridge

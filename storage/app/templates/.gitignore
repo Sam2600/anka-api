@@ -1,0 +1,5 @@
+# Whitelist: only the canonical hand-authored template gets tracked.
+# Tenant-specific or generated xlsx variants stay ignored at runtime.
+*
+!.gitignore
+!estimation_template.xlsx
