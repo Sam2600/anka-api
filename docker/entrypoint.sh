@@ -54,9 +54,28 @@ wait_for_db() {
     return 1
 }
 
+# Ensure framework cache + log directories exist and are writable. The named
+# volumes mounted at storage/app and storage/logs start empty on first boot, and
+# `storage/framework/{cache,sessions,views}` can also be missing because they're
+# excluded from the image when their .gitignore stubs got stripped. Idempotent.
+ensure_storage_dirs() {
+    mkdir -p \
+        storage/framework/cache/data \
+        storage/framework/sessions \
+        storage/framework/views \
+        storage/framework/testing \
+        storage/logs \
+        storage/app/private \
+        storage/app/public \
+        bootstrap/cache
+    chown -R www-data:www-data storage bootstrap/cache 2>/dev/null || true
+    chmod -R u+rwX,g+rwX storage bootstrap/cache 2>/dev/null || true
+}
+
 case "$ROLE" in
     web)
         wait_for_db
+        ensure_storage_dirs
 
         # Run migrations on web boot. --force because production env. This is
         # idempotent: only new migrations run.
@@ -79,6 +98,7 @@ case "$ROLE" in
 
     queue)
         wait_for_db
+        ensure_storage_dirs
         # --tries=3 because some queued jobs hit Anthropic which can flake.
         # --timeout=120 matches php.ini max_execution_time.
         exec php artisan queue:work --tries=3 --timeout=120 --sleep=3
@@ -86,6 +106,7 @@ case "$ROLE" in
 
     scheduler)
         wait_for_db
+        ensure_storage_dirs
         # schedule:work is a long-running daemon — internally ticks every
         # minute and runs whatever's due per routes/console.php.
         exec php artisan schedule:work
@@ -93,12 +114,14 @@ case "$ROLE" in
 
     migrate)
         wait_for_db
+        ensure_storage_dirs
         php artisan migrate --force
         echo "Migrations complete."
         ;;
 
     seed)
         wait_for_db
+        ensure_storage_dirs
         # Make sure schema is current before seeding.
         php artisan migrate --force
         # DatabaseSeeder is destructive — it truncates every business table
