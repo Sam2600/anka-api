@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\TenantAppRoleSeeder;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -10,6 +11,17 @@ use Illuminate\Support\Facades\Storage;
 class Tenant extends Model
 {
     use HasFactory, HasUuids;
+
+    protected static function booted(): void
+    {
+        // Every new tenant gets the default RBAC role set (Admin / Executive /
+        // Sales / Delivery / HR). Without this, freshly-created tenants would
+        // have no rows in tenant_app_roles and every authenticated request
+        // would 403 because the permission lookup returns an empty list.
+        static::created(function (Tenant $tenant) {
+            TenantAppRoleSeeder::seed($tenant->id);
+        });
+    }
 
     protected $fillable = [
         'name',
