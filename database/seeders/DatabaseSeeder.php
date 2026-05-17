@@ -73,6 +73,7 @@ class DatabaseSeeder extends Seeder
             'deal_ghost_roles',
             'deals',
             'employee_skills',
+            'employee_salary_history',
             'users',
             'employees',
             'skills',

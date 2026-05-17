@@ -9,11 +9,13 @@ use App\Http\Resources\EmployeeResource;
 use App\Http\Resources\GlobalOverheadResource;
 use App\Http\Resources\CompanySettingResource;
 use App\Http\Resources\InitialBudgetResource;
+use App\Http\Resources\EmployeeSalaryHistoryResource;
 use App\Http\Resources\SkillResource;
 use App\Http\Resources\CapacityRoleResource;
 use App\Models\Department;
 use App\Models\Role;
 use App\Models\Employee;
+use App\Models\EmployeeSalaryHistory;
 use App\Models\GlobalOverhead;
 use App\Models\CompanySetting;
 use App\Models\InitialBudget;
@@ -545,6 +547,151 @@ class OrganizationController extends Controller
             ->delete();
 
         return response()->noContent();
+    }
+
+    // ── Employee Salary History (spec ②.1.B) ────────────────────────────────
+    //
+    // One row per (employee, target_month). Past rows are read-only after
+    // the month is over; current + future rows can be edited or deleted.
+    // Whenever a row that's effective today-or-earlier is created/updated/
+    // deleted, the parent Employee's basic_salary / allowance / cost_per_hour
+    // are recomputed from the most-recent-on-or-before row so legacy readers
+    // (estimation, financial, forecast) see the right "current" value.
+
+    public function indexSalaryHistory(Employee $employee)
+    {
+        return EmployeeSalaryHistoryResource::collection(
+            $employee->salaryHistory()->orderByDesc('target_month')->get()
+        );
+    }
+
+    public function storeSalaryHistory(Request $request, Employee $employee)
+    {
+        $data = $request->validate([
+            'target_month'  => 'required|date',
+            'basic_salary'  => 'required|numeric|min:0',
+            'allowance'     => 'sometimes|numeric|min:0',
+            'notes'         => 'sometimes|nullable|string|max:500',
+        ]);
+
+        $month = $this->coerceTargetMonth($data['target_month']);
+        $this->guardPastMonthEdit($month, 'create');
+
+        $allowance = isset($data['allowance']) ? (float) $data['allowance'] : 0.0;
+        $hours = max(1, $employee->workable_hours ?: 160);
+        $costPerHour = ((float) $data['basic_salary'] + $allowance) / $hours;
+
+        $row = EmployeeSalaryHistory::create([
+            'tenant_id'          => $employee->tenant_id,
+            'employee_id'        => $employee->id,
+            'target_month'       => $month,
+            'basic_salary'       => $data['basic_salary'],
+            'allowance'          => $allowance,
+            'cost_per_hour'      => round($costPerHour, 4),
+            'workable_hours'     => $hours,
+            'notes'              => $data['notes'] ?? null,
+            'created_by_user_id' => $request->user()?->id,
+        ]);
+
+        $this->syncEmployeeCurrentSalary($employee);
+
+        return new EmployeeSalaryHistoryResource($row->fresh());
+    }
+
+    public function updateSalaryHistory(Request $request, Employee $employee, EmployeeSalaryHistory $history)
+    {
+        abort_unless($history->employee_id === $employee->id, 404);
+
+        $existingMonth = $history->target_month?->startOfMonth();
+        $this->guardPastMonthEdit($existingMonth, 'update');
+
+        $data = $request->validate([
+            'basic_salary' => 'sometimes|required|numeric|min:0',
+            'allowance'    => 'sometimes|numeric|min:0',
+            'notes'        => 'sometimes|nullable|string|max:500',
+        ]);
+
+        $basic = (float) ($data['basic_salary'] ?? $history->basic_salary);
+        $allowance = (float) ($data['allowance'] ?? $history->allowance);
+        $hours = max(1, $history->workable_hours ?: 160);
+
+        $history->update([
+            'basic_salary'  => $basic,
+            'allowance'     => $allowance,
+            'cost_per_hour' => round(($basic + $allowance) / $hours, 4),
+            'notes'         => $data['notes'] ?? $history->notes,
+        ]);
+
+        $this->syncEmployeeCurrentSalary($employee);
+
+        return new EmployeeSalaryHistoryResource($history->fresh());
+    }
+
+    public function destroySalaryHistory(Employee $employee, EmployeeSalaryHistory $history)
+    {
+        abort_unless($history->employee_id === $employee->id, 404);
+        $this->guardPastMonthEdit($history->target_month?->startOfMonth(), 'delete');
+
+        // Don't allow deleting the only remaining row — the employee would
+        // be left without any salary record and the Employee row's
+        // denormalized cache would have nothing to sync from.
+        $rowCount = $employee->salaryHistory()->count();
+        if ($rowCount <= 1) {
+            abort(422, 'Cannot delete the only salary history row. Add a replacement row first.');
+        }
+
+        $history->delete();
+        $this->syncEmployeeCurrentSalary($employee);
+
+        return response()->noContent();
+    }
+
+    /**
+     * Reject edits/deletes/creates targeting a month that's already in the
+     * past (per decision 2b: past rows are read-only once the month is over).
+     */
+    private function guardPastMonthEdit(?\Carbon\Carbon $month, string $action): void
+    {
+        if (! $month) {
+            return;
+        }
+        $currentMonth = now()->startOfMonth();
+        if ($month->lt($currentMonth)) {
+            abort(422, "Cannot {$action} a salary row for a past month ({$month->format('Y-m')}). Past months are locked.");
+        }
+    }
+
+    /**
+     * Coerce an incoming date to the first day of its month. The spec keys
+     * salary versions by month, not day — accept anything from the frontend
+     * and normalise.
+     */
+    private function coerceTargetMonth(string $raw): \Carbon\Carbon
+    {
+        return \Carbon\Carbon::parse($raw)->startOfMonth();
+    }
+
+    /**
+     * Recompute the Employee's denormalized "current" salary values from
+     * the most-recent salary-history row whose target_month is on or
+     * before today. Updates basic_salary + allowance only; the model save
+     * hook re-derives monthly_salary + cost_per_hour from those.
+     */
+    private function syncEmployeeCurrentSalary(Employee $employee): void
+    {
+        $current = $employee->salaryHistory()
+            ->where('target_month', '<=', now()->startOfDay())
+            ->orderByDesc('target_month')
+            ->first();
+
+        if (! $current) {
+            return;
+        }
+
+        $employee->update([
+            'basic_salary' => $current->basic_salary,
+            'allowance'    => $current->allowance,
+        ]);
     }
 
     // ── Capacity Roles ──────────────────────────────────────────────────────

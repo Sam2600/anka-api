@@ -67,6 +67,29 @@ class Employee extends Model
                 }
             }
         });
+
+        // Spec ②.1.B — every employee owns a salary timeline. The first
+        // row is auto-created on hire from whatever basic_salary +
+        // allowance the create payload supplied; effective from the first
+        // of the current month. After this, all salary changes go through
+        // the salary-history endpoints (create new rows for future months;
+        // past rows are read-only).
+        static::created(function (Employee $model) {
+            $exists = EmployeeSalaryHistory::where('employee_id', $model->id)->exists();
+            if ($exists) {
+                return;
+            }
+            $hours = max(1, $model->workable_hours ?: 160);
+            EmployeeSalaryHistory::create([
+                'tenant_id' => $model->tenant_id,
+                'employee_id' => $model->id,
+                'target_month' => now()->startOfMonth()->toDateString(),
+                'basic_salary' => $model->basic_salary ?? 0,
+                'allowance' => $model->allowance ?? 0,
+                'cost_per_hour' => round((((float) ($model->basic_salary ?? 0)) + ((float) ($model->allowance ?? 0))) / $hours, 4),
+                'workable_hours' => $hours,
+            ]);
+        });
     }
 
     public function tenant()
@@ -114,5 +137,30 @@ class Employee extends Model
         return $this->belongsToMany(Skill::class, 'employee_skills', 'employee_id', 'skill_id')
             ->withPivot('proficiency')
             ->withTimestamps();
+    }
+
+    /**
+     * Salary timeline (spec ②.1.B). Most-recent first by target_month.
+     * Each row holds the basic + allowance + cost_per_hour snapshot
+     * that applies from `target_month` until the next row.
+     */
+    public function salaryHistory()
+    {
+        return $this->hasMany(EmployeeSalaryHistory::class)
+            ->orderByDesc('target_month');
+    }
+
+    /**
+     * Returns the salary-history row that applies on the given date —
+     * the most recent row whose `target_month` is on or before $date.
+     * Falls back to null if no rows exist (defensive — the migration
+     * backfills one row per existing employee so this should be rare).
+     */
+    public function salaryForDate(\DateTimeInterface $date): ?EmployeeSalaryHistory
+    {
+        return $this->salaryHistory()
+            ->where('target_month', '<=', $date->format('Y-m-d'))
+            ->orderByDesc('target_month')
+            ->first();
     }
 }

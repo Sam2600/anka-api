@@ -173,6 +173,12 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::put('/employees/{employee}', [OrganizationController::class, 'updateEmployee']);
     Route::delete('/employees/{employee}', [OrganizationController::class, 'destroyEmployee']);
 
+    // Salary history (spec ②.1.B) — one row per (employee, target_month).
+    Route::get('/employees/{employee}/salary-history', [OrganizationController::class, 'indexSalaryHistory']);
+    Route::post('/employees/{employee}/salary-history', [OrganizationController::class, 'storeSalaryHistory']);
+    Route::put('/employees/{employee}/salary-history/{history}', [OrganizationController::class, 'updateSalaryHistory']);
+    Route::delete('/employees/{employee}/salary-history/{history}', [OrganizationController::class, 'destroySalaryHistory']);
+
     Route::get('/global-overheads', [OrganizationController::class, 'indexOverheads']);
     Route::post('/global-overheads', [OrganizationController::class, 'storeOverhead']);
     Route::put('/global-overheads/{globalOverhead}', [OrganizationController::class, 'updateOverhead']);
