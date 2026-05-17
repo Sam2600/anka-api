@@ -8,13 +8,17 @@ use App\Http\Resources\RoleResource;
 use App\Http\Resources\EmployeeResource;
 use App\Http\Resources\GlobalOverheadResource;
 use App\Http\Resources\CompanySettingResource;
+use App\Http\Resources\InitialBudgetResource;
+use App\Http\Resources\EmployeeSalaryHistoryResource;
 use App\Http\Resources\SkillResource;
 use App\Http\Resources\CapacityRoleResource;
 use App\Models\Department;
 use App\Models\Role;
 use App\Models\Employee;
+use App\Models\EmployeeSalaryHistory;
 use App\Models\GlobalOverhead;
 use App\Models\CompanySetting;
+use App\Models\InitialBudget;
 use App\Models\Skill;
 use App\Models\CapacityRole;
 use App\Models\EmployeeSkill;
@@ -174,7 +178,10 @@ class OrganizationController extends Controller
                 Rule::exists('ranks', 'id')
                     ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
             ],
-            'monthly_salary' => 'required|numeric|min:0',
+            // Spec ①.2 — salary captured as Basic + Allowance. monthly_salary
+            // is derived (basic + allowance) and not accepted from clients.
+            'basic_salary'   => 'required|numeric|min:0',
+            'allowance'      => 'sometimes|numeric|min:0',
             'workable_hours' => 'required|integer|min:1|max:744',
             'status'         => 'required|in:Active,On Leave,Terminated',
             'email'          => 'required|email|max:255|unique:users,email',
@@ -188,8 +195,13 @@ class OrganizationController extends Controller
             $employee = new Employee($request->only([
                 'name', 'role', 'role_name', 'department_id', 'job_role_id',
                 'capacity_role', 'capacity_role_id', 'rank_id',
-                'monthly_salary', 'workable_hours', 'status',
+                'basic_salary', 'allowance', 'workable_hours', 'status',
             ]));
+            // allowance is optional in the request — default to 0 when omitted
+            // so the model save hook computes monthly_salary correctly.
+            if (! $request->has('allowance')) {
+                $employee->allowance = 0;
+            }
             if ($request->filled('id')) {
                 $employee->id = $request->input('id');
             }
@@ -246,7 +258,9 @@ class OrganizationController extends Controller
                 Rule::exists('ranks', 'id')
                     ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
             ],
-            'monthly_salary' => 'sometimes|required|numeric|min:0',
+            // Spec ①.2 — salary edited as Basic + Allowance.
+            'basic_salary'   => 'sometimes|required|numeric|min:0',
+            'allowance'      => 'sometimes|numeric|min:0',
             'workable_hours' => 'sometimes|required|integer|min:1|max:744',
             'status'         => 'sometimes|required|in:Active,On Leave,Terminated',
             'email'          => [
@@ -263,7 +277,7 @@ class OrganizationController extends Controller
             $employee->update($request->only([
                 'name', 'role', 'role_name', 'department_id', 'job_role_id',
                 'capacity_role', 'capacity_role_id', 'rank_id',
-                'monthly_salary', 'workable_hours', 'status',
+                'basic_salary', 'allowance', 'workable_hours', 'status',
             ]));
 
             if ($request->has('skills')) {
@@ -470,6 +484,214 @@ class OrganizationController extends Controller
         }
 
         return new CompanySettingResource($settings);
+    }
+
+    // ── Initial Budgets (year-scoped target profit, process ①.3) ─────────────
+    //
+    // Replaces the legacy `company_settings.annual_initial_budget` singleton
+    // (still readable for backward compat during the soft cutover). One row
+    // per (tenant, fiscal_year); the Forecast page (process ⑧) fetches the
+    // year matching the displayed months.
+
+    public function indexInitialBudgets()
+    {
+        return InitialBudgetResource::collection(
+            InitialBudget::orderBy('fiscal_year', 'desc')->get()
+        );
+    }
+
+    /**
+     * Upsert by fiscal_year — the natural key is (tenant_id, fiscal_year),
+     * so we route on the year rather than the row id. Lets the frontend
+     * say "set the 2027 budget to X" without first looking up the row.
+     */
+    public function upsertInitialBudget(Request $request, int $fiscalYear)
+    {
+        $request->validate([
+            'amount' => 'required|numeric|min:0',
+        ]);
+
+        if ($fiscalYear < 2000 || $fiscalYear > 2100) {
+            return response()->json([
+                'message' => 'fiscal_year must be between 2000 and 2100.',
+            ], Response::HTTP_UNPROCESSABLE_ENTITY);
+        }
+
+        $tenantId = app('tenant_id');
+        $user = $request->user();
+
+        $budget = InitialBudget::where('tenant_id', $tenantId)
+            ->where('fiscal_year', $fiscalYear)
+            ->first();
+
+        if ($budget) {
+            $budget->update(['amount' => $request->input('amount')]);
+        } else {
+            $budget = InitialBudget::create([
+                'tenant_id' => $tenantId,
+                'fiscal_year' => $fiscalYear,
+                'amount' => $request->input('amount'),
+                'created_by_user_id' => $user?->id,
+            ]);
+        }
+
+        return new InitialBudgetResource($budget->fresh());
+    }
+
+    public function destroyInitialBudget(int $fiscalYear)
+    {
+        $tenantId = app('tenant_id');
+
+        InitialBudget::where('tenant_id', $tenantId)
+            ->where('fiscal_year', $fiscalYear)
+            ->delete();
+
+        return response()->noContent();
+    }
+
+    // ── Employee Salary History (spec ②.1.B) ────────────────────────────────
+    //
+    // One row per (employee, target_month). Past rows are read-only after
+    // the month is over; current + future rows can be edited or deleted.
+    // Whenever a row that's effective today-or-earlier is created/updated/
+    // deleted, the parent Employee's basic_salary / allowance / cost_per_hour
+    // are recomputed from the most-recent-on-or-before row so legacy readers
+    // (estimation, financial, forecast) see the right "current" value.
+
+    public function indexSalaryHistory(Employee $employee)
+    {
+        return EmployeeSalaryHistoryResource::collection(
+            $employee->salaryHistory()->orderByDesc('target_month')->get()
+        );
+    }
+
+    public function storeSalaryHistory(Request $request, Employee $employee)
+    {
+        $data = $request->validate([
+            'target_month'  => 'required|date',
+            'basic_salary'  => 'required|numeric|min:0',
+            'allowance'     => 'sometimes|numeric|min:0',
+            'notes'         => 'sometimes|nullable|string|max:500',
+        ]);
+
+        $month = $this->coerceTargetMonth($data['target_month']);
+        $this->guardPastMonthEdit($month, 'create');
+
+        $allowance = isset($data['allowance']) ? (float) $data['allowance'] : 0.0;
+        $hours = max(1, $employee->workable_hours ?: 160);
+        $costPerHour = ((float) $data['basic_salary'] + $allowance) / $hours;
+
+        $row = EmployeeSalaryHistory::create([
+            'tenant_id'          => $employee->tenant_id,
+            'employee_id'        => $employee->id,
+            'target_month'       => $month,
+            'basic_salary'       => $data['basic_salary'],
+            'allowance'          => $allowance,
+            'cost_per_hour'      => round($costPerHour, 4),
+            'workable_hours'     => $hours,
+            'notes'              => $data['notes'] ?? null,
+            'created_by_user_id' => $request->user()?->id,
+        ]);
+
+        $this->syncEmployeeCurrentSalary($employee);
+
+        return new EmployeeSalaryHistoryResource($row->fresh());
+    }
+
+    public function updateSalaryHistory(Request $request, Employee $employee, EmployeeSalaryHistory $history)
+    {
+        abort_unless($history->employee_id === $employee->id, 404);
+
+        $existingMonth = $history->target_month?->startOfMonth();
+        $this->guardPastMonthEdit($existingMonth, 'update');
+
+        $data = $request->validate([
+            'basic_salary' => 'sometimes|required|numeric|min:0',
+            'allowance'    => 'sometimes|numeric|min:0',
+            'notes'        => 'sometimes|nullable|string|max:500',
+        ]);
+
+        $basic = (float) ($data['basic_salary'] ?? $history->basic_salary);
+        $allowance = (float) ($data['allowance'] ?? $history->allowance);
+        $hours = max(1, $history->workable_hours ?: 160);
+
+        $history->update([
+            'basic_salary'  => $basic,
+            'allowance'     => $allowance,
+            'cost_per_hour' => round(($basic + $allowance) / $hours, 4),
+            'notes'         => $data['notes'] ?? $history->notes,
+        ]);
+
+        $this->syncEmployeeCurrentSalary($employee);
+
+        return new EmployeeSalaryHistoryResource($history->fresh());
+    }
+
+    public function destroySalaryHistory(Employee $employee, EmployeeSalaryHistory $history)
+    {
+        abort_unless($history->employee_id === $employee->id, 404);
+        $this->guardPastMonthEdit($history->target_month?->startOfMonth(), 'delete');
+
+        // Don't allow deleting the only remaining row — the employee would
+        // be left without any salary record and the Employee row's
+        // denormalized cache would have nothing to sync from.
+        $rowCount = $employee->salaryHistory()->count();
+        if ($rowCount <= 1) {
+            abort(422, 'Cannot delete the only salary history row. Add a replacement row first.');
+        }
+
+        $history->delete();
+        $this->syncEmployeeCurrentSalary($employee);
+
+        return response()->noContent();
+    }
+
+    /**
+     * Reject edits/deletes/creates targeting a month that's already in the
+     * past (per decision 2b: past rows are read-only once the month is over).
+     */
+    private function guardPastMonthEdit(?\Carbon\Carbon $month, string $action): void
+    {
+        if (! $month) {
+            return;
+        }
+        $currentMonth = now()->startOfMonth();
+        if ($month->lt($currentMonth)) {
+            abort(422, "Cannot {$action} a salary row for a past month ({$month->format('Y-m')}). Past months are locked.");
+        }
+    }
+
+    /**
+     * Coerce an incoming date to the first day of its month. The spec keys
+     * salary versions by month, not day — accept anything from the frontend
+     * and normalise.
+     */
+    private function coerceTargetMonth(string $raw): \Carbon\Carbon
+    {
+        return \Carbon\Carbon::parse($raw)->startOfMonth();
+    }
+
+    /**
+     * Recompute the Employee's denormalized "current" salary values from
+     * the most-recent salary-history row whose target_month is on or
+     * before today. Updates basic_salary + allowance only; the model save
+     * hook re-derives monthly_salary + cost_per_hour from those.
+     */
+    private function syncEmployeeCurrentSalary(Employee $employee): void
+    {
+        $current = $employee->salaryHistory()
+            ->where('target_month', '<=', now()->startOfDay())
+            ->orderByDesc('target_month')
+            ->first();
+
+        if (! $current) {
+            return;
+        }
+
+        $employee->update([
+            'basic_salary' => $current->basic_salary,
+            'allowance'    => $current->allowance,
+        ]);
     }
 
     // ── Capacity Roles ──────────────────────────────────────────────────────
