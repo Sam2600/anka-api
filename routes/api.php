@@ -137,6 +137,8 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         Route::post('/deals/{deal}/estimation-versions/ai-draft', [EstimationVersionController::class, 'aiDraft']);
         Route::post('/deals/{deal}/estimation-versions/ai-delta', [EstimationVersionController::class, 'aiDelta']);
         Route::post('/estimation-versions/{id}/restore', [EstimationVersionController::class, 'restore']);
+        // Spec ④.G — email the estimate XLSX to the customer (manual confirm).
+        Route::post('/estimation-versions/{id}/send', [EstimationVersionController::class, 'sendXlsx']);
     });
 
     // Contracts (created only via win_deal; no store route)
