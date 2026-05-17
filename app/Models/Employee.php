@@ -24,6 +24,12 @@ class Employee extends Model
         'capacity_role',
         'capacity_role_id',
         'rank_id',
+        'basic_salary',
+        'allowance',
+        // monthly_salary is kept fillable for backfill / seeder convenience,
+        // but it's always overwritten in the saving() hook below so
+        // monthly_salary === basic_salary + allowance is an invariant. Don't
+        // rely on direct writes — set basic_salary + allowance instead.
         'monthly_salary',
         'workable_hours',
         'status',
@@ -31,14 +37,28 @@ class Employee extends Model
 
     protected $casts = [
         'id'             => 'string',
+        'basic_salary'   => 'float',
+        'allowance'      => 'float',
         'monthly_salary' => 'float',
         'workable_hours' => 'integer',
         'cost_per_hour'  => 'float',
     ];
 
+    /**
+     * Maintain two invariants on every save:
+     *   1. monthly_salary = basic_salary + allowance — soft-cutover total
+     *      kept in sync with the new structural fields so legacy readers
+     *      (estimation, profit calc, AI team builder, forecast) keep
+     *      working unchanged. Mirrors the spec's ①.2 split.
+     *   2. cost_per_hour = monthly_salary / workable_hours — already a
+     *      Postgres GENERATED column; SQLite (tests) gets the same value
+     *      computed in PHP since it doesn't support generated columns.
+     */
     protected static function booted()
     {
         static::saving(function ($model) {
+            $model->monthly_salary = ((float) $model->basic_salary) + ((float) $model->allowance);
+
             if (DB::getDriverName() !== 'pgsql') {
                 if ($model->workable_hours > 0) {
                     $model->cost_per_hour = $model->monthly_salary / $model->workable_hours;

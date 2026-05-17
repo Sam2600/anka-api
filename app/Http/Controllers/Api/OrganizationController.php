@@ -176,7 +176,10 @@ class OrganizationController extends Controller
                 Rule::exists('ranks', 'id')
                     ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
             ],
-            'monthly_salary' => 'required|numeric|min:0',
+            // Spec ①.2 — salary captured as Basic + Allowance. monthly_salary
+            // is derived (basic + allowance) and not accepted from clients.
+            'basic_salary'   => 'required|numeric|min:0',
+            'allowance'      => 'sometimes|numeric|min:0',
             'workable_hours' => 'required|integer|min:1|max:744',
             'status'         => 'required|in:Active,On Leave,Terminated',
             'email'          => 'required|email|max:255|unique:users,email',
@@ -190,8 +193,13 @@ class OrganizationController extends Controller
             $employee = new Employee($request->only([
                 'name', 'role', 'role_name', 'department_id', 'job_role_id',
                 'capacity_role', 'capacity_role_id', 'rank_id',
-                'monthly_salary', 'workable_hours', 'status',
+                'basic_salary', 'allowance', 'workable_hours', 'status',
             ]));
+            // allowance is optional in the request — default to 0 when omitted
+            // so the model save hook computes monthly_salary correctly.
+            if (! $request->has('allowance')) {
+                $employee->allowance = 0;
+            }
             if ($request->filled('id')) {
                 $employee->id = $request->input('id');
             }
@@ -248,7 +256,9 @@ class OrganizationController extends Controller
                 Rule::exists('ranks', 'id')
                     ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
             ],
-            'monthly_salary' => 'sometimes|required|numeric|min:0',
+            // Spec ①.2 — salary edited as Basic + Allowance.
+            'basic_salary'   => 'sometimes|required|numeric|min:0',
+            'allowance'      => 'sometimes|numeric|min:0',
             'workable_hours' => 'sometimes|required|integer|min:1|max:744',
             'status'         => 'sometimes|required|in:Active,On Leave,Terminated',
             'email'          => [
@@ -265,7 +275,7 @@ class OrganizationController extends Controller
             $employee->update($request->only([
                 'name', 'role', 'role_name', 'department_id', 'job_role_id',
                 'capacity_role', 'capacity_role_id', 'rank_id',
-                'monthly_salary', 'workable_hours', 'status',
+                'basic_salary', 'allowance', 'workable_hours', 'status',
             ]));
 
             if ($request->has('skills')) {

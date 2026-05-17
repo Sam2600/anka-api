@@ -393,7 +393,11 @@ class YangonWorksSeeder extends Seeder
                 'capacity_role' => $row['capacity'],
                 'capacity_role_id' => $capacityRoles[$row['capacity']]->id,
                 'rank_id' => $ranks[$row['rank']]->id,
-                'monthly_salary' => $row['salary'],
+                // Spec ①.2 — Basic + Allowance. Seed treats $row['salary'] as
+                // basic with no allowance; the model save hook derives
+                // monthly_salary = basic + allowance for legacy readers.
+                'basic_salary' => $row['salary'],
+                'allowance' => 0,
                 'workable_hours' => $row['hours'],
                 'status' => 'Active',
             ]);

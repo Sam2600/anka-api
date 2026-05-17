@@ -294,7 +294,12 @@ class DatabaseSeeder extends Seeder
                 'capacity_role' => $row['capacity'],
                 'capacity_role_id' => $capacityRoles[$row['capacity']]->id,
                 'rank_id' => $ranks[$rankCode]->id,
-                'monthly_salary' => $row['salary'],
+                // Spec ①.2 — salary structurally split. Seed data only tracks
+                // the total per employee; treat it all as basic_salary with
+                // allowance=0. The model save hook then derives monthly_salary
+                // = basic + allowance, so legacy readers still see $row['salary'].
+                'basic_salary' => $row['salary'],
+                'allowance' => 0,
                 'workable_hours' => $row['hours'],
                 'status' => $row['status'] ?? 'Active',
             ]);
