@@ -18,6 +18,7 @@ use App\Http\Controllers\Api\PhaseProgressLogController;
 use App\Http\Controllers\Api\ProjectController;
 use App\Http\Controllers\Api\ScheduleTrackingController;
 use App\Http\Controllers\Api\RankController;
+use App\Http\Controllers\Api\TenantAppRoleController;
 use App\Http\Controllers\Api\TenantController;
 use App\Http\Controllers\Api\TimeEntryController;
 use Illuminate\Support\Facades\Route;
@@ -220,6 +221,18 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     // Multipart logo upload + remove. Used by the Organization → Company tab.
     Route::post('/tenant/logo', [TenantController::class, 'uploadLogo']);
     Route::delete('/tenant/logo', [TenantController::class, 'deleteLogo']);
+
+    // Tenant-managed app roles + admin-editable permissions. List/catalog
+    // are readable by anyone in the tenant (sidebar + role pickers); writes
+    // require manage_tenant. The permission catalog itself is code-defined
+    // in App\Support\PermissionCatalog — admins compose, they don't invent.
+    Route::get('/tenant/app-roles',          [TenantAppRoleController::class, 'index']);
+    Route::get('/tenant/permission-catalog', [TenantAppRoleController::class, 'catalog']);
+    Route::middleware('permission:manage_tenant')->group(function () {
+        Route::post('/tenant/app-roles',              [TenantAppRoleController::class, 'store']);
+        Route::patch('/tenant/app-roles/{appRoleId}', [TenantAppRoleController::class, 'update']);
+        Route::delete('/tenant/app-roles/{appRoleId}', [TenantAppRoleController::class, 'destroy']);
+    });
 
     // Milestones
     Route::apiResource('milestones', MilestoneController::class);
