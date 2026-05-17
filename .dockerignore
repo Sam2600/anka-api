@@ -15,9 +15,11 @@ storage/app/private/projects
 storage/app/private/deals
 storage/app/public/*.xlsx
 storage/logs/*.log
-storage/framework/cache/data
-storage/framework/sessions
-storage/framework/views
+# NOTE: do NOT exclude storage/framework/{cache/data,sessions,views} themselves
+# — Laravel needs those directories to exist at boot ("Please provide a valid
+# cache path"). The .gitignore stubs inside them are how the empty dirs survive
+# git; excluding the whole paths here would strip those stubs too.
+# Only exclude actual cached/generated content under bootstrap/cache:
 bootstrap/cache/*.php
 public/hot
 public/storage
