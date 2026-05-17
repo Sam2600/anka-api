@@ -8,6 +8,7 @@ use App\Http\Resources\RoleResource;
 use App\Http\Resources\EmployeeResource;
 use App\Http\Resources\GlobalOverheadResource;
 use App\Http\Resources\CompanySettingResource;
+use App\Http\Resources\InitialBudgetResource;
 use App\Http\Resources\SkillResource;
 use App\Http\Resources\CapacityRoleResource;
 use App\Models\Department;
@@ -15,6 +16,7 @@ use App\Models\Role;
 use App\Models\Employee;
 use App\Models\GlobalOverhead;
 use App\Models\CompanySetting;
+use App\Models\InitialBudget;
 use App\Models\Skill;
 use App\Models\CapacityRole;
 use App\Models\EmployeeSkill;
@@ -470,6 +472,69 @@ class OrganizationController extends Controller
         }
 
         return new CompanySettingResource($settings);
+    }
+
+    // ── Initial Budgets (year-scoped target profit, process ①.3) ─────────────
+    //
+    // Replaces the legacy `company_settings.annual_initial_budget` singleton
+    // (still readable for backward compat during the soft cutover). One row
+    // per (tenant, fiscal_year); the Forecast page (process ⑧) fetches the
+    // year matching the displayed months.
+
+    public function indexInitialBudgets()
+    {
+        return InitialBudgetResource::collection(
+            InitialBudget::orderBy('fiscal_year', 'desc')->get()
+        );
+    }
+
+    /**
+     * Upsert by fiscal_year — the natural key is (tenant_id, fiscal_year),
+     * so we route on the year rather than the row id. Lets the frontend
+     * say "set the 2027 budget to X" without first looking up the row.
+     */
+    public function upsertInitialBudget(Request $request, int $fiscalYear)
+    {
+        $request->validate([
+            'amount' => 'required|numeric|min:0',
+        ]);
+
+        if ($fiscalYear < 2000 || $fiscalYear > 2100) {
+            return response()->json([
+                'message' => 'fiscal_year must be between 2000 and 2100.',
+            ], Response::HTTP_UNPROCESSABLE_ENTITY);
+        }
+
+        $tenantId = app('tenant_id');
+        $user = $request->user();
+
+        $budget = InitialBudget::where('tenant_id', $tenantId)
+            ->where('fiscal_year', $fiscalYear)
+            ->first();
+
+        if ($budget) {
+            $budget->update(['amount' => $request->input('amount')]);
+        } else {
+            $budget = InitialBudget::create([
+                'tenant_id' => $tenantId,
+                'fiscal_year' => $fiscalYear,
+                'amount' => $request->input('amount'),
+                'created_by_user_id' => $user?->id,
+            ]);
+        }
+
+        return new InitialBudgetResource($budget->fresh());
+    }
+
+    public function destroyInitialBudget(int $fiscalYear)
+    {
+        $tenantId = app('tenant_id');
+
+        InitialBudget::where('tenant_id', $tenantId)
+            ->where('fiscal_year', $fiscalYear)
+            ->delete();
+
+        return response()->noContent();
     }
 
     // ── Capacity Roles ──────────────────────────────────────────────────────

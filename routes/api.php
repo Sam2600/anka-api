@@ -181,6 +181,15 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::get('/company-settings', [OrganizationController::class, 'getSettings']);
     Route::put('/company-settings', [OrganizationController::class, 'upsertSettings']);
 
+    // Initial Budgets — year-scoped target profit, replaces the singleton
+    // company_settings.annual_initial_budget. Routed on fiscal_year so the
+    // frontend can upsert without first looking up the row id.
+    Route::get('/initial-budgets', [OrganizationController::class, 'indexInitialBudgets']);
+    Route::put('/initial-budgets/{fiscal_year}', [OrganizationController::class, 'upsertInitialBudget'])
+        ->whereNumber('fiscal_year');
+    Route::delete('/initial-budgets/{fiscal_year}', [OrganizationController::class, 'destroyInitialBudget'])
+        ->whereNumber('fiscal_year');
+
     // Capacity Roles
     Route::get('/capacity-roles', [OrganizationController::class, 'indexCapacityRoles']);
     Route::post('/capacity-roles', [OrganizationController::class, 'storeCapacityRole']);

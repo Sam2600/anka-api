@@ -16,6 +16,7 @@ use App\Models\EmployeeSkill;
 use App\Models\EstimationResource;
 use App\Models\EstimationVersion;
 use App\Models\GlobalOverhead;
+use App\Models\InitialBudget;
 use App\Models\Invoice;
 use App\Models\Milestone;
 use App\Models\Project;
@@ -80,6 +81,7 @@ class DatabaseSeeder extends Seeder
             'roles',
             'departments',
             'global_overheads',
+            'initial_budgets',
             'company_settings',
             'tenants',
         ] as $table) {
@@ -364,18 +366,29 @@ class DatabaseSeeder extends Seeder
 
     private function createCompanySettings(Tenant $tenant, array $settings): void
     {
+        $annualBudget = $settings['annual_initial_budget'] ?? 1_000_000_000;
+
         CompanySetting::create([
             'id' => $tenant->id,
             'tenant_id' => $tenant->id,
             'overhead_percentage' => $settings['overhead_percentage'],
             'buffer_percentage' => $settings['buffer_percentage'],
             'yearly_fixed_cost' => $settings['yearly_fixed_cost'],
-            'annual_initial_budget' => $settings['annual_initial_budget'] ?? 1_000_000_000,
+            // Legacy column kept during soft cutover to initial_budgets table.
+            // Phase 2 drops this column once everything reads from the new model.
+            'annual_initial_budget' => $annualBudget,
             'employer_tax_percentage' => $settings['employer_tax_percentage'],
             'benefits_percentage' => $settings['benefits_percentage'],
             'cost_to_bill_ratio' => $settings['cost_to_bill_ratio'],
             'default_monthly_capacity_hours' => 160,
             'fallback_hourly_cost' => $settings['fallback_hourly_cost'],
+        ]);
+
+        // Year-scoped budget (process ①.3). Forecast page reads this.
+        InitialBudget::create([
+            'tenant_id' => $tenant->id,
+            'fiscal_year' => (int) date('Y'),
+            'amount' => $annualBudget,
         ]);
     }
 

@@ -12,6 +12,7 @@ use App\Models\DealOverhead;
 use App\Models\Department;
 use App\Models\Employee;
 use App\Models\EmployeeSkill;
+use App\Models\InitialBudget;
 use App\Models\EstimationResource;
 use App\Models\EstimationVersion;
 use App\Models\Invoice;
@@ -124,6 +125,7 @@ class YangonWorksSeeder extends Seeder
             'roles',
             'departments',
             'global_overheads',
+            'initial_budgets',
             'company_settings',
         ] as $table) {
             if (DB::getSchemaBuilder()->hasTable($table)) {
@@ -488,12 +490,23 @@ class YangonWorksSeeder extends Seeder
             'overhead_percentage' => 18,
             'buffer_percentage' => 10,
             'yearly_fixed_cost' => 240_000_000,
+            // Legacy column kept during the soft cutover to year-scoped budgets
+            // (initial_budgets table). New code reads from InitialBudget below;
+            // this stays for backward-compat until phase 2 drops the column.
             'annual_initial_budget' => 1_500_000_000,
             'employer_tax_percentage' => 5,
             'benefits_percentage' => 8,
             'cost_to_bill_ratio' => 0.40,
             'default_monthly_capacity_hours' => 160,
             'fallback_hourly_cost' => 4000,
+        ]);
+
+        // Year-scoped budget (process ①.3). Forecast reads this for the
+        // current fiscal year's profit target.
+        InitialBudget::create([
+            'tenant_id' => $tenant->id,
+            'fiscal_year' => (int) date('Y'),
+            'amount' => 1_500_000_000,
         ]);
     }
 
