@@ -21,6 +21,7 @@ class ScheduleTrackingController extends Controller
      */
     public function index(Request $request, Project $project)
     {
+        $request->validate(['as_of' => 'sometimes|date']);
         $tenantId = app('tenant_id');
         $project->load('contract.deal');
 
@@ -30,8 +31,18 @@ class ScheduleTrackingController extends Controller
         $asOf        = $request->filled('as_of') ? Carbon::parse($request->input('as_of')) : Carbon::today();
         $calc        = new VarianceCalculator($calendar, $asOf);
 
+        // Filter progressLogs by log_date <= asOf so a simulated past date
+        // doesn't see future-dated logs in cumulative sums. Without this filter,
+        // VarianceCalculator's $logs->sum('progress_hours') aggregates every
+        // log ever recorded on the phase, contaminating historical variance.
+        $asOfDateStr = $asOf->toDateString();
         $query = ProjectTaskPhaseAssignment::query()
-            ->with(['taskAssignment', 'assignee.rank', 'progressLogs.employee'])
+            ->with([
+                'taskAssignment',
+                'assignee.rank',
+                'progressLogs' => fn ($q) => $q->whereDate('log_date', '<=', $asOfDateStr),
+                'progressLogs.employee',
+            ])
             ->whereHas('taskAssignment', fn ($q) => $q->where('project_id', $project->id));
 
         $this->applyFilters($query, $request);
@@ -105,6 +116,7 @@ class ScheduleTrackingController extends Controller
      */
     public function summary(Request $request, Project $project)
     {
+        $request->validate(['as_of' => 'sometimes|date']);
         $tenantId = app('tenant_id');
         $project->load('contract.deal');
 
@@ -114,7 +126,10 @@ class ScheduleTrackingController extends Controller
         $asOf        = $request->filled('as_of') ? Carbon::parse($request->input('as_of')) : Carbon::today();
         $calc        = new VarianceCalculator($calendar, $asOf);
 
-        $phases = ProjectTaskPhaseAssignment::with('progressLogs')
+        $asOfDateStr = $asOf->toDateString();
+        $phases = ProjectTaskPhaseAssignment::with([
+            'progressLogs' => fn ($q) => $q->whereDate('log_date', '<=', $asOfDateStr),
+        ])
             ->whereHas('taskAssignment', fn ($q) => $q->where('project_id', $project->id))
             ->get();
 
@@ -161,6 +176,7 @@ class ScheduleTrackingController extends Controller
      */
     public function byAssignee(Request $request, Project $project)
     {
+        $request->validate(['as_of' => 'sometimes|date']);
         $tenantId = app('tenant_id');
         $project->load('contract.deal');
 
@@ -170,7 +186,11 @@ class ScheduleTrackingController extends Controller
         $asOf        = $request->filled('as_of') ? Carbon::parse($request->input('as_of')) : Carbon::today();
         $calc        = new VarianceCalculator($calendar, $asOf);
 
-        $phases = ProjectTaskPhaseAssignment::with(['progressLogs', 'assignee'])
+        $asOfDateStr = $asOf->toDateString();
+        $phases = ProjectTaskPhaseAssignment::with([
+            'progressLogs' => fn ($q) => $q->whereDate('log_date', '<=', $asOfDateStr),
+            'assignee',
+        ])
             ->whereHas('taskAssignment', fn ($q) => $q->where('project_id', $project->id))
             ->whereNotNull('assignee_id')
             ->get()
@@ -219,6 +239,7 @@ class ScheduleTrackingController extends Controller
      */
     public function lateHoursByDay(Request $request, Project $project)
     {
+        $request->validate(['as_of' => 'sometimes|date']);
         $asOf = $request->filled('as_of') ? Carbon::parse($request->input('as_of')) : null;
 
         $logs = PhaseProgressLog::with(['employee.rank', 'employee.capacityRole'])

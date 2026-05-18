@@ -1007,7 +1007,16 @@ PROMPT;
             ], 422);
         }
 
-        $resolvedPath = app(EstimateFileResolver::class)->latestForProject($project);
+        $resolver = app(EstimateFileResolver::class);
+        $resolvedPath = $resolver->latestForProject($project)
+            ?? $resolver->tenantFallbackPath($project->tenant_id);
+
+        if ($resolvedPath === null) {
+            return response()->json([
+                'error' => 'No estimation file available for this project. Upload an estimation (xlsx) before assigning tasks.',
+            ], 422);
+        }
+
         $sheet = $this->readEstimateSheet($resolvedPath);
         $tasks = $sheet['tasks'];
         $activePhases = $sheet['active_phases'];
@@ -1770,20 +1779,19 @@ PROMPT;
 
     private function readEstimateSheet(?string $absolutePath = null): array
     {
-        if ($absolutePath !== null) {
-            $path = $absolutePath;
-        } else {
-            $path = public_path('storage/Estimate.xlsx');
-            Log::warning('readEstimateSheet: falling back to legacy hardcoded Estimate.xlsx path; no estimation_versions.xlsx_path resolved for this project', [
-                'fallback_path' => $path,
+        // Caller is required to resolve the path (project-specific xlsx_path
+        // or the per-tenant fallback). The legacy `public/storage/Estimate.xlsx`
+        // shared-file fallback was removed because it read the same file
+        // across every tenant — a cross-tenant data leak risk.
+        if ($absolutePath === null || ! file_exists($absolutePath)) {
+            Log::error('Estimate xlsx not resolved or missing on disk', [
+                'absolute_path' => $absolutePath,
             ]);
-        }
-
-        if (! file_exists($path)) {
-            Log::error('Estimate xlsx not found at '.$path);
 
             return ['tasks' => [], 'active_phases' => [], 'raw_markdown' => ''];
         }
+
+        $path = $absolutePath;
 
         $spreadsheet = IOFactory::load($path);
         if (! in_array('Web_Manhour_Detail', $spreadsheet->getSheetNames(), true)) {
@@ -2413,9 +2421,18 @@ PROMPT;
         // task-detection and AI assignment). Phases with zero hours across
         // all tasks are filtered out upstream in readEstimateSheet().
         try {
-            $resolvedPath = $project
-                ? app(EstimateFileResolver::class)->latestForProject($project)
-                : null;
+            $resolvedPath = null;
+            if ($project) {
+                $resolver = app(EstimateFileResolver::class);
+                $resolvedPath = $resolver->latestForProject($project)
+                    ?? $resolver->tenantFallbackPath($project->tenant_id);
+            }
+            // No file resolved → fall through to DB-only phases, no warning.
+            // The /assign-tasks endpoint enforces the 422; the read endpoint
+            // can legitimately render before any AI run.
+            if ($resolvedPath === null) {
+                return array_values($byCode);
+            }
             $declared = $this->readEstimateSheet($resolvedPath)['active_phases'] ?? [];
             foreach ($declared as $p) {
                 if (! isset($byCode[$p['code']])) {
