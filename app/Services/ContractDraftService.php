@@ -971,7 +971,17 @@ TXT;
 
     /**
      * Invoke the win_deal() Postgres stored procedure, or the PHP fallback
-     * for SQLite tests.
+     * for SQLite tests + local dev. The fallback mirrors the proc's four
+     * side effects so test/local behavior matches production:
+     *
+     *   1. Create Contract row (idempotent — uses existing if present)
+     *   2. Create Project row keyed off the Contract (idempotent)
+     *   3. Copy deal_hard_assignments into project_team_assignments (idempotent)
+     *   4. Flip the Deal to status='won' / win_probability=100 / won_at=now()
+     *
+     * Prior versions of this fallback only did (1) + (4), so SQLite tests +
+     * local dev that walked a deal through markSigned ended up with a Contract
+     * but no Project and no team — diverging from production. Audit item A21.
      */
     private function fireWinDeal(Deal $deal): void
     {
@@ -980,17 +990,22 @@ TXT;
             return;
         }
 
-        // SQLite test fallback — minimal version that flips the deal to won
-        // and creates a Contract + Project so downstream lookups don't 404.
         DB::transaction(function () use ($deal) {
-            $existingContract = \App\Models\Contract::where('deal_id', $deal->id)->first();
-            if (! $existingContract) {
-                $lastNumber = (int) (\App\Models\Contract::withoutGlobalScope('tenant')->max(
-                    DB::raw('CAST(SUBSTR(contract_number, 5) AS INTEGER)')
-                ) ?? 0);
+            // 1. Contract — create if missing.
+            $contract = \App\Models\Contract::where('deal_id', $deal->id)->first();
+            if (! $contract) {
+                // Restrict the auto-numbering scan to the "CON-NNNN" format
+                // we generate here. Tenant-prefixed contract numbers from
+                // seeders (e.g. YWK-CON-2026-001) don't match and so don't
+                // pollute the counter. SQLite has no REGEXP by default —
+                // LIKE is enough since the SUBSTR cast returns 0 for any
+                // remaining edge cases.
+                $lastNumber = (int) (\App\Models\Contract::withoutGlobalScope('tenant')
+                    ->where('contract_number', 'LIKE', 'CON-%')
+                    ->max(DB::raw('CAST(SUBSTR(contract_number, 5) AS INTEGER)')) ?? 0);
                 $nextNumber = 'CON-'.str_pad((string) ($lastNumber + 1), 4, '0', STR_PAD_LEFT);
 
-                \App\Models\Contract::create([
+                $contract = \App\Models\Contract::create([
                     'id' => Str::orderedUuid(),
                     'tenant_id' => $deal->tenant_id,
                     'deal_id' => $deal->id,
@@ -1004,6 +1019,46 @@ TXT;
                 ]);
             }
 
+            // 2. Project — create if missing. project_number mirrors the
+            // contract_number prefix so a YWK-CON-2026-001 contract gets a
+            // YWK-PRJ-2026-001 project, and a PHP-fallback CON-0001 contract
+            // gets a PRJ-0001 project.
+            $project = \App\Models\Project::where('contract_id', $contract->id)->first();
+            if (! $project) {
+                $projectNumber = str_replace('CON-', 'PRJ-', $contract->contract_number);
+
+                $project = \App\Models\Project::create([
+                    'id' => Str::orderedUuid(),
+                    'tenant_id' => $deal->tenant_id,
+                    'contract_id' => $contract->id,
+                    'project_number' => $projectNumber,
+                    'name' => $deal->name ?? '',
+                    'client' => $deal->client ?? '',
+                    'budget_hours' => (float) ($deal->workload_hours ?? 0),
+                    'consumed_hours' => 0,
+                    'status' => 'Not Started',
+                    'start_date' => now()->toDateString(),
+                ]);
+            }
+
+            // 3. Copy deal_hard_assignments into project_team_assignments.
+            // Idempotent guard: skip if any team rows already exist for the
+            // project (re-running markSigned shouldn't duplicate).
+            $hasTeam = \App\Models\ProjectTeamAssignment::where('project_id', $project->id)->exists();
+            if (! $hasTeam) {
+                foreach ($deal->hard_assignments as $assignment) {
+                    \App\Models\ProjectTeamAssignment::create([
+                        'id' => Str::orderedUuid(),
+                        'tenant_id' => $deal->tenant_id,
+                        'project_id' => $project->id,
+                        'employee_id' => $assignment->employee_id,
+                        'allocated_hours' => $assignment->allocated_hours,
+                        'assignment_source' => 'deal_transfer',
+                    ]);
+                }
+            }
+
+            // 4. Flip the deal to won.
             $deal->update([
                 'status' => 'won',
                 'win_probability' => Deal::RANK_PROBABILITY['S'],
