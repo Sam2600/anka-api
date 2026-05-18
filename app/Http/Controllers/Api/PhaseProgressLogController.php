@@ -176,6 +176,47 @@ class PhaseProgressLogController extends Controller
         ];
     }
 
+    /**
+     * Tenant-wide aggregate for the Time Tracking page KPI card.
+     * Returns SUM(progress_hours), SUM(used_hours), COUNT(*) filtered by an
+     * optional date range and phase status.
+     */
+    public function summary(Request $request)
+    {
+        $validated = $request->validate([
+            'date_from'    => 'sometimes|date',
+            'date_to'      => 'sometimes|date',
+            'phase_status' => 'sometimes|string|in:未着手,進行中,完了',
+        ]);
+
+        $query = PhaseProgressLog::query();
+
+        if (! empty($validated['date_from'])) {
+            $query->whereDate('log_date', '>=', $validated['date_from']);
+        }
+        if (! empty($validated['date_to'])) {
+            $query->whereDate('log_date', '<=', $validated['date_to']);
+        }
+        if (! empty($validated['phase_status'])) {
+            $query->whereHas('phaseAssignment', function ($q) use ($validated) {
+                $q->where('status', $validated['phase_status']);
+            });
+        }
+
+        $row = $query->selectRaw('COALESCE(SUM(progress_hours), 0) AS total_progress_hours')
+            ->selectRaw('COALESCE(SUM(used_hours), 0) AS total_used_hours')
+            ->selectRaw('COUNT(*) AS log_count')
+            ->first();
+
+        return [
+            'data' => [
+                'total_progress_hours' => (float) ($row->total_progress_hours ?? 0),
+                'total_used_hours'     => (float) ($row->total_used_hours ?? 0),
+                'log_count'            => (int)   ($row->log_count ?? 0),
+            ],
+        ];
+    }
+
     private function resolveEmployeeId(Request $request, ?ProjectTaskPhaseAssignment $phase = null): ?string
     {
         $user = $request->user();

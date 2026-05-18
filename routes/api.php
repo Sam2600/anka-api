@@ -277,6 +277,9 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     // See SCHEDULE_TRACKING_IMPLEMENTATION_PLAN.md for the design.
     Route::get   ('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'index']);
     Route::post  ('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'store']);
+    // Literal /summary must precede the /{log} wildcard or Laravel binds
+    // "summary" as the log id and answers 405 instead of dispatching here.
+    Route::get   ('/phase-progress-logs/summary',                        [PhaseProgressLogController::class, 'summary']);
     Route::patch ('/phase-progress-logs/{log}',                          [PhaseProgressLogController::class, 'update']);
     Route::delete('/phase-progress-logs/{log}',                          [PhaseProgressLogController::class, 'destroy']);
     Route::post  ('/phase-progress-logs/{log}/unlock',                   [PhaseProgressLogController::class, 'unlock']);
