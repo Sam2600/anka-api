@@ -327,7 +327,11 @@ class TenantController extends Controller
             'name' => "{$user->first_name} {$user->last_name}",
             'role_name' => $roleName,
             'status' => 'Active',
-            'monthly_salary' => 0,
+            // Spec ①.2 — Basic + Allowance instead of single monthly_salary.
+            // Admin-created stub starts at zero; the org admin can fill in
+            // the actual figures via the Employee edit form afterwards.
+            'basic_salary' => 0,
+            'allowance' => 0,
             'workable_hours' => 160,
         ]);
     }

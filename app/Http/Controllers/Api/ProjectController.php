@@ -32,8 +32,17 @@ class ProjectController extends Controller
 
     public function update(Request $request, Project $project)
     {
+        // `status` is intentionally NOT accepted from clients. It's computed
+        // from time-tracking data via Project::maybeAutoTransition (real-time
+        // on time-entry approval + nightly cron). Silently dropping the field
+        // would mask client bugs, so reject the request with a clear message.
+        if ($request->has('status')) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'status' => ['Project status is computed automatically from time-tracking data and cannot be set manually.'],
+            ]);
+        }
+
         $request->validate([
-            'status'             => 'sometimes|in:Not Started,On Track,At Risk,Over Budget,Completed',
             'name'               => 'sometimes|required|string|max:255',
             'budget_hours'       => 'sometimes|numeric|min:0',
             'end_date'           => 'sometimes|nullable|date',
@@ -43,7 +52,7 @@ class ProjectController extends Controller
         ]);
 
         $project->update($request->only([
-            'status', 'name', 'budget_hours', 'end_date', 'consumed_hours',
+            'name', 'budget_hours', 'end_date', 'consumed_hours',
             'kickoff_date', 'project_manager_id',
         ]));
         return new ProjectResource($project->fresh());

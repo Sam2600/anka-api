@@ -2,10 +2,8 @@
 
 namespace App\Services\Scheduling;
 
-use App\Models\PhaseProgressLog;
 use App\Models\ProjectTaskPhaseAssignment;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Collection;
 
 /**
  * Computes schedule variance for a phase from its daily progress logs.
@@ -19,7 +17,8 @@ use Illuminate\Support\Collection;
 class VarianceCalculator
 {
     public const HEALTH_ON_TRACK_PCT = 0.03;   // ≤ 3 %
-    public const HEALTH_AT_RISK_PCT  = 0.10;   // ≤ 10 %
+
+    public const HEALTH_AT_RISK_PCT = 0.10;   // ≤ 10 %
 
     /** Matches AiAutoAssignController::WORKDAY_HOURS. */
     private const WORKDAY_HOURS = 8.0;
@@ -53,7 +52,7 @@ class VarianceCalculator
             : $phase->progressLogs()->get();
 
         $cumulativeProgress = (float) $logs->sum('progress_hours');
-        $cumulativeUsed     = (float) $logs->sum('used_hours');
+        $cumulativeUsed = (float) $logs->sum('used_hours');
         // Per-log effort overage summed across days. Used by Finance to
         // estimate overtime cost (sum × cost_per_hour). Differs from
         // `over_delivered_hours` (which compares delivery vs estimate)
@@ -61,17 +60,23 @@ class VarianceCalculator
         $lateHoursPerLogSum = (float) $logs->sum(function ($log) {
             return max(0.0, (float) $log->used_hours - (float) $log->progress_hours);
         });
-        $estimated          = (float) $phase->estimated_hours;
-        $isCompleted        = $phase->actual_end !== null;
-        $expectedProgress   = $this->expectedProgressForPhase($phase, $estimated);
+        $estimated = (float) $phase->estimated_hours;
+        $isCompleted = $phase->actual_end !== null;
+        $expectedProgress = $this->expectedProgressForPhase($phase, $estimated);
 
         // Lateness measured against earned plan; clamp negative late at 0.
-        $lateHours       = max(0.0, $expectedProgress - $cumulativeProgress);
-        $overDelivered   = max(0.0, $cumulativeProgress - $estimated);
+        $lateHours = max(0.0, $expectedProgress - $cumulativeProgress);
+        $overDelivered = max(0.0, $cumulativeProgress - $estimated);
 
         if ($isCompleted) {
-            // Earliness / over-budget measured against effort.
-            $varianceHours = $estimated - $cumulativeUsed; // +early, 0 on-time, -over-budget
+            // Schedule-only signal. Compare DELIVERY against ESTIMATE; ignore
+            // clock time (late_hours already tracks `used − progress` for that).
+            // Previously this branch was `estimated − used`, which mixed budget
+            // overrun into schedule variance and double-counted late_hours in
+            // the project rollup. A phase that delivered exactly to estimate
+            // but burned extra clock time is on schedule (variance = 0),
+            // over-budget on hours (late_hours > 0) — two distinct signals.
+            $varianceHours = $cumulativeProgress - $estimated; // +over, 0 on-target, -short
             if ($varianceHours > 0) {
                 $state = 'completed_early';
             } elseif ($varianceHours < 0) {
@@ -81,7 +86,7 @@ class VarianceCalculator
             }
         } elseif ($cumulativeProgress <= 0 && $expectedProgress <= 0) {
             $varianceHours = 0.0;
-            $state         = 'pending';
+            $state = 'pending';
         } else {
             // In-flight: negative variance when behind earned plan, positive when ahead.
             $varianceHours = $cumulativeProgress - $expectedProgress;
@@ -96,14 +101,14 @@ class VarianceCalculator
 
         return [
             'cumulative_progress_hours' => round($cumulativeProgress, 2),
-            'cumulative_used_hours'     => round($cumulativeUsed, 2),
-            'expected_progress_hours'   => round($expectedProgress, 2),
-            'variance_hours'            => round($varianceHours, 2),
-            'over_delivered_hours'      => round($overDelivered, 2),
-            'late_hours'                => round($lateHoursPerLogSum, 2),
-            'schedule_state'            => $state,
-            'health'                    => $this->classifyHealth($varianceHours, $estimated, $state),
-            'is_completed'              => $isCompleted,
+            'cumulative_used_hours' => round($cumulativeUsed, 2),
+            'expected_progress_hours' => round($expectedProgress, 2),
+            'variance_hours' => round($varianceHours, 2),
+            'over_delivered_hours' => round($overDelivered, 2),
+            'late_hours' => round($lateHoursPerLogSum, 2),
+            'schedule_state' => $state,
+            'health' => $this->classifyHealth($varianceHours, $estimated, $state),
+            'is_completed' => $isCompleted,
         ];
     }
 
@@ -113,28 +118,28 @@ class VarianceCalculator
      * Used for per-task, per-assignee, and per-project rollups. Pass the
      * `forPhase()` outputs and the corresponding `estimated_hours` per phase.
      *
-     * @param array<int, array{variance_hours: float, cumulative_progress_hours: float, cumulative_used_hours: float, expected_progress_hours: float, over_delivered_hours: float, is_completed: bool}> $perPhase
-     * @param array<int, float> $estimatedPerPhase
+     * @param  array<int, array{variance_hours: float, cumulative_progress_hours: float, cumulative_used_hours: float, expected_progress_hours: float, over_delivered_hours: float, is_completed: bool}>  $perPhase
+     * @param  array<int, float>  $estimatedPerPhase
      */
     public function rollup(array $perPhase, array $estimatedPerPhase): array
     {
-        $totalEstimated   = array_sum($estimatedPerPhase);
-        $totalProgress    = 0.0;
-        $totalUsed        = 0.0;
-        $totalExpected    = 0.0;
-        $totalVariance    = 0.0;
-        $totalOver        = 0.0;
-        $totalLate        = 0.0;
-        $completed        = 0;
-        $count            = count($perPhase);
+        $totalEstimated = array_sum($estimatedPerPhase);
+        $totalProgress = 0.0;
+        $totalUsed = 0.0;
+        $totalExpected = 0.0;
+        $totalVariance = 0.0;
+        $totalOver = 0.0;
+        $totalLate = 0.0;
+        $completed = 0;
+        $count = count($perPhase);
 
         foreach ($perPhase as $row) {
             $totalProgress += $row['cumulative_progress_hours'];
-            $totalUsed     += $row['cumulative_used_hours'];
+            $totalUsed += $row['cumulative_used_hours'];
             $totalExpected += $row['expected_progress_hours'];
             $totalVariance += $row['variance_hours'];
-            $totalOver     += $row['over_delivered_hours'];
-            $totalLate     += $row['late_hours'] ?? 0.0;
+            $totalOver += $row['over_delivered_hours'];
+            $totalLate += $row['late_hours'] ?? 0.0;
             if (! empty($row['is_completed'])) {
                 $completed++;
             }
@@ -142,15 +147,15 @@ class VarianceCalculator
 
         return [
             'total_estimated_hours' => round($totalEstimated, 2),
-            'total_progress_hours'  => round($totalProgress, 2),
-            'total_used_hours'      => round($totalUsed, 2),
+            'total_progress_hours' => round($totalProgress, 2),
+            'total_used_hours' => round($totalUsed, 2),
             'expected_progress_hours' => round($totalExpected, 2),
-            'variance_hours'        => round($totalVariance, 2),
-            'over_delivered_hours'  => round($totalOver, 2),
-            'late_hours'            => round($totalLate, 2),
-            'phase_count'           => $count,
-            'completed_count'       => $completed,
-            'health'                => $this->classifyHealth($totalVariance, $totalEstimated, $completed === $count && $count > 0 ? 'completed_on_time' : 'on_track'),
+            'variance_hours' => round($totalVariance, 2),
+            'over_delivered_hours' => round($totalOver, 2),
+            'late_hours' => round($totalLate, 2),
+            'phase_count' => $count,
+            'completed_count' => $completed,
+            'health' => $this->classifyHealth($totalVariance, $totalEstimated, $completed === $count && $count > 0 ? 'completed_on_time' : 'on_track'),
         ];
     }
 
@@ -179,7 +184,7 @@ class VarianceCalculator
         }
 
         $start = Carbon::parse($phase->planned_start)->startOfDay();
-        $end   = Carbon::parse($phase->planned_end)->startOfDay();
+        $end = Carbon::parse($phase->planned_end)->startOfDay();
 
         if ($this->asOf->lessThan($start)) {
             return 0.0;
@@ -223,6 +228,61 @@ class VarianceCalculator
         // is the edge where asOf == planned_end's working day predecessor and
         // calendar arithmetic landed us here).
         return $estimated;
+    }
+
+    /**
+     * Today-only slice of a phase's planned delivery — the hours that should
+     * be done on `$this->asOf` specifically, not cumulative since start. Used
+     * by the project rollup card to answer "what's on the plan for TODAY?"
+     *
+     * Logic mirrors expectedProgressForPhase(): single-day phases contribute
+     * their full estimate on that day; multi-day phases contribute
+     * start_day_hours on day 1, 8h on middle days, and the remainder on the
+     * last day. Non-working days (weekends + holidays) contribute 0 because
+     * working-day arithmetic skips them.
+     */
+    public function todayExpectedForPhase(ProjectTaskPhaseAssignment $phase): float
+    {
+        $estimated = (float) $phase->estimated_hours;
+        if ($estimated <= 0 || $phase->planned_start === null || $phase->planned_end === null) {
+            return 0.0;
+        }
+
+        $start = Carbon::parse($phase->planned_start)->startOfDay();
+        $end = Carbon::parse($phase->planned_end)->startOfDay();
+
+        if ($this->asOf->lessThan($start) || $this->asOf->greaterThan($end)) {
+            return 0.0;
+        }
+        if (! $this->calendar->isWorkingDay($this->asOf)) {
+            return 0.0;
+        }
+
+        $totalWorkingDays = $this->countWorkingDays($start, $end);
+        if ($totalWorkingDays <= 1) {
+            // Single-day phase: the whole estimate lands on this day.
+            return $estimated;
+        }
+
+        $startDayHours = $phase->start_day_hours !== null
+            ? (float) $phase->start_day_hours
+            : min($estimated, self::WORKDAY_HOURS);
+
+        $elapsedWorkingDays = $this->countWorkingDays($start, $this->asOf);
+        if ($elapsedWorkingDays <= 0) {
+            return 0.0;
+        }
+        if ($elapsedWorkingDays === 1) {
+            return $startDayHours; // day 1
+        }
+        if ($elapsedWorkingDays >= $totalWorkingDays) {
+            // Last day = estimate − start_day − (middle × 8h).
+            $middle = max(0, $totalWorkingDays - 2);
+
+            return max(0.0, $estimated - $startDayHours - $middle * self::WORKDAY_HOURS);
+        }
+
+        return self::WORKDAY_HOURS; // middle day
     }
 
     private function countWorkingDays(Carbon $from, Carbon $to): int

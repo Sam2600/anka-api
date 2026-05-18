@@ -44,7 +44,7 @@ class WorkingDayCalendar
     public function blockEmployeeRange(string $employeeId, Carbon $start, Carbon $end): void
     {
         $cursor = $start->copy()->startOfDay();
-        $stop   = $end->copy()->startOfDay();
+        $stop = $end->copy()->startOfDay();
         while ($cursor->lessThanOrEqualTo($stop)) {
             $this->employeeBlocked[$employeeId][$cursor->toDateString()] = true;
             $cursor->addDay();
@@ -89,6 +89,24 @@ class WorkingDayCalendar
     }
 
     /**
+     * Walks backward to the previous working day. If $date is already a
+     * working day it's returned unchanged. Counterpart to nextWorkingDay()
+     * used by the AI schedule snap fixer when planned_end lands on a weekend.
+     */
+    public function previousWorkingDay(Carbon $date, ?string $employeeId = null): Carbon
+    {
+        $cursor = $date->copy()->startOfDay();
+        for ($i = 0; $i < 400; $i++) {
+            if ($this->isWorkingDay($cursor, $employeeId)) {
+                return $cursor;
+            }
+            $cursor->subDay();
+        }
+
+        return $cursor;
+    }
+
+    /**
      * Advances $from by $n working days. If $from itself is non-working, the
      * count starts from the next working day. Returns $from unchanged when
      * $n is 0 and $from is already a working day.
@@ -120,8 +138,8 @@ class WorkingDayCalendar
             return 0;
         }
         $cursor = $start->copy()->startOfDay();
-        $stop   = $end->copy()->startOfDay();
-        $count  = 0;
+        $stop = $end->copy()->startOfDay();
+        $count = 0;
         while ($cursor->lessThanOrEqualTo($stop)) {
             if ($this->isWorkingDay($cursor, $employeeId)) {
                 $count++;
