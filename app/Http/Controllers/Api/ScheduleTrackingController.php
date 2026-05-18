@@ -120,13 +120,31 @@ class ScheduleTrackingController extends Controller
 
         $perPhase = [];
         $estimatedPerPhase = [];
+        $todayExpectedHours = 0.0;
         foreach ($phases as $phase) {
             $perPhase[]          = $calc->forPhase($phase);
             $estimatedPerPhase[] = (float) $phase->estimated_hours;
+            $todayExpectedHours += $calc->todayExpectedForPhase($phase);
         }
 
+        // Today-only slice — sum of progress_hours from logs dated `as_of`.
+        // Distinct from `total_progress_hours` (cumulative across all days) and
+        // `expected_progress_hours` (cumulative plan-to-date). Answers "what
+        // got delivered today?" for the project rollup card.
+        $todayProgressHours = (float) PhaseProgressLog::query()
+            ->whereHas(
+                'phaseAssignment.taskAssignment',
+                fn ($q) => $q->where('project_id', $project->id)
+            )
+            ->whereDate('log_date', $asOf->toDateString())
+            ->sum('progress_hours');
+
+        $rollup = $calc->rollup($perPhase, $estimatedPerPhase);
+        $rollup['today_progress_hours'] = round($todayProgressHours, 2);
+        $rollup['today_expected_hours'] = round($todayExpectedHours, 2);
+
         return [
-            'data' => $calc->rollup($perPhase, $estimatedPerPhase),
+            'data' => $rollup,
             'meta' => [
                 'project_id'   => $project->id,
                 'project_name' => $project->name,
