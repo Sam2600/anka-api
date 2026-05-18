@@ -1847,13 +1847,22 @@ PROMPT;
             ];
         }
 
-        // Surface every phase declared in the file's row 3 — even ones with
-        // zero hours across all tasks. PMs want to see "this phase exists in
-        // the template but has no work yet" rather than have it silently
-        // hidden. Per-task phase rows (above) are still filtered to non-zero
-        // entries so empty cells render as blank in the UI grid.
+        // Drop phases that have zero estimated hours across every task. The
+        // template can declare a phase that nothing actually uses; surfacing it
+        // clutters the schedule with title-only rows that never get assigned.
+        $phasesWithHours = [];
+        foreach ($tasks as $task) {
+            foreach ($task['phases'] as $p) {
+                if (($p['hours'] ?? 0) > 0) {
+                    $phasesWithHours[$p['code']] = true;
+                }
+            }
+        }
         $activePhases = [];
         foreach ($phaseDefs as $phase) {
+            if (! isset($phasesWithHours[$phase['code']])) {
+                continue;
+            }
             $activePhases[] = [
                 'code' => $phase['code'],
                 'name' => $phase['name'],
@@ -2370,10 +2379,10 @@ PROMPT;
             }
         }
 
-        // Also surface phases that are declared in the Estimate.xlsx's row 3
-        // headers but have zero hours across all tasks (so no DB rows exist
-        // for them). PMs want to see "this phase exists in the template but
-        // has no work yet" rather than have the column silently hidden.
+        // Also surface phases that are declared in the Estimate.xlsx with
+        // actual hours but have no persisted assignments yet (e.g. between
+        // task-detection and AI assignment). Phases with zero hours across
+        // all tasks are filtered out upstream in readEstimateSheet().
         try {
             $resolvedPath = $project
                 ? app(EstimateFileResolver::class)->latestForProject($project)
