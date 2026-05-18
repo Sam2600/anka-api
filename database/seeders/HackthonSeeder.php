@@ -808,9 +808,12 @@ class HackthonSeeder extends Seeder
         $totalWorkdays = max(1, (int) round($months * 20));
 
         $phaseTemplate = [
-            ['code' => 'DESIGN', 'name' => '設計 (Design)',          'pct' => 0.10],
-            ['code' => 'IMPL',   'name' => '実装 (Implementation)',  'pct' => 0.70],
-            ['code' => 'TEST',   'name' => 'テスト (Testing)',       'pct' => 0.20],
+            // phase_code must match Postgres CHECK constraint check_ptpa_phase_code:
+            // development | requirement | system_arch | basic_doc | detail_doc |
+            // unit_test | combine_test | system_test
+            ['code' => 'basic_doc',   'name' => '設計 (Design)',          'pct' => 0.10],
+            ['code' => 'development', 'name' => '実装 (Implementation)',  'pct' => 0.70],
+            ['code' => 'system_test', 'name' => 'テスト (Testing)',       'pct' => 0.20],
         ];
 
         foreach ($team as $idx => $member) {
@@ -856,7 +859,8 @@ class HackthonSeeder extends Seeder
                     'estimated_hours' => $phaseHours,
                     'start_day_hours' => 8,
                     'assignee_id' => $employee->id,
-                    'assignment_source' => 'seed',
+                    // CHECK constraint check_ptpa_source allows only 'ai' | 'manual'.
+                    'assignment_source' => 'manual',
                     'planned_start' => $phaseStart->toDateString(),
                     'planned_end' => $phaseEnd->toDateString(),
                     'actual_start' => $actualStart?->toDateString(),
