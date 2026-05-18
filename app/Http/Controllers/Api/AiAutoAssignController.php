@@ -7,12 +7,15 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\ProjectTaskAssignmentResource;
 use App\Http\Resources\ProjectTaskPhaseAssignmentResource;
 use App\Http\Resources\ProjectTeamAssignmentResource;
+use App\Models\DealGhostRole;
 use App\Models\Employee;
 use App\Models\Holiday;
 use App\Models\Project;
 use App\Models\ProjectTaskAssignment;
 use App\Models\ProjectTaskPhaseAssignment;
 use App\Models\ProjectTeamAssignment;
+use App\Services\Ai\AiTeamPlanValidator;
+use App\Services\EmployeeCapacityService;
 use App\Services\EstimateFileResolver;
 use App\Services\Scheduling\AiSchedulePayload;
 use App\Services\Scheduling\AiScheduleValidator;
@@ -359,59 +362,83 @@ PROMPT;
             ], 422);
         }
 
-        // 1. "Kept" — everyone already on the team. Never re-pick or evict.
-        $kept = $project->teamAssignments->map(fn ($a) => [
-            'employee_id'     => $a->employee_id,
-            'name'            => optional($a->employee)->name,
-            'rank_code'       => optional(optional($a->employee)->rank)->code,
-            'rank_name'       => optional(optional($a->employee)->rank)->name,
-            'capacity_role'   => optional(optional($a->employee)->capacityRole)->code ?? $a->employee?->capacity_role,
-            'allocated_hours' => (float) $a->allocated_hours,
-        ])->values()->all();
-
-        $keptEmployeeIds = array_map(fn ($k) => $k['employee_id'], $kept);
-
-        // 2. "Roles to fill" — ghost_role quantities minus matching kept counts
-        //    (matching = same capacity_role bucket as the ghost role's role_type).
-        $keptCountByRoleType = [];
-        foreach ($kept as $k) {
-            $bucket = $k['capacity_role'] ?? 'unknown';
-            $keptCountByRoleType[$bucket] = ($keptCountByRoleType[$bucket] ?? 0) + 1;
+        // 1. Expand ghost_roles into a flat list of slots (one per quantity)
+        //    keyed by role_type so we can pair kept members one-by-one. Each
+        //    slot carries the months from its source ghost_role row, which
+        //    becomes the basis for engagement-window capacity.
+        $slotsByRoleType = [];
+        foreach ($ghostRoles as $gr) {
+            $bucket = $gr->role_type;
+            for ($i = 0; $i < (int) $gr->quantity; $i++) {
+                $slotsByRoleType[$bucket][] = [
+                    'ghost_role_id' => $gr->id,
+                    'role_type' => $gr->role_type,
+                    'rank_id' => $gr->rank_id,
+                    'rank_code' => optional($gr->rank)->code,
+                    'rank_name' => optional($gr->rank)->name,
+                    'min_salary' => (float) $gr->min_monthly_salary,
+                    'avg_salary' => (float) $gr->avg_monthly_salary,
+                    'max_salary' => (float) $gr->max_monthly_salary,
+                    'months' => (int) $gr->months,
+                ];
+            }
         }
 
-        $rolesToFill = [];
-        foreach ($ghostRoles as $gr) {
-            $remaining = max(0, (int) $gr->quantity - (int) ($keptCountByRoleType[$gr->role_type] ?? 0));
-            // We decrement the bucket so successive ghost roles of the same
-            // role_type don't all subtract the same kept employees.
-            $consumed = min((int) $gr->quantity, (int) ($keptCountByRoleType[$gr->role_type] ?? 0));
-            $keptCountByRoleType[$gr->role_type] = max(0, ($keptCountByRoleType[$gr->role_type] ?? 0) - $consumed);
+        // 2. "Kept" — everyone already on the team. We pair each one with the
+        //    next available slot of matching role_type and recompute their
+        //    allocated_hours = workable_hours × slot.months. If no slot matches
+        //    (e.g. designer kept on a project whose ghost roles drop design),
+        //    allocated_hours = 0 and we flag unmatched=true.
+        $kept = [];
+        foreach ($project->teamAssignments as $a) {
+            $emp = $a->employee;
+            $capRole = optional(optional($emp)->capacityRole)->code ?? optional($emp)->capacity_role;
 
-            if ($remaining === 0) {
-                continue;
+            $matched = null;
+            if ($capRole && ! empty($slotsByRoleType[$capRole])) {
+                $matched = array_shift($slotsByRoleType[$capRole]);
             }
 
-            $rolesToFill[] = [
-                'ghost_role_id'   => $gr->id,
-                'role_type'       => $gr->role_type,
-                'rank_id'         => $gr->rank_id,
-                'rank_code'       => optional($gr->rank)->code,
-                'rank_name'       => optional($gr->rank)->name,
-                'quantity_needed' => $remaining,
-                'min_salary'      => (float) $gr->min_monthly_salary,
-                'avg_salary'      => (float) $gr->avg_monthly_salary,
-                'max_salary'      => (float) $gr->max_monthly_salary,
-                'months'          => (int) $gr->months,
+            $months = (int) ($matched['months'] ?? 0);
+            $kept[] = [
+                'employee_id' => $a->employee_id,
+                'name' => optional($emp)->name,
+                'rank_code' => optional(optional($emp)->rank)->code,
+                'rank_name' => optional(optional($emp)->rank)->name,
+                'capacity_role' => $capRole,
+                'ghost_role_id' => $matched['ghost_role_id'] ?? null,
+                'months' => $months,
+                'allocated_hours' => $emp && $months > 0
+                    ? $this->engagementAvailableHours($emp, $project, $months)
+                    : 0.0,
+                'unmatched' => $matched === null,
             ];
         }
 
+        $keptEmployeeIds = array_map(fn ($k) => $k['employee_id'], $kept);
+
+        // 3. "Roles to fill" — whatever slots remain unpaired after kept members
+        //    consumed their share. Group remaining slots by ghost_role_id so the
+        //    AI sees one row per ghost-role with quantity_needed = leftover count.
+        $remainingByGr = [];
+        foreach ($slotsByRoleType as $slots) {
+            foreach ($slots as $slot) {
+                $key = $slot['ghost_role_id'];
+                if (! isset($remainingByGr[$key])) {
+                    $remainingByGr[$key] = $slot + ['quantity_needed' => 0];
+                }
+                $remainingByGr[$key]['quantity_needed']++;
+            }
+        }
+        $rolesToFill = array_values($remainingByGr);
+
         if (empty($rolesToFill)) {
             return response()->json([
-                'kept'          => $kept,
-                'proposed'      => [],
-                'unfilled'      => [],
+                'kept' => $kept,
+                'proposed' => [],
+                'unfilled' => [],
                 'roles_to_fill' => [],
-                'message'       => 'Planned team structure is already fully staffed; nothing to add.',
+                'message' => 'Planned team structure is already fully staffed; nothing to add.',
             ]);
         }
 
@@ -425,11 +452,11 @@ PROMPT;
             ->get();
 
         $employeePool = $eligible->map(fn ($emp) => [
-            'employee_id'    => $emp->id,
-            'name'           => $emp->name,
-            'rank_code'      => optional($emp->rank)->code,
-            'rank_name'      => optional($emp->rank)->name,
-            'capacity_role'  => optional($emp->capacityRole)->code ?? $emp->capacity_role,
+            'employee_id' => $emp->id,
+            'name' => $emp->name,
+            'rank_code' => optional($emp->rank)->code,
+            'rank_name' => optional($emp->rank)->name,
+            'capacity_role' => optional($emp->capacityRole)->code ?? $emp->capacity_role,
             'workable_hours' => (float) $emp->workable_hours,
             'monthly_salary' => (float) $emp->monthly_salary,
         ])->values()->all();
@@ -440,7 +467,7 @@ PROMPT;
             $ghostRoleIndex[$r['ghost_role_id']] = [
                 'role_type' => $r['role_type'],
                 'rank_code' => $r['rank_code'],
-                'quantity'  => $r['quantity_needed'],
+                'quantity' => $r['quantity_needed'],
             ];
         }
         $employeeIndex = [];
@@ -475,10 +502,12 @@ PROMPT;
         }
 
         // 6. Decorate picks with display fields the frontend needs.
+        //    allocated_hours = workable_hours × ghost_role.months — this is the
+        //    member's true engagement-window capacity, not a 1-month default.
         $picksDecorated = [];
         foreach ($result['picks'] as $pick) {
             $emp = $employeeIndex[$pick['employee_id']] ?? null;
-            $gr  = null;
+            $gr = null;
             foreach ($rolesToFill as $r) {
                 if ($r['ghost_role_id'] === $pick['ghost_role_id']) {
                     $gr = $r;
@@ -488,68 +517,238 @@ PROMPT;
             if (! $emp || ! $gr) {
                 continue;
             }
+            $months = max(1, (int) ($gr['months'] ?? 1));
+            $workable = (float) ($emp['workable_hours'] ?? 160);
+            $allocatedHours = (float) ($pick['allocated_hours'] ?? ($workable * $months));
+
             $picksDecorated[] = [
-                'ghost_role_id'   => $pick['ghost_role_id'],
-                'employee_id'     => $pick['employee_id'],
-                'employee_name'   => $emp['name'],
-                'employee_rank'   => $emp['rank_code'],
-                'capacity_role'   => $emp['capacity_role'],
-                'role_type'       => $gr['role_type'],
-                'needed_rank'     => $gr['rank_code'],
-                'allocated_hours' => (float) ($pick['allocated_hours'] ?? $emp['workable_hours']),
-                'rank_match'      => $pick['rank_match'] ?? 'exact',
+                'ghost_role_id' => $pick['ghost_role_id'],
+                'employee_id' => $pick['employee_id'],
+                'employee_name' => $emp['name'],
+                'employee_rank' => $emp['rank_code'],
+                'capacity_role' => $emp['capacity_role'],
+                'role_type' => $gr['role_type'],
+                'needed_rank' => $gr['rank_code'],
+                'months' => $months,
+                'monthly_salary' => (float) ($emp['monthly_salary'] ?? 0),
+                'allocated_hours' => $allocatedHours,
+                'rank_match' => $pick['rank_match'] ?? 'exact',
             ];
         }
 
+        $capacityCheck = $this->buildCapacityCheck($kept, $picksDecorated, $ghostRoles, $employeeIndex);
+
         return response()->json([
-            'kept'          => $kept,
-            'proposed'      => $picksDecorated,
-            'unfilled'      => $result['unfilled'] ?? [],
+            'kept' => $kept,
+            'proposed' => $picksDecorated,
+            'unfilled' => $result['unfilled'] ?? [],
             'roles_to_fill' => $rolesToFill,
+            'capacity_check' => $capacityCheck,
         ]);
     }
 
     /**
-     * Confirm a previously-previewed team plan. Inserts only NEW rows into
-     * project_team_assignments; existing rows are untouched.
+     * Per-role capacity arithmetic surfaced in the plan-team response so the
+     * TeamPreviewDialog can warn about over/under-staffed pools and budget
+     * overruns before the user confirms.
+     *
+     * For each role_type in deal_ghost_roles, compute:
+     *   - hours_budget = sum(quantity × months × 160) across ghost-role rows
+     *   - hours_supply = sum(workable_hours × months) for kept + proposed picks in this role_type
+     *     (kept members don't have a months attribute; we assume project timeline for them)
+     *   - cost_budget  = sum(avg_monthly_salary × months × quantity) — the role's estimated cost envelope
+     *   - cost_used    = sum(employee.monthly_salary × months) for proposed picks (kept members excluded —
+     *     their salary may have changed since they were originally assigned, and we don't reassign cost retroactively)
+     */
+    private function buildCapacityCheck(array $kept, array $proposed, $ghostRoles, array $employeeIndex): array
+    {
+        $byRole = [];
+
+        foreach ($ghostRoles as $gr) {
+            $type = $gr->role_type;
+            $months = max(1, (int) $gr->months);
+            $qty = max(1, (int) $gr->quantity);
+            $avgSalary = (float) $gr->avg_monthly_salary;
+
+            if (! isset($byRole[$type])) {
+                $byRole[$type] = [
+                    'role_type' => $type,
+                    'quantity' => 0,
+                    'months_max' => 0,
+                    'hours_budget' => 0.0,
+                    'cost_budget' => 0.0,
+                    'hours_supply' => 0.0,
+                    'cost_used' => 0.0,
+                ];
+            }
+            $byRole[$type]['quantity'] += $qty;
+            $byRole[$type]['months_max'] = max($byRole[$type]['months_max'], $months);
+            $byRole[$type]['hours_budget'] += $qty * $months * 160;
+            $byRole[$type]['cost_budget'] += $qty * $months * $avgSalary;
+        }
+
+        foreach ($proposed as $p) {
+            $type = $p['role_type'] ?? null;
+            if (! $type || ! isset($byRole[$type])) {
+                continue;
+            }
+            $months = max(1, (int) ($p['months'] ?? 1));
+            $byRole[$type]['hours_supply'] += (float) $p['allocated_hours'];
+            $byRole[$type]['cost_used'] += (float) $p['monthly_salary'] * $months;
+        }
+
+        foreach ($kept as $k) {
+            $type = $k['capacity_role'] ?? null;
+            if (! $type || ! isset($byRole[$type])) {
+                continue;
+            }
+            $byRole[$type]['hours_supply'] += (float) $k['allocated_hours'];
+        }
+
+        foreach ($byRole as &$row) {
+            $row['hours_shortfall'] = max(0.0, $row['hours_budget'] - $row['hours_supply']);
+            $row['cost_overrun'] = max(0.0, $row['cost_used'] - $row['cost_budget']);
+        }
+
+        return array_values($byRole);
+    }
+
+    /**
+     * Confirm a previously-previewed team plan. Inserts new picks AND
+     * rewrites existing kept rows' allocated_hours so the whole team reflects
+     * the current ghost-role months × workable_hours math. Existing rows are
+     * never deleted; only allocated_hours is updated.
      */
     public function confirmTeamPlan(Request $request, Project $project)
     {
         $tenantId = app('tenant_id');
 
         $validated = $request->validate([
-            'picks'                       => 'required|array|min:1',
-            'picks.*.employee_id'         => 'required|uuid|exists:employees,id',
-            'picks.*.allocated_hours'     => 'nullable|numeric|min:0|max:10000',
+            'picks' => 'present|array',
+            'picks.*.employee_id' => 'required|uuid|exists:employees,id',
+            'picks.*.ghost_role_id' => 'nullable|uuid|exists:deal_ghost_roles,id',
+            'picks.*.allocated_hours' => 'nullable|numeric|min:0|max:10000',
         ]);
 
-        $existingIds = ProjectTeamAssignment::where('project_id', $project->id)
-            ->pluck('employee_id')
+        // Build the same ghost-role slot list plan-team used, so kept members
+        // pair against ghost roles the same way at confirm time as at preview
+        // time. Proposed picks consume their own ghost_role_id directly; only
+        // the kept rows need slot pairing.
+        $project->load(['contract.deal.ghost_roles', 'teamAssignments.employee']);
+        $deal = $project->contract?->deal;
+        $ghostRoles = $deal?->ghost_roles ?? collect();
+
+        $slotsByRoleType = [];
+        foreach ($ghostRoles as $gr) {
+            for ($i = 0; $i < (int) $gr->quantity; $i++) {
+                $slotsByRoleType[$gr->role_type][] = [
+                    'ghost_role_id' => $gr->id,
+                    'months' => (int) $gr->months,
+                ];
+            }
+        }
+
+        // Subtract slots already claimed by proposed picks (the user's confirmed
+        // additions) BEFORE pairing kept members. This matches plan-team order:
+        // proposed picks land in specific ghost_role_ids, kept members consume
+        // whatever's left.
+        foreach ($validated['picks'] as $pick) {
+            if (! isset($pick['ghost_role_id'])) {
+                continue;
+            }
+            foreach ($slotsByRoleType as $rt => &$slots) {
+                foreach ($slots as $idx => $slot) {
+                    if ($slot['ghost_role_id'] === $pick['ghost_role_id']) {
+                        array_splice($slots, $idx, 1);
+                        break 2;
+                    }
+                }
+            }
+            unset($slots);
+        }
+
+        $existing = $project->teamAssignments->keyBy('employee_id');
+        $existingSet = $existing->keys()->flip()->all();
+
+        $employeeIds = collect($validated['picks'])->pluck('employee_id')->unique()->all();
+        $employeesById = Employee::whereIn('id', $employeeIds)->get()->keyBy('id');
+
+        $ghostRoleIds = collect($validated['picks'])
+            ->pluck('ghost_role_id')
+            ->filter()
+            ->unique()
             ->all();
-        $existingSet = array_flip($existingIds);
+        $ghostRoleMonths = empty($ghostRoleIds)
+            ? collect()
+            : DealGhostRole::whereIn('id', $ghostRoleIds)
+                ->pluck('months', 'id');
 
         $inserted = 0;
-        DB::transaction(function () use ($validated, $project, $tenantId, $existingSet, &$inserted) {
+        $updated = 0;
+
+        DB::transaction(function () use (
+            $validated, $project, $tenantId, $existingSet, $existing,
+            $ghostRoleMonths, $employeesById, $slotsByRoleType,
+            &$inserted, &$updated,
+        ) {
+            // 1. Insert new picks.
             foreach ($validated['picks'] as $pick) {
                 if (isset($existingSet[$pick['employee_id']])) {
                     continue;
                 }
+
+                $months = isset($pick['ghost_role_id'])
+                    ? (int) ($ghostRoleMonths[$pick['ghost_role_id']] ?? 0)
+                    : 0;
+                $emp = $employeesById[$pick['employee_id']] ?? null;
+                $allocated = $pick['allocated_hours']
+                    ?? ($emp && $months > 0
+                        ? $this->engagementAvailableHours($emp, $project, $months)
+                        : ($emp ? (float) ($emp->workable_hours ?? 160) : 160));
+
                 ProjectTeamAssignment::create([
-                    'tenant_id'         => $tenantId,
-                    'project_id'        => $project->id,
-                    'employee_id'       => $pick['employee_id'],
-                    'allocated_hours'   => $pick['allocated_hours'] ?? 160,
+                    'tenant_id' => $tenantId,
+                    'project_id' => $project->id,
+                    'employee_id' => $pick['employee_id'],
+                    'allocated_hours' => $allocated,
                     'assignment_source' => 'ai',
                 ]);
                 $inserted++;
+            }
+
+            // 2. Rewrite kept rows' allocated_hours by re-pairing each kept
+            //    member with the next available ghost-role slot of matching
+            //    role_type. Unmatched kept members get allocated_hours = 0 —
+            //    they're still on the team but the team structure says no
+            //    work for their role on this project.
+            foreach ($existing as $employeeId => $row) {
+                $emp = $row->employee;
+                $capRole = optional(optional($emp)->capacityRole)->code ?? optional($emp)->capacity_role;
+
+                $matched = null;
+                if ($capRole && ! empty($slotsByRoleType[$capRole])) {
+                    $matched = array_shift($slotsByRoleType[$capRole]);
+                }
+
+                $months = (int) ($matched['months'] ?? 0);
+                $newAllocated = $emp && $months > 0
+                    ? $this->engagementAvailableHours($emp, $project, $months)
+                    : 0.0;
+
+                if (abs((float) $row->allocated_hours - $newAllocated) > 0.001) {
+                    $row->allocated_hours = $newAllocated;
+                    $row->save();
+                    $updated++;
+                }
             }
         });
 
         $project->load('teamAssignments.employee');
 
         return response()->json([
-            'data'     => ProjectTeamAssignmentResource::collection($project->teamAssignments),
+            'data' => ProjectTeamAssignmentResource::collection($project->teamAssignments),
             'inserted' => $inserted,
+            'updated' => $updated,
         ]);
     }
 
@@ -571,25 +770,25 @@ PROMPT;
         $prompt = $this->buildPlanTeamPrompt($project, $deal, $kept, $rolesToFill, $employeePool);
 
         $baseUrl = rtrim(config('services.anthropic.base_url') ?: 'https://api.anthropic.com', '/');
-        $model   = config('services.anthropic.model') ?: 'claude-3-5-sonnet-latest';
+        $model = config('services.anthropic.model') ?: 'claude-3-5-sonnet-latest';
 
         $messages = [
             ['role' => 'user', 'content' => $prompt],
         ];
 
         $retries = (int) (config('services.anthropic.schedule_retries') ?? 1);
-        $validator = new \App\Services\Ai\AiTeamPlanValidator();
+        $validator = new AiTeamPlanValidator;
 
         for ($attempt = 0; $attempt <= $retries; $attempt++) {
             $response = Http::withHeaders([
-                'x-api-key'         => $apiKey,
+                'x-api-key' => $apiKey,
                 'anthropic-version' => '2023-06-01',
-                'content-type'      => 'application/json',
+                'content-type' => 'application/json',
             ])->post($baseUrl.'/v1/messages', [
-                'model'      => $model,
+                'model' => $model,
                 'max_tokens' => 4096,
-                'system'     => 'You are an HR staffing assistant. Pick the best employees to fill each planned role on this project. Return ONLY a JSON object matching the schema in the user message — no markdown, no commentary.',
-                'messages'   => $messages,
+                'system' => 'You are an HR staffing assistant. Pick the best employees to fill each planned role on this project. Return ONLY a JSON object matching the schema in the user message — no markdown, no commentary.',
+                'messages' => $messages,
             ]);
 
             $body = $response->json();
@@ -611,7 +810,7 @@ PROMPT;
                 continue;
             }
 
-            $picks    = $parsed['picks'];
+            $picks = $parsed['picks'];
             $unfilled = $parsed['unfilled'] ?? [];
 
             $violations = $validator->validate($picks, $unfilled, $ghostRoleIndex, $employeeIndex, $keptEmployeeIds);
@@ -676,7 +875,7 @@ PROMPT;
                 if ($bestIdx === null) {
                     $unfilled[] = [
                         'ghost_role_id' => $role['ghost_role_id'],
-                        'reason'        => 'no available employee with capacity_role='.$role['role_type'],
+                        'reason' => 'no available employee with capacity_role='.$role['role_type'],
                     ];
                     break;
                 }
@@ -692,11 +891,12 @@ PROMPT;
                     $rankMatch = 'upgrade';
                 }
 
+                $months = max(1, (int) ($role['months'] ?? 1));
                 $picks[] = [
-                    'ghost_role_id'   => $role['ghost_role_id'],
-                    'employee_id'     => $picked['employee_id'],
-                    'allocated_hours' => $picked['workable_hours'],
-                    'rank_match'      => $rankMatch,
+                    'ghost_role_id' => $role['ghost_role_id'],
+                    'employee_id' => $picked['employee_id'],
+                    'allocated_hours' => (float) $picked['workable_hours'] * $months,
+                    'rank_match' => $rankMatch,
                 ];
             }
         }
@@ -707,17 +907,17 @@ PROMPT;
     private function buildPlanTeamPrompt(Project $project, $deal, array $kept, array $rolesToFill, array $employeePool): string
     {
         $projectMeta = [
-            'name'             => $project->name,
-            'client'           => $project->client,
-            'start_date'       => optional($project->start_date)->toDateString(),
-            'end_date'         => optional($project->end_date)->toDateString(),
-            'timeline_months'  => (int) ($deal?->timeline_months ?? 0),
+            'name' => $project->name,
+            'client' => $project->client,
+            'start_date' => optional($project->start_date)->toDateString(),
+            'end_date' => optional($project->end_date)->toDateString(),
+            'timeline_months' => (int) ($deal?->timeline_months ?? 0),
         ];
 
-        $keptJson         = $this->jsonEncode($kept);
-        $rolesJson        = $this->jsonEncode($rolesToFill);
-        $employeesJson    = $this->jsonEncode($employeePool);
-        $projectMetaJson  = $this->jsonEncode($projectMeta);
+        $keptJson = $this->jsonEncode($kept);
+        $rolesJson = $this->jsonEncode($rolesToFill);
+        $employeesJson = $this->jsonEncode($employeePool);
+        $projectMetaJson = $this->jsonEncode($projectMeta);
 
         return <<<PROMPT
 Pick the best employees from the available pool to fill the planned roles
@@ -744,13 +944,14 @@ SELECTION RULES
    - Missing Mid → use a Junior (mark "downgrade").
    - Missing Junior → use a Mid (mark "upgrade"); only as last resort.
 4. Never pick the same employee twice. Never pick anyone already in ALREADY-STAFFED MEMBERS.
-5. Set allocated_hours to the employee's workable_hours (full-time) unless you have a reason to reduce it.
-6. If a role still cannot be filled after applying the fallback ladder, report it in `unfilled` with a `reason` string. Do not invent UUIDs.
+5. HARD RULE — allocated_hours for each pick MUST equal the employee's workable_hours × the ghost role's months. Example: workable_hours=160 and the role's months=5 → allocated_hours=800. This is the engagement-window capacity that downstream scheduling caps against. Do not output 160 unless the role's months=1.
+6. HARD RULE — cost envelope. For each ghost role, the sum of (picked employee's monthly_salary × months) across ALL picks tagged with that ghost_role_id MUST NOT exceed (avg_salary × months × quantity_needed) from PLANNED ROLES STILL TO FILL. When you apply a "split" (1 Senior → 2 Juniors), both juniors' combined monthly cost across the same months must still fit inside that envelope. If you cannot fit, prefer a cheaper rank within the fallback ladder rather than overshooting cost.
+7. If a role still cannot be filled after applying the fallback ladder, report it in `unfilled` with a `reason` string. Do not invent UUIDs.
 
 OUTPUT — return ONLY this JSON object (no markdown fences, no commentary):
 {
   "picks": [
-    { "ghost_role_id": "uuid", "employee_id": "uuid", "allocated_hours": 160, "rank_match": "exact|downgrade|upgrade|split" }
+    { "ghost_role_id": "uuid", "employee_id": "uuid", "allocated_hours": 800, "rank_match": "exact|downgrade|upgrade|split" }
   ],
   "unfilled": [
     { "ghost_role_id": "uuid", "reason": "no junior or mid available in tenant" }
@@ -768,13 +969,13 @@ PROMPT;
     // column layouts. `development` has no row-3 header (its hours always live
     // at cols 4–5: 開発工数 + コードレビュー) and is injected separately.
     private const PHASE_CATALOG = [
-        '要件定義'     => ['code' => 'requirement',  'order' => 1, 'is_execution' => false],
+        '要件定義' => ['code' => 'requirement',  'order' => 1, 'is_execution' => false],
         '基本全体設計' => ['code' => 'system_arch',  'order' => 2, 'is_execution' => false],
-        '基本設計'     => ['code' => 'basic_doc',    'order' => 3, 'is_execution' => false],
-        '詳細設計'     => ['code' => 'detail_doc',   'order' => 4, 'is_execution' => false],
-        '単体テスト'   => ['code' => 'unit_test',    'order' => 6, 'is_execution' => true],
-        '結合テスト'   => ['code' => 'combine_test', 'order' => 7, 'is_execution' => true],
-        '総合テスト'   => ['code' => 'system_test',  'order' => 8, 'is_execution' => true],
+        '基本設計' => ['code' => 'basic_doc',    'order' => 3, 'is_execution' => false],
+        '詳細設計' => ['code' => 'detail_doc',   'order' => 4, 'is_execution' => false],
+        '単体テスト' => ['code' => 'unit_test',    'order' => 6, 'is_execution' => true],
+        '結合テスト' => ['code' => 'combine_test', 'order' => 7, 'is_execution' => true],
+        '総合テスト' => ['code' => 'system_test',  'order' => 8, 'is_execution' => true],
     ];
 
     // Row-4 column labels that mark project-wide overhead columns (Test Data,
@@ -806,7 +1007,16 @@ PROMPT;
             ], 422);
         }
 
-        $resolvedPath = app(EstimateFileResolver::class)->latestForProject($project);
+        $resolver = app(EstimateFileResolver::class);
+        $resolvedPath = $resolver->latestForProject($project)
+            ?? $resolver->tenantFallbackPath($project->tenant_id);
+
+        if ($resolvedPath === null) {
+            return response()->json([
+                'error' => 'No estimation file available for this project. Upload an estimation (xlsx) before assigning tasks.',
+            ], 422);
+        }
+
         $sheet = $this->readEstimateSheet($resolvedPath);
         $tasks = $sheet['tasks'];
         $activePhases = $sheet['active_phases'];
@@ -831,7 +1041,7 @@ PROMPT;
             ], 422);
         }
 
-        $windowStart  = Carbon::parse($project->start_date)->startOfDay();
+        $windowStart = Carbon::parse($project->start_date)->startOfDay();
         $effectiveEnd = $windowEnd->copy()->subDays(self::PROJECT_END_BUFFER_DAYS);
 
         if ($effectiveEnd->lessThanOrEqualTo($windowStart)) {
@@ -848,38 +1058,71 @@ PROMPT;
             return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $fallbackCalendar);
         }
 
-        $teamMembers = $teamAssignments->map(fn ($a) => [
-            'id'             => $a->employee_id,
-            'name'           => optional($a->employee)->name,
-            'rank_code'      => optional(optional($a->employee)->rank)->code,
-            'rank_name'      => optional(optional($a->employee)->rank)->name,
-            'capacity_role'  => optional(optional($a->employee)->capacityRole)->code
-                ?? optional($a->employee)->capacity_role,
-            'workable_hours' => optional($a->employee)->workable_hours,
-            'cost_per_hour'  => optional($a->employee)->cost_per_hour,
-        ])->values()->toArray();
+        $teamMembers = $teamAssignments->map(function ($a) {
+            $workable = (float) (optional($a->employee)->workable_hours ?? 160);
+            $allocated = (float) $a->allocated_hours;
+            $engagementMonths = $workable > 0 ? $allocated / $workable : 0;
+
+            return [
+                'id' => $a->employee_id,
+                'name' => optional($a->employee)->name,
+                'rank_code' => optional(optional($a->employee)->rank)->code,
+                'rank_name' => optional(optional($a->employee)->rank)->name,
+                'capacity_role' => optional(optional($a->employee)->capacityRole)->code
+                    ?? optional($a->employee)->capacity_role,
+                'workable_hours' => $workable,
+                'cost_per_hour' => optional($a->employee)->cost_per_hour,
+                'allocated_hours' => $allocated,
+                'engagement_months' => round($engagementMonths, 2),
+            ];
+        })->values()->toArray();
         $teamIds = $teamAssignments->pluck('employee_id')->all();
+        $allocatedHoursByAssignee = $teamAssignments
+            ->pluck('allocated_hours', 'employee_id')
+            ->map(fn ($v) => (float) $v)
+            ->all();
+        $engagementMonthsByAssignee = $teamAssignments
+            ->mapWithKeys(function ($a) {
+                $workable = (float) (optional($a->employee)->workable_hours ?? 160);
+                $months = $workable > 0 ? ((float) $a->allocated_hours) / $workable : 0;
+
+                return [$a->employee_id => $months];
+            })
+            ->all();
+        $capacityRoleByAssignee = $teamAssignments
+            ->mapWithKeys(fn ($a) => [
+                $a->employee_id => optional(optional($a->employee)->capacityRole)->code
+                    ?? optional($a->employee)->capacity_role
+                    ?? 'unknown',
+            ])
+            ->all();
 
         $dbHolidays = $this->dbHolidaysForPrompt($tenantId, $windowStart, $effectiveEnd);
         $prompt = $this->buildAssignTasksPrompt($project, $tasks, $activePhases, $teamMembers, $windowStart, $effectiveEnd, $dbHolidays, $rawSheet);
 
-        $retriesLeft  = (int) config('services.anthropic.schedule_retries', 2);
-        $maxTokens    = (int) config('services.anthropic.schedule_max_tokens', 16384);
-        $model        = config('services.anthropic.schedule_model', 'claude-3-5-sonnet-latest');
+        $retriesLeft = (int) config('services.anthropic.schedule_retries', 2);
+        $maxTokens = (int) config('services.anthropic.schedule_max_tokens', 16384);
+        $model = config('services.anthropic.schedule_model', 'claude-3-5-sonnet-latest');
+        $baseUrl = rtrim(config('services.anthropic.base_url') ?: 'https://api.anthropic.com', '/');
+        $requestTimeout = (int) (config('services.anthropic.request_timeout') ?? 120);
+        $connectTimeout = (int) (config('services.anthropic.connect_timeout') ?? 15);
         $conversation = [['role' => 'user', 'content' => $prompt]];
 
         try {
             while (true) {
                 $response = Http::withHeaders([
-                    'x-api-key'         => $apiKey,
+                    'x-api-key' => $apiKey,
                     'anthropic-version' => '2023-06-01',
-                    'content-type'      => 'application/json',
-                ])->post('https://api.anthropic.com/v1/messages', [
-                    'model'      => $model,
-                    'max_tokens' => $maxTokens,
-                    'system'     => 'You are an experienced IT delivery manager scheduling feature work across engineers. Return ONLY a JSON object matching the schema in the user message — no markdown fences, no commentary.',
-                    'messages'   => $conversation,
-                ]);
+                    'content-type' => 'application/json',
+                ])
+                    ->timeout($requestTimeout)
+                    ->connectTimeout($connectTimeout)
+                    ->post($baseUrl.'/v1/messages', [
+                        'model' => $model,
+                        'max_tokens' => $maxTokens,
+                        'system' => 'You are an experienced IT delivery manager scheduling feature work across engineers. Return ONLY a JSON object matching the schema in the user message — no markdown fences, no commentary.',
+                        'messages' => $conversation,
+                    ]);
 
                 $body = $response->json();
                 $text = trim($body['content'][0]['text'] ?? '');
@@ -888,31 +1131,135 @@ PROMPT;
                     $payload = AiSchedulePayload::fromRaw($text);
                 } catch (InvalidAiScheduleException $e) {
                     Log::error('AI Schedule: unparseable payload, falling back', [
-                        'error'   => $e->getMessage(),
+                        'error' => $e->getMessage(),
                         'preview' => substr($text, 0, 300),
+                        'http_status' => $response->status(),
+                        'api_error' => $body['error'] ?? null,
+                        'response_preview' => substr($response->body(), 0, 500),
+                        'base_url' => $baseUrl,
                     ]);
 
                     return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $fallbackCalendar);
                 }
 
-                $calendar   = $this->buildCalendarFromAi($payload, $tenantId, $windowStart, $effectiveEnd);
-                $violations = (new AiScheduleValidator)->validate($payload, $tasks, $teamIds, $calendar, $windowStart, $effectiveEnd);
+                $calendar = $this->buildCalendarFromAi($payload, $tenantId, $windowStart, $effectiveEnd);
+
+                // Surgical self-correction layer between AI and validator.
+                // Cheap, deterministic fixes for cosmetic calendar mistakes
+                // and overlap greediness that the AI tends to make on busy
+                // schedules. See docs/ai-schedule-self-correction.md.
+                $snapped = $payload->snapDatesToWorkingDays($calendar);
+                if ($snapped > 0) {
+                    Log::info('AI Schedule: snapped non-working dates to working days', ['snapped_count' => $snapped]);
+                }
+                $shifted = $payload->resolveAssigneeOverlaps($calendar, $effectiveEnd);
+                if ($shifted > 0) {
+                    Log::info('AI Schedule: resolved overlapping assignee ranges', ['shifted_count' => $shifted]);
+                }
+                $reordered = $payload->enforcePhaseOrderWithinRows($calendar, $tasks, $effectiveEnd);
+                if ($reordered > 0) {
+                    Log::info('AI Schedule: fixed phase-order within rows', ['reordered_count' => $reordered]);
+                }
+                $clamped = $payload->clampDurationOutliers($calendar, $tasks, self::WORKDAY_HOURS, AiScheduleValidator::DURATION_TOLERANCE);
+                if ($clamped > 0) {
+                    Log::info('AI Schedule: clamped duration outliers', ['clamped_count' => $clamped]);
+                }
+                $filled = $this->fillMissingAssignments(
+                    $payload, $tasks, $teamAssignments, $calendar,
+                    $windowStart, $effectiveEnd, $allocatedHoursByAssignee,
+                    $capacityRoleByAssignee,
+                );
+                if ($filled > 0) {
+                    Log::info('AI Schedule: filled missing (row, phase) pairs', ['filled_count' => $filled]);
+                }
+
+                $violations = (new AiScheduleValidator)->validate(
+                    $payload,
+                    $tasks,
+                    $teamIds,
+                    $calendar,
+                    $windowStart,
+                    $effectiveEnd,
+                    $allocatedHoursByAssignee,
+                    $engagementMonthsByAssignee,
+                    $capacityRoleByAssignee,
+                );
 
                 if (empty($violations)) {
                     return $this->persistAiAssignments($project, $tasks, $payload, $tenantId, $windowStart, $effectiveEnd, $calendar);
                 }
 
+                // Split into hard (must-retry) and soft (advisory) violations.
+                // If only soft remain, persist anyway — the schedule is honest
+                // and the warnings tell the operator the team is under-sized.
+                //
+                // double_booking is soft AFTER the overlap fixer has run:
+                // Fixer 2 already shifted every pair it could without
+                // overshooting effectiveEnd, so residuals are genuine
+                // capacity-overflow signals (team can't fit the scope in the
+                // window). Same class of "fix the team structure" finding as
+                // over_allocation and engagement_window_exceeded — not worth
+                // a fallback to demo which has its own over-cap issues.
+                $softCodes = ['over_allocation', 'engagement_window_exceeded'];
+                if ($shifted > 0) {
+                    $softCodes[] = 'double_booking';
+                }
+                if ($reordered > 0) {
+                    // Same reasoning as double_booking: the phase-order fixer
+                    // tried its best; residuals are window-bound refusals and
+                    // are honest under-capacity signals, not blockers.
+                    $softCodes[] = 'phase_order_violation';
+                }
+                $hardViolations = [];
+                $softViolations = [];
+                foreach ($violations as $v) {
+                    if (in_array($v['code'], $softCodes, true)) {
+                        $softViolations[] = $v;
+                    } else {
+                        $hardViolations[] = $v;
+                    }
+                }
+                if (empty($hardViolations)) {
+                    Log::warning('AI Schedule: persisting with soft violations', [
+                        'soft_count' => count($softViolations),
+                        'codes' => array_count_values(array_column($softViolations, 'code')),
+                    ]);
+
+                    return $this->persistAiAssignments($project, $tasks, $payload, $tenantId, $windowStart, $effectiveEnd, $calendar);
+                }
+
                 if ($retriesLeft <= 0) {
+                    // Tally violation codes so we can see at a glance whether
+                    // the AI was dropping phases (missing_assignment) or just
+                    // failing on soft caps (over_allocation / engagement_*).
+                    $codeTally = [];
+                    foreach ($violations as $v) {
+                        $codeTally[$v['code']] = ($codeTally[$v['code']] ?? 0) + 1;
+                    }
+                    $expectedAssignments = 0;
+                    foreach ($tasks as $t) {
+                        $expectedAssignments += count($t['phases']);
+                    }
                     Log::warning('AI Schedule: exhausted retries, falling back', [
                         'violation_count' => count($violations),
+                        'violations_by_code' => $codeTally,
                         'first_violation' => $violations[0]['code'] ?? null,
+                        'response_length' => strlen($text),
+                        'assignments_returned' => count($payload->assignmentsByRowPhase ?? []),
+                        'assignments_expected_pairs' => $expectedAssignments,
+                        'model' => $model,
+                        'max_tokens' => $maxTokens,
                     ]);
 
                     return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $fallbackCalendar);
                 }
 
+                // Send only hard violations back to the AI — soft ones are
+                // acceptable and don't need correction. Including them would
+                // waste tokens and possibly confuse the AI into making the
+                // hard situation worse.
                 $conversation[] = ['role' => 'assistant', 'content' => $text];
-                $conversation[] = ['role' => 'user', 'content' => $this->buildRetryPrompt($violations)];
+                $conversation[] = ['role' => 'user', 'content' => $this->buildRetryPrompt($hardViolations)];
                 $retriesLeft--;
             }
         } catch (\Exception $e) {
@@ -942,6 +1289,31 @@ PROMPT;
     }
 
     /**
+     * Holiday-aware allocated_hours for an N-month engagement that starts at
+     * the project's start_date. Falls back to the legacy `workable_hours ×
+     * months` formula when the project has no start_date (preserves behaviour
+     * for projects mid-migration). When start_date is present, sums the real
+     * available working hours across each engagement month — so months with
+     * more holidays produce a smaller cap automatically.
+     */
+    private function engagementAvailableHours(Employee $employee, Project $project, int $months): float
+    {
+        $workable = (float) ($employee->workable_hours ?? 160);
+        if ($months <= 0) {
+            return 0.0;
+        }
+        if (! $project->start_date) {
+            return $workable * $months;
+        }
+
+        $start = Carbon::parse($project->start_date)->startOfDay();
+        $end = $start->copy()->addMonths($months)->subDay();
+
+        return app(EmployeeCapacityService::class)
+            ->windowAvailableHours($employee, $start, $end);
+    }
+
+    /**
      * Snapshot of DB-stored holidays used to prime Claude — so AI knows which
      * dates are already on the books and only needs to contribute extras it
      * knows about (national holidays absent from the table, project-specific
@@ -956,8 +1328,8 @@ PROMPT;
             })
             ->get()
             ->map(fn (Holiday $h) => [
-                'date'         => $h->date?->toDateString(),
-                'name'         => $h->name,
+                'date' => $h->date?->toDateString(),
+                'name' => $h->name,
                 'is_recurring' => (bool) $h->is_recurring,
             ])
             ->values()
@@ -999,14 +1371,212 @@ PROMPT;
      * issues. Asks for the full corrected JSON in the same schema — easier for
      * AI to produce than a diff and easier for us to re-validate.
      */
+    /**
+     * Fill any (row, phase) pair the AI dropped from its response. For each
+     * missing pair: pick an eligible assignee via PHASE_CAPACITY_ROLES + cap-
+     * aware round-robin, anchor planned_start at the end of the previous
+     * phase of the same task (or project start for the first phase), compute
+     * planned_end = start + ceil(hours / WORKDAY_HOURS) working days.
+     *
+     * Mutates the payload. Returns count of filled pairs.
+     */
+    private function fillMissingAssignments(
+        AiSchedulePayload $payload,
+        array $tasks,
+        $teamAssignments,
+        WorkingDayCalendar $calendar,
+        Carbon $windowStart,
+        Carbon $effectiveEnd,
+        array $allocatedHoursByAssignee,
+        array $capacityRoleByAssignee,
+    ): int {
+        // Build cap-aware (capacity_role, rank) buckets — same shape as demo.
+        $byRoleAndRank = [];
+        foreach ($teamAssignments as $a) {
+            if ((float) $a->allocated_hours <= 0.0) {
+                continue;
+            }
+            $tier = optional(optional($a->employee)->rank)->code ?: 'Mid';
+            if (! in_array($tier, ['Junior', 'Mid', 'Senior', 'Lead'], true)) {
+                $tier = 'Lead';
+            }
+            $role = $capacityRoleByAssignee[$a->employee_id] ?? 'unknown';
+            $byRoleAndRank[$role][$tier][] = $a->employee_id;
+        }
+
+        // Pre-compute what the AI already used per member so cap math is
+        // accurate when we choose the fill assignee.
+        $usedHoursByEmp = [];
+        $hoursByPair = [];
+        foreach ($tasks as $t) {
+            foreach ($t['phases'] as $p) {
+                $hoursByPair[$t['row_no']][$p['code']] = (float) $p['hours'];
+            }
+        }
+        foreach ($payload->assignmentsByRowPhase as $rowNo => $byPhase) {
+            foreach ($byPhase as $phaseCode => $entry) {
+                $h = $hoursByPair[$rowNo][$phaseCode] ?? 0;
+                $usedHoursByEmp[$entry['assignee_id']] = ($usedHoursByEmp[$entry['assignee_id']] ?? 0) + $h;
+            }
+        }
+
+        $rankFallback = [
+            'Lead' => ['Lead', 'Senior', 'Mid', 'Junior'],
+            'Senior' => ['Senior', 'Lead', 'Mid', 'Junior'],
+            'Mid' => ['Mid', 'Senior', 'Junior', 'Lead'],
+            'Junior' => ['Junior', 'Mid', 'Senior', 'Lead'],
+        ];
+        $designPhases = ['requirement', 'system_arch', 'basic_doc', 'detail_doc'];
+        $executionTier = ['簡単' => 'Junior', '普通' => 'Mid', '難しい' => 'Senior'];
+        $allocTolerance = 1.0 + AiScheduleValidator::ALLOCATION_TOLERANCE;
+        $cursors = [];
+
+        $pick = function (string $phaseCode, string $preferredTier, float $hours) use (
+            $byRoleAndRank, $allocatedHoursByAssignee, $rankFallback, $allocTolerance,
+            &$cursors, &$usedHoursByEmp,
+        ) {
+            $eligibleRoles = AiScheduleValidator::PHASE_CAPACITY_ROLES[$phaseCode] ?? [];
+            foreach ($eligibleRoles as $role) {
+                foreach ($rankFallback[$preferredTier] ?? [$preferredTier] as $tier) {
+                    $pool = $byRoleAndRank[$role][$tier] ?? [];
+                    if (empty($pool)) {
+                        continue;
+                    }
+                    $key = "{$role}|{$tier}";
+                    $cursors[$key] = $cursors[$key] ?? 0;
+                    $n = count($pool);
+                    // Under-cap pass.
+                    for ($i = 0; $i < $n; $i++) {
+                        $idx = ($cursors[$key] + $i) % $n;
+                        $id = $pool[$idx];
+                        $cap = $allocatedHoursByAssignee[$id] ?? PHP_FLOAT_MAX;
+                        $used = $usedHoursByEmp[$id] ?? 0.0;
+                        if ($used + $hours <= $cap * $allocTolerance) {
+                            $cursors[$key] = $idx + 1;
+                            $usedHoursByEmp[$id] = $used + $hours;
+
+                            return $id;
+                        }
+                    }
+                }
+            }
+            // Last resort: take first eligible pool, accept overshoot.
+            foreach ($eligibleRoles as $role) {
+                foreach ($rankFallback[$preferredTier] ?? [$preferredTier] as $tier) {
+                    $pool = $byRoleAndRank[$role][$tier] ?? [];
+                    if (! empty($pool)) {
+                        $id = $pool[0];
+                        $usedHoursByEmp[$id] = ($usedHoursByEmp[$id] ?? 0) + $hours;
+
+                        return $id;
+                    }
+                }
+            }
+
+            return null;
+        };
+
+        // Walk every expected (row, phase). For missing ones, pick assignee
+        // and compute dates from previous phase's end (within the same row).
+        $filled = 0;
+        foreach ($tasks as $t) {
+            // Sort row's phases by order so we anchor on previous phase's end.
+            $phases = $t['phases'];
+            usort($phases, fn ($a, $b) => ($a['order'] ?? 0) <=> ($b['order'] ?? 0));
+
+            $prevEnd = null;
+            foreach ($phases as $phase) {
+                $entry = $payload->assignmentsByRowPhase[$t['row_no']][$phase['code']] ?? null;
+                if ($entry !== null) {
+                    $prevEnd = Carbon::parse($entry['planned_end'])->startOfDay();
+
+                    continue;
+                }
+
+                $preferredTier = in_array($phase['code'], $designPhases, true)
+                    ? 'Lead'
+                    : ($executionTier[$t['difficulty']] ?? 'Mid');
+
+                $hours = (float) ($phase['hours'] ?? 0);
+                $assigneeId = $pick($phase['code'], $preferredTier, $hours);
+                if ($assigneeId === null) {
+                    continue; // Validator will surface as missing_assignment.
+                }
+
+                $anchor = $prevEnd !== null
+                    ? $calendar->nextWorkingDay($prevEnd->copy()->addDay(), $assigneeId)
+                    : $calendar->nextWorkingDay($windowStart, $assigneeId);
+                if ($anchor->greaterThan($effectiveEnd)) {
+                    $anchor = $effectiveEnd->copy();
+                }
+                $days = max(1, (int) ceil($hours / self::WORKDAY_HOURS));
+                $end = $calendar->addWorkingDays($anchor, $days - 1, $assigneeId);
+                if ($end->greaterThan($effectiveEnd)) {
+                    $end = $effectiveEnd->copy();
+                }
+
+                $payload->assignmentsByRowPhase[$t['row_no']][$phase['code']] = [
+                    'assignee_id' => $assigneeId,
+                    'planned_start' => $anchor->toDateString(),
+                    'planned_end' => $end->toDateString(),
+                ];
+                $prevEnd = $end;
+                $filled++;
+            }
+        }
+
+        return $filled;
+    }
+
     private function buildRetryPrompt(array $violations): string
     {
-        $lines = ["Your previous response failed validation. Fix the following ".count($violations)." problem(s) and resend the COMPLETE corrected JSON object in the same schema:\n"];
-        foreach ($violations as $i => $v) {
-            $idx = $i + 1;
-            $lines[] = "{$idx}. [{$v['code']}] {$v['message']}";
+        // Sort violations so the AI sees the hard ones first. missing_assignment
+        // and capacity_role_mismatch MUST be fixed; over_allocation /
+        // engagement_window_exceeded are best-effort and can stand if no
+        // alternative exists.
+        $hardCodes = ['missing_assignment', 'capacity_role_mismatch', 'unknown_assignee', 'unknown_row', 'unknown_phase', 'inverted_range', 'out_of_window', 'phase_order_violation'];
+        $softCodes = ['over_allocation', 'engagement_window_exceeded'];
+
+        $hard = [];
+        $soft = [];
+        $other = [];
+        foreach ($violations as $v) {
+            if (in_array($v['code'], $hardCodes, true)) {
+                $hard[] = $v;
+            } elseif (in_array($v['code'], $softCodes, true)) {
+                $soft[] = $v;
+            } else {
+                $other[] = $v;
+            }
         }
-        $lines[] = "\nReturn ONLY the corrected JSON object. No markdown fences, no explanation, no commentary.";
+
+        $lines = ['Your previous response failed validation. Fix the issues below and resend the COMPLETE corrected JSON object in the same schema.'];
+        $lines[] = '';
+        $lines[] = 'MUST FIX (hard errors — schedule cannot persist with these):';
+        if (empty($hard) && empty($other)) {
+            $lines[] = '  (none — only soft preferences below)';
+        } else {
+            $i = 1;
+            foreach (array_merge($hard, $other) as $v) {
+                $lines[] = "  {$i}. [{$v['code']}] {$v['message']}";
+                $i++;
+            }
+        }
+
+        if (! empty($soft)) {
+            $lines[] = '';
+            $lines[] = 'SHOULD MINIMIZE (soft preferences — best-effort, OK to leave as-is if you have no alternative within the eligible capacity_role pool):';
+            $i = 1;
+            foreach ($soft as $v) {
+                $lines[] = "  {$i}. [{$v['code']}] {$v['message']}";
+                $i++;
+            }
+            $lines[] = '';
+            $lines[] = 'Reminder: do NOT drop any phase to satisfy a soft rule. Coverage of every (row, phase) is mandatory. If a pool is over-capacity, spread overshoot across that pool or fall through to the next eligible capacity_role per the table — never miss a phase.';
+        }
+
+        $lines[] = '';
+        $lines[] = 'Return ONLY the corrected JSON object. No markdown fences, no explanation, no commentary.';
 
         return implode("\n", $lines);
     }
@@ -1056,7 +1626,7 @@ PROMPT;
         $result = [];
         /** @var array<string, array{date: Carbon, hours_used: float}> */
         $assigneeCursors = [];
-        $epsilon      = 0.001;
+        $epsilon = 0.001;
         $workdayHours = (float) self::WORKDAY_HOURS;
 
         foreach ($orderedTasks as $t) {
@@ -1074,7 +1644,7 @@ PROMPT;
                 $hours = max(0.0, (float) $phase['hours']);
 
                 $assigneeCursor = $assigneeCursors[$assigneeId] ?? [
-                    'date'       => $windowStart->copy(),
+                    'date' => $windowStart->copy(),
                     'hours_used' => 0.0,
                 ];
 
@@ -1111,20 +1681,20 @@ PROMPT;
 
                 if ($hours <= $remainingToday + $epsilon || $hours <= $epsilon) {
                     // Atomic same-day placement — fits in today's budget.
-                    $start                = $candidate->copy();
-                    $end                  = $candidate->copy();
-                    $startDayHours        = $hours;
+                    $start = $candidate->copy();
+                    $end = $candidate->copy();
+                    $startDayHours = $hours;
                     $newAssigneeHoursUsed = $assigneeUsedToday + $hours;
                 } else {
                     // Split across days. Day 1 gets today's remainder; the rest
                     // spills across full 8h middle days plus a remainder on
                     // the last day.
-                    $start         = $candidate->copy();
+                    $start = $candidate->copy();
                     $startDayHours = $remainingToday;
 
-                    $leftover       = $hours - $remainingToday;
+                    $leftover = $hours - $remainingToday;
                     $fullMiddleDays = (int) floor(($leftover + $epsilon) / $workdayHours);
-                    $lastDayHours   = $leftover - ($fullMiddleDays * $workdayHours);
+                    $lastDayHours = $leftover - ($fullMiddleDays * $workdayHours);
                     if ($lastDayHours <= $epsilon) {
                         $lastDayHours = 0.0;
                     }
@@ -1149,14 +1719,14 @@ PROMPT;
                 }
 
                 $result[$t['row_no']][$phase['code']] = [
-                    'assignee_id'     => $assigneeId,
-                    'planned_start'   => $start->toDateString(),
-                    'planned_end'     => $end->toDateString(),
+                    'assignee_id' => $assigneeId,
+                    'planned_start' => $start->toDateString(),
+                    'planned_end' => $end->toDateString(),
                     'start_day_hours' => round($startDayHours, 2),
                 ];
 
                 $assigneeCursors[$assigneeId] = [
-                    'date'       => $end->copy(),
+                    'date' => $end->copy(),
                     'hours_used' => $newAssigneeHoursUsed,
                 ];
                 $taskCursorDate = $end->copy();
@@ -1189,12 +1759,12 @@ PROMPT;
         }
 
         $validated = $request->validate([
-            'assignee_id'   => 'nullable|uuid|exists:employees,id',
+            'assignee_id' => 'nullable|uuid|exists:employees,id',
             'planned_start' => 'nullable|date',
-            'planned_end'   => 'nullable|date',
-            'actual_start'  => 'nullable|date',
-            'actual_end'    => 'nullable|date',
-            'status'        => 'sometimes|in:未着手,進行中,完了',
+            'planned_end' => 'nullable|date',
+            'actual_start' => 'nullable|date',
+            'actual_end' => 'nullable|date',
+            'status' => 'sometimes|in:未着手,進行中,完了',
         ]);
 
         if (array_key_exists('assignee_id', $validated)) {
@@ -1209,20 +1779,19 @@ PROMPT;
 
     private function readEstimateSheet(?string $absolutePath = null): array
     {
-        if ($absolutePath !== null) {
-            $path = $absolutePath;
-        } else {
-            $path = public_path('storage/Estimate.xlsx');
-            Log::warning('readEstimateSheet: falling back to legacy hardcoded Estimate.xlsx path; no estimation_versions.xlsx_path resolved for this project', [
-                'fallback_path' => $path,
+        // Caller is required to resolve the path (project-specific xlsx_path
+        // or the per-tenant fallback). The legacy `public/storage/Estimate.xlsx`
+        // shared-file fallback was removed because it read the same file
+        // across every tenant — a cross-tenant data leak risk.
+        if ($absolutePath === null || ! file_exists($absolutePath)) {
+            Log::error('Estimate xlsx not resolved or missing on disk', [
+                'absolute_path' => $absolutePath,
             ]);
-        }
-
-        if (! file_exists($path)) {
-            Log::error('Estimate xlsx not found at '.$path);
 
             return ['tasks' => [], 'active_phases' => [], 'raw_markdown' => ''];
         }
+
+        $path = $absolutePath;
 
         $spreadsheet = IOFactory::load($path);
         if (! in_array('Web_Manhour_Detail', $spreadsheet->getSheetNames(), true)) {
@@ -1241,10 +1810,10 @@ PROMPT;
         // row 4 (per-column labels). Different projects ship different Estimate
         // files — phases present, their order, and the columns they occupy all
         // vary file-to-file. Static column maps would silently mis-label.
-        $detection      = $this->detectPhasesFromSheet($sheet);
-        $phaseDefs      = $detection['phase_defs'];
-        $totalCol       = $detection['total_col'];      // 1-based, or null
-        $highestColStr  = $sheet->getHighestColumn();
+        $detection = $this->detectPhasesFromSheet($sheet);
+        $phaseDefs = $detection['phase_defs'];
+        $totalCol = $detection['total_col'];      // 1-based, or null
+        $highestColStr = $sheet->getHighestColumn();
 
         // Data rows start at row 5. A=機能ID, B=機能名称, C=Status. Per-phase
         // hour columns and the Total column position are file-specific.
@@ -1257,10 +1826,10 @@ PROMPT;
                 false
             )[0] ?? [];
 
-            $functionId   = isset($cells[0]) ? (is_string($cells[0]) ? trim($cells[0]) : $cells[0]) : null;
+            $functionId = isset($cells[0]) ? (is_string($cells[0]) ? trim($cells[0]) : $cells[0]) : null;
             $functionName = isset($cells[1]) ? (is_string($cells[1]) ? trim($cells[1]) : $cells[1]) : null;
-            $difficulty   = isset($cells[2]) ? (is_string($cells[2]) ? trim($cells[2]) : $cells[2]) : null;
-            $totalHours   = ($totalCol !== null && isset($cells[$totalCol - 1])) ? $cells[$totalCol - 1] : null;
+            $difficulty = isset($cells[2]) ? (is_string($cells[2]) ? trim($cells[2]) : $cells[2]) : null;
+            $totalHours = ($totalCol !== null && isset($cells[$totalCol - 1])) ? $cells[$totalCol - 1] : null;
 
             if (! $functionName) {
                 continue;
@@ -1271,7 +1840,7 @@ PROMPT;
             //  - function_name purely numeric → it's a headcount in col 2,
             //    not a feature name. Real features are descriptive text.
             //  - function_id matches team-composition / unit-total keywords.
-            $fnStr  = (string) $functionName;
+            $fnStr = (string) $functionName;
             $fidStr = (string) ($functionId ?? '');
             if (preg_match('/^\s*\d+(\.\d+)?\s*$/', $fnStr)) {
                 continue;
@@ -1296,36 +1865,45 @@ PROMPT;
                     continue;
                 }
                 $phases[] = [
-                    'code'         => $phase['code'],
-                    'name'         => $phase['name'],
-                    'order'        => $phase['order'],
+                    'code' => $phase['code'],
+                    'name' => $phase['name'],
+                    'order' => $phase['order'],
                     'is_execution' => $phase['is_execution'],
-                    'hours'        => round($sum, 2),
+                    'hours' => round($sum, 2),
                 ];
             }
 
             $rowNo++;
             $tasks[] = [
-                'row_no'        => $rowNo,
-                'function_id'   => $functionId ? (string) $functionId : null,
+                'row_no' => $rowNo,
+                'function_id' => $functionId ? (string) $functionId : null,
                 'function_name' => (string) $functionName,
-                'difficulty'    => $difficulty,
-                'total_hours'   => is_numeric($totalHours) ? round((float) $totalHours, 2) : 0,
-                'phases'        => $phases,
+                'difficulty' => $difficulty,
+                'total_hours' => is_numeric($totalHours) ? round((float) $totalHours, 2) : 0,
+                'phases' => $phases,
             ];
         }
 
-        // Surface every phase declared in the file's row 3 — even ones with
-        // zero hours across all tasks. PMs want to see "this phase exists in
-        // the template but has no work yet" rather than have it silently
-        // hidden. Per-task phase rows (above) are still filtered to non-zero
-        // entries so empty cells render as blank in the UI grid.
+        // Drop phases that have zero estimated hours across every task. The
+        // template can declare a phase that nothing actually uses; surfacing it
+        // clutters the schedule with title-only rows that never get assigned.
+        $phasesWithHours = [];
+        foreach ($tasks as $task) {
+            foreach ($task['phases'] as $p) {
+                if (($p['hours'] ?? 0) > 0) {
+                    $phasesWithHours[$p['code']] = true;
+                }
+            }
+        }
         $activePhases = [];
         foreach ($phaseDefs as $phase) {
+            if (! isset($phasesWithHours[$phase['code']])) {
+                continue;
+            }
             $activePhases[] = [
-                'code'         => $phase['code'],
-                'name'         => $phase['name'],
-                'order'        => $phase['order'],
+                'code' => $phase['code'],
+                'name' => $phase['name'],
+                'order' => $phase['order'],
                 'is_execution' => $phase['is_execution'],
             ];
         }
@@ -1378,7 +1956,7 @@ PROMPT;
             if (isset(self::PHASE_CATALOG[$firstLine])) {
                 $phaseStarts[$c] = [
                     'label' => $firstLine,
-                    'meta'  => self::PHASE_CATALOG[$firstLine],
+                    'meta' => self::PHASE_CATALOG[$firstLine],
                 ];
             }
         }
@@ -1403,10 +1981,10 @@ PROMPT;
 
             $meta = $phaseStarts[$startCol]['meta'];
             $phaseDefs[] = [
-                'code'         => $meta['code'],
-                'name'         => $phaseStarts[$startCol]['label'],
-                'cols'         => $cols,
-                'order'        => $meta['order'],
+                'code' => $meta['code'],
+                'name' => $phaseStarts[$startCol]['label'],
+                'cols' => $cols,
+                'order' => $meta['order'],
                 'is_execution' => $meta['is_execution'],
             ];
         }
@@ -1416,10 +1994,10 @@ PROMPT;
         $devHeader = (string) $sheet->getCell([4, 4])->getValue();
         if (stripos($devHeader, 'Develop') !== false || str_contains($devHeader, '開発工数')) {
             $phaseDefs[] = [
-                'code'         => 'development',
-                'name'         => 'Development',
-                'cols'         => [4, 5],
-                'order'        => 5,
+                'code' => 'development',
+                'name' => 'Development',
+                'cols' => [4, 5],
+                'order' => 5,
                 'is_execution' => true,
             ];
         }
@@ -1450,7 +2028,7 @@ PROMPT;
      * summary. Row 1 becomes the header; data starts at row 5 (rows 2-4 are
      * sub-headers/spacers we skip). Capped at 150 data rows to bound prompt size.
      */
-    private function renderSheetAsMarkdown(\PhpOffice\PhpSpreadsheet\Worksheet\Worksheet $sheet, int $maxDataRows = 150): string
+    private function renderSheetAsMarkdown(Worksheet $sheet, int $maxDataRows = 150): string
     {
         $highestRow = $sheet->getHighestRow();
         if ($highestRow < 1) {
@@ -1465,14 +2043,14 @@ PROMPT;
         // Default placeholder for empty header cells so the table stays well-formed.
         $headers = array_map(fn ($h, $i) => $h !== '' ? $h : 'Col'.($i + 1), $headers, array_keys($headers));
 
-        $lines   = [];
+        $lines = [];
         $lines[] = '| '.implode(' | ', $headers).' |';
         $lines[] = '|'.str_repeat(' --- |', count($headers));
 
         $dataStart = 5;
-        $dataEnd   = min($highestRow, $dataStart + $maxDataRows - 1);
-        $included  = 0;
-        $skipped   = 0;
+        $dataEnd = min($highestRow, $dataStart + $maxDataRows - 1);
+        $included = 0;
+        $skipped = 0;
 
         for ($r = $dataStart; $r <= $dataEnd; $r++) {
             $cells = $sheet->rangeToArray('A'.$r.':AE'.$r, null, true, false)[0] ?? [];
@@ -1486,6 +2064,7 @@ PROMPT;
             }
             if ($isEmpty) {
                 $skipped++;
+
                 continue;
             }
             $lines[] = '| '.implode(' | ', array_map(fn ($c) => $this->mdEscape($c), $cells)).' |';
@@ -1523,13 +2102,13 @@ PROMPT;
         string $rawSheet = ''
     ): string {
         $projectName = $project->name;
-        $client      = $project->client ?? 'N/A';
-        $startStr    = $windowStart->toDateString();
-        $endStr      = $effectiveEnd->toDateString();
-        $buffer      = self::PROJECT_END_BUFFER_DAYS;
-        $rawEnd      = $project->effectiveEndDate()->toDateString();
-        $defaultHpd  = self::WORKDAY_HOURS;
-        $teamSize    = count($teamMembers);
+        $client = $project->client ?? 'N/A';
+        $startStr = $windowStart->toDateString();
+        $endStr = $effectiveEnd->toDateString();
+        $buffer = self::PROJECT_END_BUFFER_DAYS;
+        $rawEnd = $project->effectiveEndDate()->toDateString();
+        $defaultHpd = self::WORKDAY_HOURS;
+        $teamSize = count($teamMembers);
 
         $rawSheetBlock = $rawSheet !== ''
             ? "RAW SHEET CONTENT (your direct view of Estimate.xlsx, sheet `Web_Manhour_Detail` — sanity-check the PARSED TASKS array below against this. If you notice something the parse missed, prefer what's in the sheet):\n\n".$rawSheet."\n\n"
@@ -1563,10 +2142,24 @@ PROMPT;
             "     \"planned_start\": \"YYYY-MM-DD\", \"planned_end\": \"YYYY-MM-DD\"}\n".
             "  ]\n".
             "}\n\n".
-            "ASSIGNEE RULES (who):\n".
-            "- DESIGN phases (phase_code in {requirement, system_arch, basic_doc, detail_doc}): pick rank_code='Lead'. Fallback: Senior → Mid → any.\n".
-            "- EXECUTION phases (phase_code in {development, unit_test, combine_test, system_test}): map by the TASK's difficulty — 簡単→'Junior', 普通→'Mid', 難しい→'Senior'. Fallback chain: 簡単→Mid→Senior→Lead, 普通→Senior→Junior→Lead, 難しい→Lead→Mid→Junior.\n".
-            "- When multiple team members qualify for a phase, rotate through them — don't pile everything on one person.\n\n".
+            "ASSIGNEE RULES (who) — coverage and capacity_role are HARD; caps and windows are SOFT preferences.\n".
+            "\n".
+            "Priority order when picking each assignee:\n".
+            "  1. HARD  — coverage: every (row_no, phase_code) pair in PARSED TASKS MUST receive an assignment. Returning fewer assignments than there are (row × active_phase) pairs is the worst outcome. NEVER skip a phase to satisfy any other rule.\n".
+            "  2. HARD  — capacity_role match: each phase has an eligible capacity_role list (see table below). NEVER assign a phase to a member whose capacity_role isn't on that list. A pm MUST NOT be assigned development or testing. A qa MUST NOT be assigned development. A member with `allocated_hours = 0` is on the team but has no engagement for this project — do not assign any phase to them.\n".
+            "  3. SOFT  — per-member cap: try to keep Σ(estimated_hours) per assignee within their `allocated_hours`. Some overshoot is acceptable when there's no eligible alternative; in that case spread the overshoot across the pool rather than piling it on one person, and prefer the member with the most remaining capacity. Overshooting a cap is always better than skipping a phase.\n".
+            "  4. SOFT  — engagement window: try to keep each member's phases inside `engagement_months × 31` calendar days. A 3-month QA's phases should cluster (typically late in the project). Some spread is acceptable when forced — but again, never drop a phase.\n".
+            "  5. PREFER — rank fit: within an eligible capacity_role, prefer highest rank for doc/design (Manager/Lead > Senior > Mid > Junior); for execution phases, rank by TASK difficulty — 簡単→Junior, 普通→Mid, 難しい→Senior (fallback 簡単→Mid→Senior→Lead, 普通→Senior→Junior→Lead, 難しい→Lead→Mid→Junior).\n".
+            "  6. PREFER — rotation: when multiple members qualify, rotate; don't pile everything on one person.\n".
+            "\n".
+            "Eligible capacity_role per phase (use the FIRST role with remaining capacity, fall through ONLY if it's saturated or absent from the team):\n".
+            "  | phase_code                                       | eligible capacity_role (in preference order)                                                                  |\n".
+            "  |--------------------------------------------------|-----------------------------------------------------------------------------------------------------------------|\n".
+            "  | requirement, system_arch, basic_doc, detail_doc  | pm → backend → frontend  (pm preferred; senior dev documents only when pm is unavailable or over-cap)            |\n".
+            "  | development                                      | backend → frontend  (managers and qa never code)                                                                |\n".
+            "  | unit_test, combine_test, system_test             | qa → backend → frontend  (devs self-test only when qa is over-cap)                                              |\n".
+            "\n".
+            "What happens when the team is genuinely under-sized: spread the overshoot — DO NOT skip phases. After you finish, every (row, phase) in PARSED TASKS must appear in your `assignments` array. The server will surface over_allocation / engagement_window_exceeded as warnings; that's expected when the team is tight and is the operator's signal to add headcount. A missing assignment, by contrast, is a hard error we cannot recover from.\n\n".
             "PARALLELISM REQUIREMENT — CRITICAL:\n".
             "- The team has {$teamSize} engineers. On most working days in the project window, MULTIPLE engineers should have active work simultaneously. A schedule where only 1 person is active on most days is a FAILURE.\n".
             "- Different TASKS are INDEPENDENT — they can (and should) run in parallel across different engineers.\n".
@@ -1592,7 +2185,7 @@ PROMPT;
             "- assignee_id must be one of the uuids in TEAM MEMBERS.\n".
             "- All dates ISO format `YYYY-MM-DD`.\n".
             "- Maximize parallelism — multiple engineers active on most working days.\n".
-            "- Return ONLY the JSON object — no prose, no fences.";
+            '- Return ONLY the JSON object — no prose, no fences.';
     }
 
     private function persistTaskAssignments(Project $project, array $tasks, array $assignments, string $tenantId)
@@ -1603,30 +2196,30 @@ PROMPT;
 
             foreach ($tasks as $t) {
                 $parent = ProjectTaskAssignment::create([
-                    'tenant_id'     => $tenantId,
-                    'project_id'    => $project->id,
-                    'row_no'        => $t['row_no'],
-                    'function_id'   => $t['function_id'],
+                    'tenant_id' => $tenantId,
+                    'project_id' => $project->id,
+                    'row_no' => $t['row_no'],
+                    'function_id' => $t['function_id'],
                     'function_name' => $t['function_name'],
-                    'difficulty'    => $t['difficulty'],
-                    'total_hours'   => $t['total_hours'],
+                    'difficulty' => $t['difficulty'],
+                    'total_hours' => $t['total_hours'],
                 ]);
 
                 foreach ($t['phases'] as $phase) {
                     $entry = $assignments[$t['row_no']][$phase['code']] ?? null;
                     ProjectTaskPhaseAssignment::create([
-                        'tenant_id'          => $tenantId,
+                        'tenant_id' => $tenantId,
                         'task_assignment_id' => $parent->id,
-                        'phase_code'         => $phase['code'],
-                        'phase_name'         => $phase['name'],
-                        'phase_order'        => $phase['order'],
-                        'estimated_hours'    => $phase['hours'],
-                        'start_day_hours'    => is_array($entry) ? ($entry['start_day_hours'] ?? null) : null,
-                        'assignee_id'        => is_array($entry) ? ($entry['assignee_id']     ?? null) : $entry,
-                        'planned_start'      => is_array($entry) ? ($entry['planned_start']   ?? null) : null,
-                        'planned_end'        => is_array($entry) ? ($entry['planned_end']     ?? null) : null,
-                        'assignment_source'  => 'ai',
-                        'status'             => '未着手',
+                        'phase_code' => $phase['code'],
+                        'phase_name' => $phase['name'],
+                        'phase_order' => $phase['order'],
+                        'estimated_hours' => $phase['hours'],
+                        'start_day_hours' => is_array($entry) ? ($entry['start_day_hours'] ?? null) : null,
+                        'assignee_id' => is_array($entry) ? ($entry['assignee_id'] ?? null) : $entry,
+                        'planned_start' => is_array($entry) ? ($entry['planned_start'] ?? null) : null,
+                        'planned_end' => is_array($entry) ? ($entry['planned_end'] ?? null) : null,
+                        'assignment_source' => 'ai',
+                        'status' => '未着手',
                     ]);
                 }
             }
@@ -1655,57 +2248,109 @@ PROMPT;
         Carbon $effectiveEnd,
         WorkingDayCalendar $calendar
     ) {
-        // Bucket team members by rank code. Missing rank falls into 'Mid'.
-        $buckets = ['Junior' => [], 'Mid' => [], 'Senior' => [], 'Lead' => []];
+        // Bucket team members by (capacity_role, rank). Members with
+        // allocated_hours = 0 are dropped — their team-structure slot doesn't
+        // include this project. Manager rank is mapped to Lead so it tops
+        // the rank preference chain.
+        $allocatedHoursByEmp = [];
+        $byRoleAndRank = []; // [capacity_role][rank_code] => [employee_id, ...]
         foreach ($teamAssignments as $a) {
-            $tier = optional(optional($a->employee)->rank)->code ?: 'Mid';
-            if (! isset($buckets[$tier])) {
-                $tier = 'Mid';
+            $cap = (float) $a->allocated_hours;
+            if ($cap <= 0.0) {
+                continue;
             }
-            $buckets[$tier][] = $a->employee_id;
+            $tier = optional(optional($a->employee)->rank)->code ?: 'Mid';
+            if (! in_array($tier, ['Junior', 'Mid', 'Senior', 'Lead'], true)) {
+                $tier = 'Lead'; // Manager / unknown non-ladder ranks
+            }
+            $role = optional(optional($a->employee)->capacityRole)->code
+                ?? optional($a->employee)->capacity_role
+                ?? 'unknown';
+
+            $allocatedHoursByEmp[$a->employee_id] = $cap;
+            $byRoleAndRank[$role][$tier][] = $a->employee_id;
         }
 
-        $allIds = array_values(array_filter(array_merge(
-            $buckets['Junior'], $buckets['Mid'], $buckets['Senior'], $buckets['Lead']
-        )));
-        if (empty($allIds)) {
-            return response()->json(['error' => 'No team members available.'], 422);
+        if (empty($allocatedHoursByEmp)) {
+            return response()->json(['error' => 'No team members with allocated_hours > 0 are available.'], 422);
         }
 
         $cursors = [];
-        $pickFrom = function (string $tier) use ($buckets, $allIds, &$cursors) {
-            $pool = ! empty($buckets[$tier]) ? $buckets[$tier] : $allIds;
-            $key = $tier;
-            $cursors[$key] = $cursors[$key] ?? 0;
-            $id = $pool[$cursors[$key] % count($pool)];
-            $cursors[$key]++;
+        $assignedHoursByEmp = [];
+        $allocTolerance = 1.0 + AiScheduleValidator::ALLOCATION_TOLERANCE;
 
-            return $id;
-        };
+        // Rank fallback chain — used INSIDE each capacity_role pool.
+        $rankFallback = [
+            'Lead' => ['Lead', 'Senior', 'Mid', 'Junior'],
+            'Senior' => ['Senior', 'Lead', 'Mid', 'Junior'],
+            'Mid' => ['Mid', 'Senior', 'Junior', 'Lead'],
+            'Junior' => ['Junior', 'Mid', 'Senior', 'Lead'],
+        ];
 
-        $resolveTier = function (string $preferred) use ($buckets): string {
-            if (! empty($buckets[$preferred])) {
-                return $preferred;
-            }
-            $fallbacks = [
-                'Lead'   => ['Senior', 'Mid', 'Junior'],
-                'Senior' => ['Lead', 'Mid', 'Junior'],
-                'Mid'    => ['Senior', 'Junior', 'Lead'],
-                'Junior' => ['Mid', 'Senior', 'Lead'],
-            ];
-            foreach ($fallbacks[$preferred] ?? [] as $alt) {
-                if (! empty($buckets[$alt])) {
-                    return $alt;
+        // Pick a member for $phaseCode at $preferredTier rank. Walks eligible
+        // capacity_roles (from PHASE_CAPACITY_ROLES) in preference order, and
+        // within each role walks the rank fallback chain. NEVER assigns
+        // outside the eligible capacity_role list — a pm-role member will
+        // never get a dev/test phase, a qa-role member will never get a doc
+        // phase unless qa explicitly appears in that phase's eligibility.
+        $pickFrom = function (string $phaseCode, string $preferredTier, float $phaseHours) use (
+            $byRoleAndRank, $allocatedHoursByEmp, $allocTolerance, $rankFallback,
+            &$cursors, &$assignedHoursByEmp,
+        ) {
+            $eligibleRoles = AiScheduleValidator::PHASE_CAPACITY_ROLES[$phaseCode] ?? [];
+            $tiers = $rankFallback[$preferredTier] ?? [$preferredTier];
+
+            // Pass 1: respect capacity_role + rank + remaining capacity.
+            foreach ($eligibleRoles as $role) {
+                foreach ($tiers as $tier) {
+                    $pool = $byRoleAndRank[$role][$tier] ?? [];
+                    if (empty($pool)) {
+                        continue;
+                    }
+                    $key = "{$role}|{$tier}";
+                    $cursors[$key] = $cursors[$key] ?? 0;
+                    $n = count($pool);
+                    for ($i = 0; $i < $n; $i++) {
+                        $idx = ($cursors[$key] + $i) % $n;
+                        $id = $pool[$idx];
+                        $cap = $allocatedHoursByEmp[$id] ?? PHP_FLOAT_MAX;
+                        $used = $assignedHoursByEmp[$id] ?? 0.0;
+                        if ($used + $phaseHours <= $cap * $allocTolerance) {
+                            $cursors[$key] = $idx + 1;
+                            $assignedHoursByEmp[$id] = $used + $phaseHours;
+
+                            return $id;
+                        }
+                    }
                 }
             }
 
-            return $preferred;
+            // Pass 2: everyone in eligible roles is at cap — round-robin
+            // within eligible roles only. Operator should fix the team
+            // structure (add headcount in this role_type).
+            foreach ($eligibleRoles as $role) {
+                foreach ($tiers as $tier) {
+                    $pool = $byRoleAndRank[$role][$tier] ?? [];
+                    if (empty($pool)) {
+                        continue;
+                    }
+                    $key = "{$role}|{$tier}";
+                    $cursors[$key] = $cursors[$key] ?? 0;
+                    $id = $pool[$cursors[$key] % count($pool)];
+                    $cursors[$key]++;
+                    $assignedHoursByEmp[$id] = ($assignedHoursByEmp[$id] ?? 0.0) + $phaseHours;
+
+                    return $id;
+                }
+            }
+
+            return null; // No eligible team member at all.
         };
 
         $designPhases = ['requirement', 'system_arch', 'basic_doc', 'detail_doc'];
         $executionTier = [
-            '簡単'   => 'Junior',
-            '普通'   => 'Mid',
+            '簡単' => 'Junior',
+            '普通' => 'Mid',
             '難しい' => 'Senior',
         ];
 
@@ -1713,13 +2358,44 @@ PROMPT;
         $assigneeByRowPhase = [];
         foreach ($tasks as $t) {
             foreach ($t['phases'] as $phase) {
-                $preferred = in_array($phase['code'], $designPhases, true)
+                $preferredTier = in_array($phase['code'], $designPhases, true)
                     ? 'Lead'
                     : ($executionTier[$t['difficulty']] ?? 'Mid');
 
-                $tier = $resolveTier($preferred);
-                $assigneeByRowPhase[$t['row_no']][$phase['code']] = $pickFrom($tier);
+                $id = $pickFrom($phase['code'], $preferredTier, (float) ($phase['hours'] ?? 0));
+                if ($id === null) {
+                    Log::warning('AI Schedule (demo): no eligible team member for phase', [
+                        'project_id' => $project->id,
+                        'row_no' => $t['row_no'],
+                        'phase_code' => $phase['code'],
+                    ]);
+
+                    continue;
+                }
+                $assigneeByRowPhase[$t['row_no']][$phase['code']] = $id;
             }
+        }
+
+        // Surface members the demo had to push past their cap so the operator
+        // sees the same signal the AI validator would have raised. Schedule
+        // still persists — the warning prompts a team-structure fix.
+        $overCap = [];
+        foreach ($assignedHoursByEmp as $id => $used) {
+            $cap = $allocatedHoursByEmp[$id] ?? null;
+            if ($cap !== null && $used > $cap * $allocTolerance) {
+                $overCap[] = [
+                    'employee_id' => $id,
+                    'assigned_hours' => $used,
+                    'allocated_hours' => $cap,
+                    'overshoot' => $used - $cap,
+                ];
+            }
+        }
+        if (! empty($overCap)) {
+            Log::warning('AI Schedule (demo): exceeded per-member allocated_hours cap', [
+                'project_id' => $project->id,
+                'members' => $overCap,
+            ]);
         }
 
         $assignments = $this->computePlannedDates($tasks, $assigneeByRowPhase, $windowStart, $effectiveEnd, $calendar);
@@ -1733,27 +2409,36 @@ PROMPT;
         foreach ($rows as $row) {
             foreach ($row->phaseAssignments as $pa) {
                 $byCode[$pa->phase_code] = [
-                    'code'  => $pa->phase_code,
-                    'name'  => $pa->phase_name,
+                    'code' => $pa->phase_code,
+                    'name' => $pa->phase_name,
                     'order' => (int) $pa->phase_order,
                 ];
             }
         }
 
-        // Also surface phases that are declared in the Estimate.xlsx's row 3
-        // headers but have zero hours across all tasks (so no DB rows exist
-        // for them). PMs want to see "this phase exists in the template but
-        // has no work yet" rather than have the column silently hidden.
+        // Also surface phases that are declared in the Estimate.xlsx with
+        // actual hours but have no persisted assignments yet (e.g. between
+        // task-detection and AI assignment). Phases with zero hours across
+        // all tasks are filtered out upstream in readEstimateSheet().
         try {
-            $resolvedPath = $project
-                ? app(EstimateFileResolver::class)->latestForProject($project)
-                : null;
+            $resolvedPath = null;
+            if ($project) {
+                $resolver = app(EstimateFileResolver::class);
+                $resolvedPath = $resolver->latestForProject($project)
+                    ?? $resolver->tenantFallbackPath($project->tenant_id);
+            }
+            // No file resolved → fall through to DB-only phases, no warning.
+            // The /assign-tasks endpoint enforces the 422; the read endpoint
+            // can legitimately render before any AI run.
+            if ($resolvedPath === null) {
+                return array_values($byCode);
+            }
             $declared = $this->readEstimateSheet($resolvedPath)['active_phases'] ?? [];
             foreach ($declared as $p) {
                 if (! isset($byCode[$p['code']])) {
                     $byCode[$p['code']] = [
-                        'code'  => $p['code'],
-                        'name'  => $p['name'],
+                        'code' => $p['code'],
+                        'name' => $p['name'],
                         'order' => (int) $p['order'],
                     ];
                 }

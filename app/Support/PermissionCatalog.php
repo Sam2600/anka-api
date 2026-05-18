@@ -38,6 +38,7 @@ class PermissionCatalog
             // Projects
             ['key' => 'view_projects',      'group' => 'Projects',      'label' => 'View Projects',           'description' => 'See the project list and project delivery pages.'],
             ['key' => 'manage_projects',    'group' => 'Projects',      'label' => 'Manage Projects',         'description' => 'Edit project metadata, kickoff dates, and team assignments.'],
+            ['key' => 'view_schedule_tracking', 'group' => 'Projects',  'label' => 'View Schedule Tracking',  'description' => 'See per-phase progress vs plan and the schedule-tracking dashboards.'],
             ['key' => 'track_time',         'group' => 'Projects',      'label' => 'Track Time',              'description' => 'Log time entries against active projects.'],
 
             // Organization

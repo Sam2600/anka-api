@@ -24,8 +24,58 @@ class AiScheduleValidator
     public const DEFAULT_HOURS_PER_DAY = 8.0;
 
     /**
-     * @param array<int, array{row_no:int, phases:array<int, array{code:string, hours:float}>}> $tasks
-     * @param array<int, string> $teamIds
+     * Hours an assignee can absorb above their stored allocated_hours before
+     * the validator complains. Mirrors DURATION_TOLERANCE — small overshoots
+     * are tolerated, big ones are not.
+     */
+    public const ALLOCATION_TOLERANCE = 0.10;
+
+    /**
+     * Approximate calendar-days-per-engagement-month used to convert a
+     * member's `engagement_months` into a maximum span from their earliest
+     * planned_start to their latest planned_end. 31 keeps it generous —
+     * we'd rather miss a borderline case than over-flag legitimate plans.
+     */
+    public const ENGAGEMENT_DAYS_PER_MONTH = 31;
+
+    /** Tolerance for engagement-window span (same idea as ALLOCATION_TOLERANCE). */
+    public const ENGAGEMENT_WINDOW_TOLERANCE = 0.10;
+
+    /**
+     * Per-phase list of `capacity_role` values eligible to be assigned that
+     * phase. Order matters — earlier entries are preferred when assigning
+     * (a doc phase goes to pm first, falls through to backend/frontend only
+     * if pm is unavailable or over-cap).
+     *
+     * - Doc/design phases: pm leads, but a senior dev can document if the
+     *   team has no pm or pm is saturated.
+     * - Development: backend or frontend, no fallback (managers don't code).
+     * - Testing: qa primary; devs self-test when qa is over-capacity.
+     *
+     * `design` (UI designer) is intentionally omitted from doc/dev pools —
+     * designers do design work, not generic documentation or coding. If a
+     * project has design-phase xlsx rows, those would route to design via a
+     * separate entry (none in PHASE_CATALOG today).
+     *
+     * @var array<string, array<int, string>>
+     */
+    public const PHASE_CAPACITY_ROLES = [
+        'requirement' => ['pm', 'backend', 'frontend'],
+        'system_arch' => ['pm', 'backend', 'frontend'],
+        'basic_doc' => ['pm', 'backend', 'frontend'],
+        'detail_doc' => ['pm', 'backend', 'frontend'],
+        'development' => ['backend', 'frontend'],
+        'unit_test' => ['qa', 'backend', 'frontend'],
+        'combine_test' => ['qa', 'backend', 'frontend'],
+        'system_test' => ['qa', 'backend', 'frontend'],
+    ];
+
+    /**
+     * @param  array<int, array{row_no:int, phases:array<int, array{code:string, hours:float}>}>  $tasks
+     * @param  array<int, string>  $teamIds
+     * @param  array<string, float>  $allocatedHoursByAssignee  employee_id => capacity ceiling. Empty/omitted skips the check.
+     * @param  array<string, float>  $engagementMonthsByAssignee  employee_id => contracted months. Empty/omitted skips the engagement-window check.
+     * @param  array<string, string>  $capacityRoleByAssignee  employee_id => capacity_role code (backend, frontend, pm, qa, design). Empty/omitted skips the role-mismatch check.
      * @return array<int, array{code:string, message:string, context:array<string,mixed>}>
      */
     public function validate(
@@ -35,9 +85,16 @@ class AiScheduleValidator
         WorkingDayCalendar $calendar,
         Carbon $windowStart,
         Carbon $effectiveEnd,
+        array $allocatedHoursByAssignee = [],
+        array $engagementMonthsByAssignee = [],
+        array $capacityRoleByAssignee = [],
     ): array {
         $violations = [];
         $teamSet = array_flip($teamIds);
+
+        // Per-assignee running total of estimated phase hours assigned.
+        // Compared against $allocatedHoursByAssignee at the end of the walk.
+        $assignedHoursByAssignee = [];
 
         // Index tasks by row for fast lookup.
         $tasksByRow = [];
@@ -54,7 +111,7 @@ class AiScheduleValidator
             foreach ($t['phases'] as $phase) {
                 if (! isset($payload->assignmentsByRowPhase[$t['row_no']][$phase['code']])) {
                     $violations[] = [
-                        'code'    => 'missing_assignment',
+                        'code' => 'missing_assignment',
                         'message' => "No assignment returned for row {$t['row_no']}, phase {$phase['code']}.",
                         'context' => ['row_no' => $t['row_no'], 'phase_code' => $phase['code']],
                     ];
@@ -68,11 +125,12 @@ class AiScheduleValidator
             if ($task === null) {
                 foreach ($byPhase as $phase => $_) {
                     $violations[] = [
-                        'code'    => 'unknown_row',
+                        'code' => 'unknown_row',
                         'message' => "Assignment refers to row_no {$rowNo}, which is not in the task list.",
                         'context' => ['row_no' => $rowNo, 'phase_code' => $phase],
                     ];
                 }
+
                 continue;
             }
             $phasesByCode = [];
@@ -84,39 +142,63 @@ class AiScheduleValidator
                 $phaseDef = $phasesByCode[$phaseCode] ?? null;
                 if ($phaseDef === null) {
                     $violations[] = [
-                        'code'    => 'unknown_phase',
+                        'code' => 'unknown_phase',
                         'message' => "Phase {$phaseCode} is not in row {$rowNo}'s active phases.",
                         'context' => ['row_no' => $rowNo, 'phase_code' => $phaseCode],
                     ];
+
                     continue;
                 }
 
                 $assigneeId = $entry['assignee_id'];
                 if (! isset($teamSet[$assigneeId])) {
                     $violations[] = [
-                        'code'    => 'unknown_assignee',
+                        'code' => 'unknown_assignee',
                         'message' => "Assignee {$assigneeId} is not on the project team (row {$rowNo}, phase {$phaseCode}).",
                         'context' => ['row_no' => $rowNo, 'phase_code' => $phaseCode, 'assignee_id' => $assigneeId],
                     ];
+
                     // Don't run further per-entry checks since they depend on a valid assignee.
                     continue;
                 }
 
+                // capacity_role compatibility — pm can't QA, qa can't develop, etc.
+                if (! empty($capacityRoleByAssignee) && isset(self::PHASE_CAPACITY_ROLES[$phaseCode])) {
+                    $assigneeRole = $capacityRoleByAssignee[$assigneeId] ?? null;
+                    $eligibleRoles = self::PHASE_CAPACITY_ROLES[$phaseCode];
+                    if ($assigneeRole !== null && ! in_array($assigneeRole, $eligibleRoles, true)) {
+                        $violations[] = [
+                            'code' => 'capacity_role_mismatch',
+                            'message' => "Assignee {$assigneeId} has capacity_role '{$assigneeRole}' but phase "
+                                ."{$phaseCode} is restricted to ".implode('|', $eligibleRoles)
+                                ." (row {$rowNo}). Reassign to a teammate whose capacity_role is in the eligible list.",
+                            'context' => [
+                                'row_no' => $rowNo,
+                                'phase_code' => $phaseCode,
+                                'assignee_id' => $assigneeId,
+                                'assignee_role' => $assigneeRole,
+                                'eligible_roles' => $eligibleRoles,
+                            ],
+                        ];
+                    }
+                }
+
                 $start = Carbon::parse($entry['planned_start'])->startOfDay();
-                $end   = Carbon::parse($entry['planned_end'])->startOfDay();
+                $end = Carbon::parse($entry['planned_end'])->startOfDay();
 
                 if ($end->lessThan($start)) {
                     $violations[] = [
-                        'code'    => 'inverted_range',
+                        'code' => 'inverted_range',
                         'message' => "planned_end before planned_start (row {$rowNo}, phase {$phaseCode}).",
                         'context' => ['row_no' => $rowNo, 'phase_code' => $phaseCode, 'planned_start' => $entry['planned_start'], 'planned_end' => $entry['planned_end']],
                     ];
+
                     continue;
                 }
 
                 if ($start->lessThan($windowStart) || $end->greaterThan($effectiveEnd)) {
                     $violations[] = [
-                        'code'    => 'out_of_window',
+                        'code' => 'out_of_window',
                         'message' => "Range {$entry['planned_start']}..{$entry['planned_end']} is outside the project window {$windowStart->toDateString()}..{$effectiveEnd->toDateString()} (row {$rowNo}, phase {$phaseCode}).",
                         'context' => ['row_no' => $rowNo, 'phase_code' => $phaseCode, 'window_start' => $windowStart->toDateString(), 'window_end' => $effectiveEnd->toDateString()],
                     ];
@@ -124,14 +206,14 @@ class AiScheduleValidator
 
                 if (! $calendar->isWorkingDay($start, $assigneeId)) {
                     $violations[] = [
-                        'code'    => 'non_working_start',
+                        'code' => 'non_working_start',
                         'message' => "planned_start {$entry['planned_start']} is not a working day for assignee (row {$rowNo}, phase {$phaseCode}).",
                         'context' => ['row_no' => $rowNo, 'phase_code' => $phaseCode, 'date' => $entry['planned_start']],
                     ];
                 }
                 if (! $calendar->isWorkingDay($end, $assigneeId)) {
                     $violations[] = [
-                        'code'    => 'non_working_end',
+                        'code' => 'non_working_end',
                         'message' => "planned_end {$entry['planned_end']} is not a working day for assignee (row {$rowNo}, phase {$phaseCode}).",
                         'context' => ['row_no' => $rowNo, 'phase_code' => $phaseCode, 'date' => $entry['planned_end']],
                     ];
@@ -140,12 +222,12 @@ class AiScheduleValidator
                 // Duration sanity.
                 $hpd = max(self::HOURS_PER_DAY_FLOOR, $payload->hoursPerDayFor($assigneeId, self::DEFAULT_HOURS_PER_DAY));
                 $expectedDays = max(1, (int) ceil(((float) $phaseDef['hours']) / $hpd));
-                $actualDays   = $calendar->workingDaysBetween($start, $end, $assigneeId);
+                $actualDays = $calendar->workingDaysBetween($start, $end, $assigneeId);
                 $minDays = max(1, (int) floor($expectedDays * (1 - self::DURATION_TOLERANCE)));
                 $maxDays = max($minDays, (int) ceil($expectedDays * (1 + self::DURATION_TOLERANCE)));
                 if ($actualDays < $minDays || $actualDays > $maxDays) {
                     $violations[] = [
-                        'code'    => 'duration_out_of_tolerance',
+                        'code' => 'duration_out_of_tolerance',
                         'message' => "Duration {$actualDays} working days is outside the tolerated range {$minDays}..{$maxDays} for {$phaseDef['hours']}h at {$hpd}h/day (row {$rowNo}, phase {$phaseCode}).",
                         'context' => [
                             'row_no' => $rowNo, 'phase_code' => $phaseCode,
@@ -156,11 +238,15 @@ class AiScheduleValidator
                 }
 
                 $intervals[$assigneeId][] = [
-                    'start'  => $start,
-                    'end'    => $end,
+                    'start' => $start,
+                    'end' => $end,
                     'row_no' => $rowNo,
-                    'phase'  => $phaseCode,
+                    'phase' => $phaseCode,
                 ];
+
+                // Accumulate hours for the per-assignee cap check below.
+                $assignedHoursByAssignee[$assigneeId] =
+                    ($assignedHoursByAssignee[$assigneeId] ?? 0.0) + (float) $phaseDef['hours'];
             }
 
             // 3. Phase order — within a task, sorted by phase_order, planned_start non-decreasing.
@@ -170,7 +256,7 @@ class AiScheduleValidator
                     $entry = $payload->assignmentsByRowPhase[$rowNo][$p['code']];
                     $ordered[] = [
                         'order' => $p['order'] ?? 0,
-                        'code'  => $p['code'],
+                        'code' => $p['code'],
                         'start' => Carbon::parse($entry['planned_start']),
                     ];
                 }
@@ -179,7 +265,7 @@ class AiScheduleValidator
             for ($i = 1; $i < count($ordered); $i++) {
                 if ($ordered[$i]['start']->lessThan($ordered[$i - 1]['start'])) {
                     $violations[] = [
-                        'code'    => 'phase_order_violation',
+                        'code' => 'phase_order_violation',
                         'message' => "Phase {$ordered[$i]['code']} starts before earlier phase {$ordered[$i - 1]['code']} in row {$rowNo}.",
                         'context' => ['row_no' => $rowNo, 'phase_code' => $ordered[$i]['code'], 'previous_phase' => $ordered[$i - 1]['code']],
                     ];
@@ -187,15 +273,87 @@ class AiScheduleValidator
             }
         }
 
-        // 4. Double-booking.
+        // 4. Per-assignee allocation cap. Compares Σ(phase hours assigned)
+        //    against the stored allocated_hours from project_team_assignments,
+        //    which equals workable_hours × ghost_role.months — the member's
+        //    honest engagement-window capacity. Tolerated overshoot is
+        //    ALLOCATION_TOLERANCE (10%) to absorb estimator/rank-weight noise.
+        foreach ($assignedHoursByAssignee as $assigneeId => $assignedHours) {
+            $cap = $allocatedHoursByAssignee[$assigneeId] ?? null;
+            if ($cap === null || $cap <= 0.0) {
+                continue;
+            }
+            $ceiling = $cap * (1.0 + self::ALLOCATION_TOLERANCE);
+            if ($assignedHours > $ceiling) {
+                $violations[] = [
+                    'code' => 'over_allocation',
+                    'message' => "Assignee {$assigneeId} has ".number_format($assignedHours, 1)
+                        .'h of phase work scheduled but their allocated_hours capacity is '
+                        .number_format($cap, 1).'h (tolerated up to '.number_format($ceiling, 1).'h). '
+                        .'Move excess hours to another team member in the same role pool, or reduce hours assigned to this person.',
+                    'context' => [
+                        'assignee_id' => $assigneeId,
+                        'assigned_hours' => $assignedHours,
+                        'allocated_hours' => $cap,
+                        'ceiling' => $ceiling,
+                        'overshoot' => $assignedHours - $cap,
+                    ],
+                ];
+            }
+        }
+
+        // 5. Engagement-window span. A member contracted for N months on this
+        //    project should not have phases spread across (much) more calendar
+        //    time than that. We measure the span from earliest planned_start to
+        //    latest planned_end and compare against months × ENGAGEMENT_DAYS_PER_MONTH.
+        //    This catches a 3-month QA whose phases span all 5 months of the
+        //    project window, leaving them paid-but-not-working in the middle.
+        foreach ($engagementMonthsByAssignee as $assigneeId => $months) {
+            if ($months <= 0 || empty($intervals[$assigneeId])) {
+                continue;
+            }
+            $list = $intervals[$assigneeId];
+            $minStart = $list[0]['start'];
+            $maxEnd = $list[0]['end'];
+            foreach ($list as $iv) {
+                if ($iv['start']->lessThan($minStart)) {
+                    $minStart = $iv['start'];
+                }
+                if ($iv['end']->greaterThan($maxEnd)) {
+                    $maxEnd = $iv['end'];
+                }
+            }
+            $spanDays = $minStart->diffInDays($maxEnd) + 1;
+            $maxSpan = (int) ceil($months * self::ENGAGEMENT_DAYS_PER_MONTH * (1.0 + self::ENGAGEMENT_WINDOW_TOLERANCE));
+            if ($spanDays > $maxSpan) {
+                $violations[] = [
+                    'code' => 'engagement_window_exceeded',
+                    'message' => "Assignee {$assigneeId} phases span {$spanDays} calendar days "
+                        ."({$minStart->toDateString()}..{$maxEnd->toDateString()}) but their "
+                        .'engagement is '.number_format($months, 1).' months ('
+                        ."≈ {$maxSpan} days with tolerance). Cluster their phases into a tighter window "
+                        .'or assign the outlier phase(s) to another team member.',
+                    'context' => [
+                        'assignee_id' => $assigneeId,
+                        'engagement_months' => $months,
+                        'span_days' => $spanDays,
+                        'max_span_days' => $maxSpan,
+                        'first_start' => $minStart->toDateString(),
+                        'last_end' => $maxEnd->toDateString(),
+                    ],
+                ];
+            }
+        }
+
+        // 6. Double-booking.
         foreach ($intervals as $assigneeId => $list) {
             usort($list, fn ($a, $b) => $a['start']->timestamp <=> $b['start']->timestamp);
             for ($i = 1; $i < count($list); $i++) {
                 $prev = $list[$i - 1];
-                $cur  = $list[$i];
+                $cur = $list[$i];
                 if ($cur['start']->lessThanOrEqualTo($prev['end'])) {
                     $violations[] = [
-                        'code'    => 'double_booking',
+                        'code' => 'double_booking',
                         'message' => "Assignee {$assigneeId} has overlapping ranges: row {$prev['row_no']}/{$prev['phase']} ({$prev['start']->toDateString()}..{$prev['end']->toDateString()}) and row {$cur['row_no']}/{$cur['phase']} ({$cur['start']->toDateString()}..{$cur['end']->toDateString()}).",
                         'context' => [
                             'assignee_id' => $assigneeId,

@@ -50,4 +50,22 @@ class EstimateFileResolver
 
         return $absolute;
     }
+
+    /**
+     * Per-tenant Estimate.xlsx fallback used when a project has no
+     * `estimation_versions.xlsx_path`. Each tenant gets its own copy under
+     * `storage/app/tenants/{tenant_id}/estimate-fallback.xlsx`, preventing the
+     * cross-tenant data leak that the legacy `public/storage/Estimate.xlsx`
+     * fallback caused (every tenant reading the same file regardless of who
+     * uploaded it).
+     *
+     * Returns null when the tenant has no fallback file; callers must surface
+     * a 422 instead of silently sharing data.
+     */
+    public function tenantFallbackPath(string $tenantId): ?string
+    {
+        $path = Storage::disk('local')->path('tenants/'.$tenantId.'/estimate-fallback.xlsx');
+
+        return file_exists($path) ? $path : null;
+    }
 }
