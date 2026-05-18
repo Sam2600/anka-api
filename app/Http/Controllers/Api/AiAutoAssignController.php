@@ -15,6 +15,7 @@ use App\Models\ProjectTaskAssignment;
 use App\Models\ProjectTaskPhaseAssignment;
 use App\Models\ProjectTeamAssignment;
 use App\Services\Ai\AiTeamPlanValidator;
+use App\Services\EmployeeCapacityService;
 use App\Services\EstimateFileResolver;
 use App\Services\Scheduling\AiSchedulePayload;
 use App\Services\Scheduling\AiScheduleValidator;
@@ -392,7 +393,6 @@ PROMPT;
         foreach ($project->teamAssignments as $a) {
             $emp = $a->employee;
             $capRole = optional(optional($emp)->capacityRole)->code ?? optional($emp)->capacity_role;
-            $workable = (float) (optional($emp)->workable_hours ?? 160);
 
             $matched = null;
             if ($capRole && ! empty($slotsByRoleType[$capRole])) {
@@ -408,7 +408,9 @@ PROMPT;
                 'capacity_role' => $capRole,
                 'ghost_role_id' => $matched['ghost_role_id'] ?? null,
                 'months' => $months,
-                'allocated_hours' => $months > 0 ? $workable * $months : 0.0,
+                'allocated_hours' => $emp && $months > 0
+                    ? $this->engagementAvailableHours($emp, $project, $months)
+                    : 0.0,
                 'unmatched' => $matched === null,
             ];
         }
@@ -669,8 +671,7 @@ PROMPT;
         $existingSet = $existing->keys()->flip()->all();
 
         $employeeIds = collect($validated['picks'])->pluck('employee_id')->unique()->all();
-        $employeeWorkableHours = Employee::whereIn('id', $employeeIds)
-            ->pluck('workable_hours', 'id');
+        $employeesById = Employee::whereIn('id', $employeeIds)->get()->keyBy('id');
 
         $ghostRoleIds = collect($validated['picks'])
             ->pluck('ghost_role_id')
@@ -687,7 +688,7 @@ PROMPT;
 
         DB::transaction(function () use (
             $validated, $project, $tenantId, $existingSet, $existing,
-            $ghostRoleMonths, $employeeWorkableHours, $slotsByRoleType,
+            $ghostRoleMonths, $employeesById, $slotsByRoleType,
             &$inserted, &$updated,
         ) {
             // 1. Insert new picks.
@@ -699,9 +700,11 @@ PROMPT;
                 $months = isset($pick['ghost_role_id'])
                     ? (int) ($ghostRoleMonths[$pick['ghost_role_id']] ?? 0)
                     : 0;
-                $workable = (float) ($employeeWorkableHours[$pick['employee_id']] ?? 160);
+                $emp = $employeesById[$pick['employee_id']] ?? null;
                 $allocated = $pick['allocated_hours']
-                    ?? ($months > 0 ? $workable * $months : 160);
+                    ?? ($emp && $months > 0
+                        ? $this->engagementAvailableHours($emp, $project, $months)
+                        : ($emp ? (float) ($emp->workable_hours ?? 160) : 160));
 
                 ProjectTeamAssignment::create([
                     'tenant_id' => $tenantId,
@@ -721,7 +724,6 @@ PROMPT;
             foreach ($existing as $employeeId => $row) {
                 $emp = $row->employee;
                 $capRole = optional(optional($emp)->capacityRole)->code ?? optional($emp)->capacity_role;
-                $workable = (float) (optional($emp)->workable_hours ?? 160);
 
                 $matched = null;
                 if ($capRole && ! empty($slotsByRoleType[$capRole])) {
@@ -729,7 +731,9 @@ PROMPT;
                 }
 
                 $months = (int) ($matched['months'] ?? 0);
-                $newAllocated = $months > 0 ? $workable * $months : 0.0;
+                $newAllocated = $emp && $months > 0
+                    ? $this->engagementAvailableHours($emp, $project, $months)
+                    : 0.0;
 
                 if (abs((float) $row->allocated_hours - $newAllocated) > 0.001) {
                     $row->allocated_hours = $newAllocated;
@@ -1273,6 +1277,31 @@ PROMPT;
         }
 
         return $calendar;
+    }
+
+    /**
+     * Holiday-aware allocated_hours for an N-month engagement that starts at
+     * the project's start_date. Falls back to the legacy `workable_hours ×
+     * months` formula when the project has no start_date (preserves behaviour
+     * for projects mid-migration). When start_date is present, sums the real
+     * available working hours across each engagement month — so months with
+     * more holidays produce a smaller cap automatically.
+     */
+    private function engagementAvailableHours(Employee $employee, Project $project, int $months): float
+    {
+        $workable = (float) ($employee->workable_hours ?? 160);
+        if ($months <= 0) {
+            return 0.0;
+        }
+        if (! $project->start_date) {
+            return $workable * $months;
+        }
+
+        $start = Carbon::parse($project->start_date)->startOfDay();
+        $end = $start->copy()->addMonths($months)->subDay();
+
+        return app(EmployeeCapacityService::class)
+            ->windowAvailableHours($employee, $start, $end);
     }
 
     /**

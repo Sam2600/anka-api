@@ -11,6 +11,8 @@ use App\Http\Controllers\Api\DealContractDraftController;
 use App\Http\Controllers\Api\DealController;
 use App\Http\Controllers\Api\EstimationVersionController;
 use App\Http\Controllers\Api\ExchangeRateController;
+use App\Http\Controllers\Api\HolidayController;
+use App\Http\Controllers\Api\TeamCapacityController;
 use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\MilestoneController;
 use App\Http\Controllers\Api\OrganizationController;
@@ -175,6 +177,19 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::post('/employees', [OrganizationController::class, 'storeEmployee']);
     Route::put('/employees/{employee}', [OrganizationController::class, 'updateEmployee']);
     Route::delete('/employees/{employee}', [OrganizationController::class, 'destroyEmployee']);
+
+    // Public holidays — tenant-scoped, drives holiday-aware capacity math
+    // in the AI scheduler and the Time Tracking utilization KPI.
+    Route::get   ('/holidays',            [HolidayController::class, 'index']);
+    Route::post  ('/holidays',            [HolidayController::class, 'store']);
+    Route::patch ('/holidays/{holiday}',  [HolidayController::class, 'update']);
+    Route::delete('/holidays/{holiday}',  [HolidayController::class, 'destroy']);
+
+    // Tenant-wide holiday-aware capacity. Sums Σ available_hours across
+    // active employees for an arbitrary date range. Time Tracking page's
+    // utilization denominator reads from here so the KPI drops in months
+    // with more public holidays.
+    Route::get   ('/team-capacity',       [TeamCapacityController::class, 'index']);
 
     // Salary history (spec ②.1.B) — one row per (employee, target_month).
     Route::get('/employees/{employee}/salary-history', [OrganizationController::class, 'indexSalaryHistory']);
