@@ -29,9 +29,13 @@ class TenantAppRoleSeeder
     {
         return [
             'Admin'     => ['all'],
-            'Executive' => ['view_dashboard', 'view_reports', 'manage_tenant', 'view_projects', 'view_crm'],
+            'Executive' => ['view_dashboard', 'view_reports', 'manage_tenant', 'view_projects', 'view_schedule_tracking', 'view_crm'],
             'Sales'     => ['view_crm', 'manage_crm', 'manage_estimation', 'view_contracts'],
-            'Delivery'  => ['view_projects', 'manage_projects', 'track_time'],
+            // Delivery is the IC employee surface: only My Schedule (public)
+            // and the schedule-tracking dashboards. They log progress through
+            // My Schedule's "Log Progress" modal which uses the phase-assignment
+            // progress-log endpoint — no `track_time` permission needed for that.
+            'Delivery'  => ['view_schedule_tracking'],
             'HR'        => ['manage_organization', 'view_employees', 'manage_employees'],
         ];
     }
