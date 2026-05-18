@@ -811,7 +811,9 @@ class DemoTestingSeeder extends Seeder
                 'function_name' => $member['feature'],
                 'category' => 'Implementation',
                 'offshore' => false,
-                'difficulty' => 'medium',
+                // CHECK constraint on Postgres requires Japanese values:
+                // '簡単' (easy), '普通' (normal), '難しい' (hard).
+                'difficulty' => '普通',
                 'total_hours' => $allocated,
             ]);
 
