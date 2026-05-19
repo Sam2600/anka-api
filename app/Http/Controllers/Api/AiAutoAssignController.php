@@ -442,13 +442,46 @@ PROMPT;
             ]);
         }
 
-        // 3. Eligible employee pool — active, full-time (>=160h/mo), in tenant,
-        //    not already on this project's team.
+        // 3a. Cross-project overlap exclusion. An employee already booked on
+        //     ANOTHER project whose [start_date, end_date] window overlaps
+        //     this project's window is dropped from the candidate pool — so
+        //     the AI never sees them, never picks them, and they can't get
+        //     double-booked. Sequential schedules (Project A ends May 31,
+        //     Project B starts June 1) do NOT overlap and the same employee
+        //     remains reusable on the second project.
+        //
+        //     Skip entirely when this project has no start_date/end_date —
+        //     we can't compute overlap without a window, so we fall through
+        //     to the legacy "active + 160h/mo" filter only. Other projects
+        //     are skipped from the check when their own dates are null, the
+        //     project is soft-deleted, or status = Completed.
+        $busyEmployeeIds = [];
+        if ($project->start_date && $project->end_date) {
+            $busyEmployeeIds = DB::table('project_team_assignments as pta')
+                ->join('projects as p', 'p.id', '=', 'pta.project_id')
+                ->where('pta.tenant_id', $tenantId)
+                ->where('p.id', '!=', $project->id)
+                ->whereNull('p.deleted_at')
+                ->where('p.status', '!=', 'Completed')
+                ->whereNotNull('p.start_date')
+                ->whereNotNull('p.end_date')
+                ->where('p.start_date', '<=', $project->end_date)
+                ->where('p.end_date', '>=', $project->start_date)
+                ->pluck('pta.employee_id')
+                ->unique()
+                ->values()
+                ->all();
+        }
+
+        // 3b. Eligible employee pool — active, full-time (>=160h/mo), in tenant,
+        //     not already on this project's team, and not booked on any
+        //     overlapping project (see 3a).
         $eligible = Employee::with(['rank', 'capacityRole'])
             ->where('tenant_id', $tenantId)
             ->where('status', 'Active')
             ->where('workable_hours', '>=', 160)
             ->whereNotIn('id', $keptEmployeeIds)
+            ->whereNotIn('id', $busyEmployeeIds)
             ->get();
 
         $employeePool = $eligible->map(fn ($emp) => [
