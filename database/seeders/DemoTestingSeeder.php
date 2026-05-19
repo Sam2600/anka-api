@@ -5,7 +5,9 @@ namespace Database\Seeders;
 use App\Models\CapacityRole;
 use App\Models\CompanySetting;
 use App\Models\Contract;
+use App\Models\ContractTemplate;
 use App\Models\Deal;
+use App\Models\DealContractDraft;
 use App\Models\DealGhostRole;
 use App\Models\DealHardAssignment;
 use App\Models\DealOverhead;
@@ -687,15 +689,15 @@ class DemoTestingSeeder extends Seeder
             'client_budget' => 84_622_476,
             'timeline_months' => $months,
             'workload_hours' => $months * 3 * 160,
-            'workload_description' => 'A-rank deal in negotiation. Project window: 2026/07 – 2026/10. Full estimation lock-in; ready to draft contract.',
-            'ot_policy_model' => 'customer_pays_per_hour',
-            'ot_rate_per_hour' => 35_000,
+            'workload_description' => 'Cloud Backup Service rollout for Customer Gamma\'s legacy on-prem file servers (~12 TB across Tokyo HQ and Osaka branch). Migration to managed AWS S3 + Glacier tier with central admin console, daily incremental snapshots, weekly full backups, and 90-day retention. Includes one-time historical migration, monitoring dashboard setup, and operations runbook handover. Project window: 2026/07/01 – 2026/10/31. Full estimation lock-in; ready to draft contract.',
+            'ot_policy_model' => 'no_overtime_allowed',
+            'ot_rate_per_hour' => 0,
             'ot_included_hours_per_month' => 0,
-            'ot_notes' => 'All OT billable to customer.',
-            'customer_support_obligations' => 'Customer provides test environment + sample data.',
-            'out_of_scope_policy' => 'Hardware procurement out of scope.',
-            'working_hours' => '09:00 – 18:00 Mon–Fri JST',
-            'testing_range' => 'Browser: Chrome + Edge latest. Mobile: not in scope.',
+            'ot_notes' => 'No overtime planned. Engagement runs strictly within Provider business hours; any work that would require extension beyond the contracted 160 hours per resource per month must be re-scoped via a written change request, not absorbed as OT.',
+            'customer_support_obligations' => "Customer agrees to provide:\n• Read-only credentials to all source file servers (Windows 2012 R2+ / Ubuntu 20.04+) within 5 business days of contract signing.\n• AWS account with IAM admin role for Provider's backup automation user (scope: S3 + Glacier + CloudWatch only).\n• One named technical liaison reachable Mon–Fri 09:00–18:00 JST for source-side blockers.\n• Documented inventory of source paths, exclusions, and current retention requirements (Provider supplies template).\n• Test data set (~50 GB) for cutover dry-runs prior to production migration.",
+            'out_of_scope_policy' => "The following are NOT included in this contract — change requests for any of these items will be quoted and invoiced separately:\n• Hardware procurement (NAS, network gear, on-prem agents).\n• Database-native backups (Oracle RMAN, SQL Server, MongoDB) — file-level snapshots only.\n• 24/7 monitoring; coverage is business-hours JST as defined below.\n• Disaster-recovery (DR) failover orchestration beyond restore-from-backup runbook.\n• Restoration of data older than the 90-day retention window.\n• Training sessions beyond the included 2-hour handover workshop.\n• Any work outside Provider's standard business hours.",
+            'working_hours' => "Provider's standard working hours are 09:00–18:00 JST, Monday through Friday, excluding Japanese public holidays. Scheduled maintenance windows for cutover migrations will be agreed in writing at least 5 business days in advance, typically running 22:00 JST – 02:00 JST (next day) on weekends, and are absorbed within the contracted monthly capacity. No out-of-hours support is provided under this contract.",
+            'testing_range' => "Verification covers:\n• Browser support for the backup admin console: Chrome (latest), Edge (latest), Firefox ESR.\n• Operating systems for restore validation: Windows Server 2012 R2 / 2019 / 2022, Ubuntu 20.04 / 22.04 LTS.\n• Restore drills: 3 randomly-selected files per source system, weekly during the first month, monthly thereafter.\n• Out of scope: mobile-device backup, macOS endpoints, internal-only file-share protocols (SMB v1).",
             'target_margin' => 50,
             'base_labor_cost' => $rollup['labor'],
             'overhead_cost' => $rollup['overhead'],
@@ -720,6 +722,13 @@ class DemoTestingSeeder extends Seeder
             ['role_type' => 'pm',      'quantity' => 1, 'months' => $months],
             ['role_type' => 'backend', 'quantity' => 2, 'months' => $months],
         ], [], $admin);
+
+        // Pre-seed a DealContractDraft so the Kanban menu's "Open contract draft"
+        // item lights up for A-Project1 (the item is conditional on
+        // `deal.status === 'negotiation' && deal.activeContractDraftId`,
+        // where activeContractDraftId is computed at query time as the latest
+        // non-superseded draft for the deal).
+        $this->createContractDraftStub($tenant, $deal, $admin);
     }
 
     /**
@@ -1232,5 +1241,222 @@ class DemoTestingSeeder extends Seeder
             'min' => (float) $matches->min('monthly_salary'),
             'max' => (float) $matches->max('monthly_salary'),
         ];
+    }
+
+    /**
+     * Pre-seed a DealContractDraft with realistic rendered sections so the
+     * "Open contract draft" view shows polished content for demos. Uses the
+     * first global SES template (Cloud Backup Service) which has 10 sections.
+     */
+    private function createContractDraftStub(Tenant $tenant, Deal $deal, User $admin): void
+    {
+        $template = ContractTemplate::orderBy('created_at')->first();
+        if (! $template) {
+            return;
+        }
+
+        $wizardInputs = [
+            'provider_party_name' => $tenant->name,
+            'customer_party_name' => $deal->client,
+            'project_title' => $deal->name,
+            'currency' => 'MMK',
+            'backup_software' => 'Veeam Backup & Replication v12.1',
+            'cloud_platform' => 'AWS',
+            'data_tier_tb' => 12,
+            'usage_period_months' => 12,
+            'monthly_capacity_gb' => 12_000,
+        ];
+
+        $aiOutputs = [
+            'description_of_services' =>
+                "Provider agrees to supply Customer with a centrally managed, "
+                . "cloud-based backup service for Customer's file-server infrastructure, "
+                . "protecting approximately 12 TB of business-critical data across "
+                . "Customer's Tokyo HQ and Osaka branch against unauthorised access, "
+                . "modification, and accidental or malicious deletion. The service is "
+                . "delivered via a centralised management console hosted on AWS, with "
+                . "ongoing monitoring during Provider's contracted support hours, daily "
+                . "incremental snapshots, weekly full backups, and a 90-day retention "
+                . "policy. Monthly service capacity covers up to 12 TB of source data; "
+                . "any expansion beyond this threshold will be quoted and contracted "
+                . "separately under the change-request procedure described herein.",
+            'services_provided' =>
+                "Backup Software: Veeam Backup & Replication v12.1\n"
+                . "Cloud Platform: AWS (Tokyo region, multi-AZ replication enabled)\n"
+                . "Data Volume Tier: 12 TB initial commitment (additional capacity priced per the rate card)\n"
+                . "Retention Policy: 90 days standard; quarterly full backups archived to AWS Glacier Deep Archive for 7 years\n"
+                . "Schedule: Incremental backups every 24 hours at 22:00 JST; weekly full backups Sundays 00:00 JST",
+            'scope_of_work' =>
+                "(1) Discovery & Inventory: Provider will catalogue Customer's source "
+                . "file servers, document existing retention policies, and map data "
+                . "classification tiers within the first two weeks of the contract.\n\n"
+                . "(2) Migration & Cutover: Initial historical migration of approximately "
+                . "12 TB to AWS S3 with concurrent verification. Production cutover will "
+                . "be scheduled during an agreed maintenance window (typically a weekend "
+                . "evening JST) with rollback procedures in place.\n\n"
+                . "(3) Operations & Handover: Provider will establish daily monitoring "
+                . "routines, set up alerting via CloudWatch + Slack integration, and "
+                . "deliver a two-hour runbook handover workshop to Customer's technical "
+                . "liaison upon completion of the first month of stable operation.",
+            'requirements' =>
+                "Customer's obligations are documented in DEAL CONTEXT and include "
+                . "provisioning read-only credentials to source servers, granting an "
+                . "AWS IAM admin role scoped to backup-related services, designating a "
+                . "named technical liaison reachable during business hours JST, supplying "
+                . "a complete inventory of source paths and exclusions, and providing a "
+                . "test data set for cutover dry-runs. Provider is not responsible for "
+                . "backup failures attributable to source-side credentials, network, or "
+                . "permission changes made outside of Provider's notification protocol.",
+            'fees' =>
+                "Monthly Service Fee: MMK 21,155,619 (covers up to 12 TB stored data + "
+                . "operations + support during business hours).\n"
+                . "Additional Storage: MMK 1,500,000 per TB-month over the 12 TB threshold, "
+                . "pro-rated daily.\n"
+                . "One-off Migration Fee: Waived for the initial 12 TB; covered within the "
+                . "scope of this contract.\n"
+                . "Out-of-hours work: Not included. Any work outside Provider's business "
+                . "hours requires a separate, mutually agreed change request prior to "
+                . "execution.",
+            'usage_period' =>
+                "This Service shall commence on 2026/07/01 and remain in effect for a "
+                . "term of twelve (12) months, ending 2027/06/30, unless terminated "
+                . "earlier per the Termination clause. Renewal terms will be negotiated "
+                . "in good faith no less than sixty (60) days prior to the term end date.",
+            'monitoring' =>
+                "Provider will monitor backup job success / failure during business hours "
+                . "(09:00–18:00 JST, Monday–Friday, excluding Japanese public holidays). "
+                . "Failed jobs will trigger an automated alert to both Provider's on-call "
+                . "engineer and Customer's named technical liaison within fifteen (15) "
+                . "minutes. Monthly service reports will be delivered by the 5th business "
+                . "day of the following month and will include backup completion rates, "
+                . "data-volume trends, and any incident summaries.",
+            'termination' =>
+                "Either party may terminate this contract upon ninety (90) days written "
+                . "notice, with the following data-handling commitments: Provider will "
+                . "maintain backup access for thirty (30) days after termination at no "
+                . "additional charge, after which Customer's data will be securely "
+                . "purged from Provider-managed AWS storage subject to Customer "
+                . "confirmation. Provider will supply, free of charge, a final export of "
+                . "the most recent full backup in an industry-standard format suitable "
+                . "for restoration on third-party tooling.",
+        ];
+
+        $sections = [
+            [
+                'key' => 'description_of_services',
+                'title' => 'DESCRIPTION OF SERVICES',
+                'type' => 'ai_written',
+                'output_format' => 'paragraph',
+                'rendered' => $aiOutputs['description_of_services'],
+                'has_todo' => false,
+                'user_edited' => false,
+            ],
+            [
+                'key' => 'services_provided',
+                'title' => 'SERVICES PROVIDED',
+                'type' => 'ai_with_slots',
+                'output_format' => 'table',
+                'rendered' => $aiOutputs['services_provided'],
+                'has_todo' => false,
+                'user_edited' => false,
+            ],
+            [
+                'key' => 'scope_of_work',
+                'title' => 'SCOPE OF WORK',
+                'type' => 'ai_written',
+                'output_format' => 'paragraph',
+                'rendered' => $aiOutputs['scope_of_work'],
+                'has_todo' => false,
+                'user_edited' => false,
+            ],
+            [
+                'key' => 'requirements',
+                'title' => 'REQUIREMENTS',
+                'type' => 'ai_written',
+                'output_format' => 'paragraph',
+                'rendered' => $aiOutputs['requirements'],
+                'has_todo' => false,
+                'user_edited' => false,
+            ],
+            [
+                'key' => 'fees',
+                'title' => 'CALCULATION OF FEES AND OTHER CHARGES',
+                'type' => 'ai_with_slots',
+                'output_format' => 'paragraph',
+                'rendered' => $aiOutputs['fees'],
+                'has_todo' => false,
+                'user_edited' => false,
+            ],
+            [
+                'key' => 'usage_period',
+                'title' => 'USAGE PERIOD',
+                'type' => 'slot_only',
+                'output_format' => 'paragraph',
+                'rendered' => $aiOutputs['usage_period'],
+                'has_todo' => false,
+                'user_edited' => false,
+            ],
+            [
+                'key' => 'monitoring',
+                'title' => 'MONITORING',
+                'type' => 'slot_only',
+                'output_format' => 'paragraph',
+                'rendered' => $aiOutputs['monitoring'],
+                'has_todo' => false,
+                'user_edited' => false,
+            ],
+            [
+                'key' => 'payment_policy',
+                'title' => 'PAYMENT POLICY',
+                'type' => 'fixed',
+                'output_format' => 'paragraph',
+                'rendered' =>
+                    "(a) {$tenant->name} will submit invoices to {$deal->client} at the end of each month.\n"
+                    . "(b) Payment is payable within 7 days of the date of invoice.\n"
+                    . "(c) All applicable bank charges and taxes shall be paid by the {$deal->client}.",
+                'has_todo' => false,
+                'user_edited' => false,
+            ],
+            [
+                'key' => 'cancellation_fee',
+                'title' => 'CANCELLATION FEE',
+                'type' => 'fixed',
+                'output_format' => 'paragraph',
+                'rendered' =>
+                    "If {$deal->client} cancels the Service before the agreed usage "
+                    . "period ends, a cancellation fee equal to fifty percent (50%) of "
+                    . "the remaining monthly fees for the unexpired portion of the term "
+                    . "shall be payable to {$tenant->name} within thirty (30) days of "
+                    . "cancellation notice.",
+                'has_todo' => false,
+                'user_edited' => false,
+            ],
+            [
+                'key' => 'termination',
+                'title' => 'TERMINATION',
+                'type' => 'ai_written',
+                'output_format' => 'paragraph',
+                'rendered' => $aiOutputs['termination'],
+                'has_todo' => false,
+                'user_edited' => false,
+            ],
+        ];
+
+        DealContractDraft::create([
+            'tenant_id' => $tenant->id,
+            'deal_id' => $deal->id,
+            'template_id' => $template->id,
+            'template_version_at_generation' => $template->version,
+            'status' => DealContractDraft::STATUS_DRAFT,
+            'version' => 1,
+            'wizard_inputs' => $wizardInputs,
+            'ai_outputs' => $aiOutputs,
+            'sections' => $sections,
+            'generated_by_user_id' => $admin->id,
+            'signatory_name_override' => null,
+            'signatory_title_override' => null,
+            'customer_signatory_name' => 'Mr. Hiroshi Watanabe',
+            'customer_signatory_title' => 'Director, Information Systems Division',
+        ]);
     }
 }
