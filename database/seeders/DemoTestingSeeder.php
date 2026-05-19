@@ -70,7 +70,7 @@ class DemoTestingSeeder extends Seeder
 {
     private const SLUG = 'brycen-myanmar-testing';
     private const PASSWORD = 'Demo@1234';
-    private const EMAIL_DOMAIN = 'testing.brycenmyanmar.com.mm';
+    private const EMAIL_DOMAIN = 'brycenmyanmar.com.mm';
     private const OVERHEAD_PCT = 15;
     private const SELL_MULTIPLIER = 2;
 
