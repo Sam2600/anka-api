@@ -274,6 +274,34 @@ class AiAutoAssignController extends Controller
         return response()->noContent();
     }
 
+    /**
+     * "Idle" employee pool — active full-timers (≥160h) who have zero rows in
+     * project_team_assignments across the whole tenant. The Team Preview
+     * dialog uses this to populate manual replacement / add dropdowns so the
+     * user can override AI picks without accidentally staffing someone who is
+     * already committed elsewhere. Shape matches the `proposed` row payload
+     * from planTeamPreview so the frontend can reuse the same display fields.
+     */
+    public function availableEmployees(Project $project)
+    {
+        $employees = Employee::with(['rank', 'capacityRole'])
+            ->idleAndFullTime()
+            ->orderBy('name')
+            ->get();
+
+        return [
+            'data' => $employees->map(fn (Employee $e) => [
+                'employee_id' => $e->id,
+                'name' => $e->name,
+                'rank_code' => optional($e->rank)->code,
+                'rank_name' => optional($e->rank)->name,
+                'capacity_role' => optional($e->capacityRole)->code ?? $e->capacity_role,
+                'workable_hours' => (float) $e->workable_hours,
+                'monthly_salary' => (float) $e->monthly_salary,
+            ])->values(),
+        ];
+    }
+
     private function extractSkillsFromDescription(string $description): array
     {
         $skillKeywords = [
@@ -448,12 +476,16 @@ PROMPT;
             ]);
         }
 
-        // 3. Eligible employee pool — active, full-time (>=160h/mo), in tenant,
-        //    not already on this project's team.
+        // 3. Eligible employee pool — active, full-time (>=160h/mo), with no
+        //    rows in project_team_assignments anywhere in the tenant. Same
+        //    conceptual pool the Team Preview dialog's manual picker draws
+        //    from, so AI and human draws don't disagree on availability.
+        //    Tenant scoping is automatic via BelongsToTenant.
+        //    `whereNotIn($keptEmployeeIds)` is redundant against the scope
+        //    (kept members already have team rows) but kept defensively in
+        //    case the relation eager-load order ever drifts.
         $eligible = Employee::with(['rank', 'capacityRole'])
-            ->where('tenant_id', $tenantId)
-            ->where('status', 'Active')
-            ->where('workable_hours', '>=', 160)
+            ->idleAndFullTime()
             ->whereNotIn('id', $keptEmployeeIds)
             ->get();
 
@@ -525,7 +557,13 @@ PROMPT;
             }
             $months = max(1, (int) ($gr['months'] ?? 1));
             $workable = (float) ($emp['workable_hours'] ?? 160);
-            $allocatedHours = (float) ($pick['allocated_hours'] ?? ($workable * $months));
+            // Always recompute server-side — the AI is supposed to honor
+            // "allocated_hours = workable_hours × months" (prompt RULE 5)
+            // but in practice it sometimes outputs 160 regardless of months.
+            // Trusting that value makes the dialog row read 160 for a 5-month
+            // role while the manual-addition row (which already computes
+            // workable × months) reads 800. Inconsistent. Force the math.
+            $allocatedHours = $workable * $months;
 
             $picksDecorated[] = [
                 'ghost_role_id' => $pick['ghost_role_id'],
@@ -641,6 +679,26 @@ PROMPT;
         // time. Proposed picks consume their own ghost_role_id directly; only
         // the kept rows need slot pairing.
         $project->load(['contract.deal.ghost_roles', 'teamAssignments.employee']);
+
+        // Race guard — between preview render and confirm submit, another
+        // tab or user could have staffed one of the picked employees on a
+        // different project. The dialog is otherwise unaware. Reject with
+        // 422 listing the conflicting names so the user knows what changed.
+        // Employees already on *this* project's team are exempt (they're
+        // the "kept" set whose allocated_hours we rewrite, not new picks).
+        $pickedIds = collect($validated['picks'])->pluck('employee_id')->unique();
+        $keptIds = $project->teamAssignments->pluck('employee_id');
+        $conflicts = Employee::whereIn('id', $pickedIds)
+            ->whereNotIn('id', $keptIds)
+            ->whereHas('teamAssignments')
+            ->pluck('name', 'id');
+        if ($conflicts->isNotEmpty()) {
+            return response()->json([
+                'error' => 'These employees are no longer idle and cannot be added: '.$conflicts->values()->implode(', '),
+                'conflict_employee_ids' => $conflicts->keys()->values()->all(),
+            ], 422);
+        }
+
         $deal = $project->contract?->deal;
         $ghostRoles = $deal?->ghost_roles ?? collect();
 

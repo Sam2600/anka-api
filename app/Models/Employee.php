@@ -2,17 +2,17 @@
 
 namespace App\Models;
 
+use App\Traits\BelongsToTenant;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
-use App\Traits\BelongsToTenant;
 use Illuminate\Support\Facades\DB;
 
 // cost_per_hour is a PostgreSQL GENERATED column — never add it to $fillable.
 class Employee extends Model
 {
-    use HasFactory, HasUuids, SoftDeletes, BelongsToTenant;
+    use BelongsToTenant, HasFactory, HasUuids, SoftDeletes;
 
     protected $fillable = [
         'tenant_id',
@@ -36,12 +36,12 @@ class Employee extends Model
     ];
 
     protected $casts = [
-        'id'             => 'string',
-        'basic_salary'   => 'float',
-        'allowance'      => 'float',
+        'id' => 'string',
+        'basic_salary' => 'float',
+        'allowance' => 'float',
         'monthly_salary' => 'float',
         'workable_hours' => 'integer',
-        'cost_per_hour'  => 'float',
+        'cost_per_hour' => 'float',
     ];
 
     /**
@@ -120,6 +120,25 @@ class Employee extends Model
     public function hardAssignments()
     {
         return $this->hasMany(DealHardAssignment::class);
+    }
+
+    public function teamAssignments()
+    {
+        return $this->hasMany(ProjectTeamAssignment::class);
+    }
+
+    /**
+     * "Available to staff a new project." Active full-timers with no current
+     * project_team_assignments row at all. Used by both the AI Team Builder
+     * pool (planTeamPreview) and the manual employee picker on the Team
+     * Preview dialog so both sides draw from the same conceptual pool.
+     */
+    public function scopeIdleAndFullTime($query)
+    {
+        return $query
+            ->where('status', 'Active')
+            ->where('workable_hours', '>=', 160)
+            ->whereDoesntHave('teamAssignments');
     }
 
     public function capacityRole()

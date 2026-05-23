@@ -1,9 +1,9 @@
 <?php
 
+use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AiAutoAssignController;
 use App\Http\Controllers\Api\AiTeamBuilderContextController;
 use App\Http\Controllers\Api\AiUsageController;
-use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ContractController;
 use App\Http\Controllers\Api\ContractTemplateController;
@@ -12,14 +12,14 @@ use App\Http\Controllers\Api\DealController;
 use App\Http\Controllers\Api\EstimationVersionController;
 use App\Http\Controllers\Api\ExchangeRateController;
 use App\Http\Controllers\Api\HolidayController;
-use App\Http\Controllers\Api\TeamCapacityController;
 use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\MilestoneController;
 use App\Http\Controllers\Api\OrganizationController;
 use App\Http\Controllers\Api\PhaseProgressLogController;
 use App\Http\Controllers\Api\ProjectController;
-use App\Http\Controllers\Api\ScheduleTrackingController;
 use App\Http\Controllers\Api\RankController;
+use App\Http\Controllers\Api\ScheduleTrackingController;
+use App\Http\Controllers\Api\TeamCapacityController;
 use App\Http\Controllers\Api\TenantAppRoleController;
 use App\Http\Controllers\Api\TenantController;
 use App\Http\Controllers\Api\TimeEntryController;
@@ -149,9 +149,9 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
 
     // Invoices
     Route::apiResource('invoices', InvoiceController::class)->only(['index', 'show', 'store', 'destroy']);
-    Route::patch('/invoices/{invoice}',      [InvoiceController::class, 'update']);
-    Route::patch('/invoices/{invoice}/pay',  [InvoiceController::class, 'pay']);
-    Route::post('/invoices/{invoice}/send',  [InvoiceController::class, 'send']);
+    Route::patch('/invoices/{invoice}', [InvoiceController::class, 'update']);
+    Route::patch('/invoices/{invoice}/pay', [InvoiceController::class, 'pay']);
+    Route::post('/invoices/{invoice}/send', [InvoiceController::class, 'send']);
 
     // Projects (created only via win_deal; no store route)
     Route::apiResource('projects', ProjectController::class)->only(['index', 'show', 'update', 'destroy']);
@@ -159,8 +159,8 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     // Time Entries
     Route::apiResource('time-entries', TimeEntryController::class)->only(['index', 'show', 'store', 'destroy']);
     Route::patch('/time-entries/{time_entry}/approve', [TimeEntryController::class, 'approve']);
-    Route::patch('/time-entries/{time_entry}/submit',  [TimeEntryController::class, 'submit']);
-    Route::patch('/time-entries/{time_entry}/reject',  [TimeEntryController::class, 'reject']);
+    Route::patch('/time-entries/{time_entry}/submit', [TimeEntryController::class, 'submit']);
+    Route::patch('/time-entries/{time_entry}/reject', [TimeEntryController::class, 'reject']);
 
     // Organization
     Route::get('/departments', [OrganizationController::class, 'indexDepartments']);
@@ -180,16 +180,16 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
 
     // Public holidays — tenant-scoped, drives holiday-aware capacity math
     // in the AI scheduler and the Time Tracking utilization KPI.
-    Route::get   ('/holidays',            [HolidayController::class, 'index']);
-    Route::post  ('/holidays',            [HolidayController::class, 'store']);
-    Route::patch ('/holidays/{holiday}',  [HolidayController::class, 'update']);
-    Route::delete('/holidays/{holiday}',  [HolidayController::class, 'destroy']);
+    Route::get('/holidays', [HolidayController::class, 'index']);
+    Route::post('/holidays', [HolidayController::class, 'store']);
+    Route::patch('/holidays/{holiday}', [HolidayController::class, 'update']);
+    Route::delete('/holidays/{holiday}', [HolidayController::class, 'destroy']);
 
     // Tenant-wide holiday-aware capacity. Sums Σ available_hours across
     // active employees for an arbitrary date range. Time Tracking page's
     // utilization denominator reads from here so the KPI drops in months
     // with more public holidays.
-    Route::get   ('/team-capacity',       [TeamCapacityController::class, 'index']);
+    Route::get('/team-capacity', [TeamCapacityController::class, 'index']);
 
     // Salary history (spec ②.1.B) — one row per (employee, target_month).
     Route::get('/employees/{employee}/salary-history', [OrganizationController::class, 'indexSalaryHistory']);
@@ -258,10 +258,10 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     // are readable by anyone in the tenant (sidebar + role pickers); writes
     // require manage_tenant. The permission catalog itself is code-defined
     // in App\Support\PermissionCatalog — admins compose, they don't invent.
-    Route::get('/tenant/app-roles',          [TenantAppRoleController::class, 'index']);
+    Route::get('/tenant/app-roles', [TenantAppRoleController::class, 'index']);
     Route::get('/tenant/permission-catalog', [TenantAppRoleController::class, 'catalog']);
     Route::middleware('permission:manage_tenant')->group(function () {
-        Route::post('/tenant/app-roles',              [TenantAppRoleController::class, 'store']);
+        Route::post('/tenant/app-roles', [TenantAppRoleController::class, 'store']);
         Route::patch('/tenant/app-roles/{appRoleId}', [TenantAppRoleController::class, 'update']);
         Route::delete('/tenant/app-roles/{appRoleId}', [TenantAppRoleController::class, 'destroy']);
     });
@@ -280,8 +280,13 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
 
     // AI team build — preview proposes employees for unfilled ghost roles;
     // confirm writes only the picks the user accepted. No DB writes in preview.
-    Route::post('/projects/{project}/plan-team',    [AiAutoAssignController::class, 'planTeamPreview']);
+    Route::post('/projects/{project}/plan-team', [AiAutoAssignController::class, 'planTeamPreview']);
     Route::post('/projects/{project}/confirm-team', [AiAutoAssignController::class, 'confirmTeamPlan']);
+
+    // Idle full-time employees the Team Preview dialog can pick from for
+    // manual replacements / additions. Returns ZERO project_team_assignments
+    // employees only — the same pool the AI now draws from.
+    Route::get('/projects/{project}/available-employees', [AiAutoAssignController::class, 'availableEmployees']);
 
     // Project Task Assignments (xlsx-driven AI task allocation, per-phase)
     Route::post('/projects/{project}/assign-tasks', [AiAutoAssignController::class, 'assignTasks']);
@@ -290,20 +295,20 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
 
     // Schedule tracking — daily progress logs + project/phase variance.
     // See SCHEDULE_TRACKING_IMPLEMENTATION_PLAN.md for the design.
-    Route::get   ('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'index']);
-    Route::post  ('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'store']);
+    Route::get('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'index']);
+    Route::post('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'store']);
     // Literal /summary must precede the /{log} wildcard or Laravel binds
     // "summary" as the log id and answers 405 instead of dispatching here.
-    Route::get   ('/phase-progress-logs/summary',                        [PhaseProgressLogController::class, 'summary']);
-    Route::patch ('/phase-progress-logs/{log}',                          [PhaseProgressLogController::class, 'update']);
-    Route::delete('/phase-progress-logs/{log}',                          [PhaseProgressLogController::class, 'destroy']);
-    Route::post  ('/phase-progress-logs/{log}/unlock',                   [PhaseProgressLogController::class, 'unlock']);
-    Route::get   ('/me/schedule-tracking/today',                         [PhaseProgressLogController::class, 'today']);
+    Route::get('/phase-progress-logs/summary', [PhaseProgressLogController::class, 'summary']);
+    Route::patch('/phase-progress-logs/{log}', [PhaseProgressLogController::class, 'update']);
+    Route::delete('/phase-progress-logs/{log}', [PhaseProgressLogController::class, 'destroy']);
+    Route::post('/phase-progress-logs/{log}/unlock', [PhaseProgressLogController::class, 'unlock']);
+    Route::get('/me/schedule-tracking/today', [PhaseProgressLogController::class, 'today']);
 
-    Route::get('/projects/{project}/schedule-tracking',             [ScheduleTrackingController::class, 'index']);
-    Route::get('/projects/{project}/schedule-tracking/summary',     [ScheduleTrackingController::class, 'summary']);
+    Route::get('/projects/{project}/schedule-tracking', [ScheduleTrackingController::class, 'index']);
+    Route::get('/projects/{project}/schedule-tracking/summary', [ScheduleTrackingController::class, 'summary']);
     Route::get('/projects/{project}/schedule-tracking/by-assignee', [ScheduleTrackingController::class, 'byAssignee']);
     // Per-day per-developer late-hours breakdown. Drives the Finance page's
     // overtime calc and the "Late Hours by Developer" table.
-    Route::get('/projects/{project}/late-hours-by-day',             [ScheduleTrackingController::class, 'lateHoursByDay']);
+    Route::get('/projects/{project}/late-hours-by-day', [ScheduleTrackingController::class, 'lateHoursByDay']);
 });
