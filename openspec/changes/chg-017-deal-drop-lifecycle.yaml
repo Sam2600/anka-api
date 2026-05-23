@@ -1,0 +1,156 @@
+id: chg-017-deal-drop-lifecycle
+name: Deal drop lifecycle — lifecycle_status orthogonal to rank; S deals can't be dropped
+status: proposed
+created: 2026-05-23
+owners: [claude.max@brycenmyanmar.com.mm]
+paired_with: chg-011-project-pipeline-and-contract-drafting
+
+why: |
+  The pipeline used to conflate "deal lost" with a rank value
+  (status='lost'). Two problems with that:
+    1. Forecasting couldn't distinguish "we dropped at C (cheap loss)"
+       from "we dropped at A after building the estimation" (expensive
+       loss).
+    2. The 5-rank set (C/B/A/S/D) conflated a TERMINAL state ("D") with
+       active ranks. A deal at C-rank dropped is structurally different
+       from a deal that "is a D-rank deal", but the schema couldn't
+       represent it.
+
+  Migration 2026_05_15_000002 already added the structured solution:
+  lifecycle_status ENUM('active','dropped') orthogonal flag,
+  dropped_at_stage capturing status (lead/qualified/negotiation) at drop
+  time, and dropped_at timestamp.
+
+  This proposal codifies the lifecycle contract, names the API and model
+  rules, and pins the deprecation of the 'lost' status string.
+
+what: |
+  Database (migration 2026_05_15_000002 — already applied):
+    - lifecycle_status VARCHAR(20) DEFAULT 'active', NOT NULL.
+    - dropped_at_stage VARCHAR(20) NULL.
+    - dropped_at TIMESTAMP(0) NULL.
+    - Backfill: existing status='lost' rows → lifecycle_status='dropped',
+      dropped_at_stage=NULL, dropped_at=COALESCE(lost_at, updated_at).
+      status='lost' is PRESERVED for now — the column constraint that
+      removes it from the allowed set is migration 000007.
+    - Postgres CHECK constraints on both columns + idx_deals_lifecycle
+      (tenant_id, lifecycle_status).
+    - SQLite test env: app-layer enforcement, no CHECK.
+
+  Model surface (app/Models/Deal.php — already in place):
+    - lifecycle_status / dropped_at_stage / dropped_at in $fillable
+      (lines 91–93).
+    - isDropped(): bool (line 203).
+    - canBeDropped(): bool (line 219) — true iff lifecycle is 'active'
+      AND status NOT IN ('won','lost').
+    - drop(string $reason): void (line 373) — writes:
+        lifecycle_status='dropped'
+        dropped_at_stage=<current status>
+        dropped_at=now()
+        loss_reason=$reason
+        win_probability=0
+      Throws DomainException when canBeDropped is false; HTTP layer
+      translates to 422.
+    - isLocked() (line 208) requires (status ∈ LOCKED_STATUSES) AND
+      (not dropped). A dropped deal UNLOCKS because it's no longer in
+      the pipeline. This proposal pins that rule.
+    - canTransitionTo (line 233) short-circuits to false on dropped
+      deals — dropped is one-way.
+
+  Controller surface (DealController::drop — already in place, line 285):
+    - POST /deals/{deal}/drop validates body { reason: string|max:500 },
+      calls Deal::drop($reason), catches DomainException → 422 with the
+      model's error message, returns DealResource on success.
+    - DealController::update (lines 162–168) blocks re-promoting a
+      dropped deal: writes to status on a dropped deal return 422
+      "Dropped deals cannot be re-promoted. Create a new deal instead."
+
+  Routes:
+    - POST /deals/{deal}/drop — tenant-scoped, permission:manage_crm.
+
+  Deprecation plan for status='lost':
+    - Migration 2026_05_15_000007_drop_lost_from_deals_status_check.php
+      exists and its name plans the removal of 'lost' from the
+      deals.status CHECK constraint. Before merging this proposal's
+      deprecation:
+        1. Confirm every backfill has been done (status='lost' →
+           lifecycle_status='dropped', status=<rank at drop>).
+        2. Confirm no code paths still WRITE status='lost'. Grep
+           DealController, seeders, tests.
+      Until both are green, the migration stays; canBeDropped is
+      defensively excluding 'lost' AND 'won'.
+
+scope_decisions:
+  - "S deals cannot be dropped. Won is terminal — the Contract and
+     Project already exist via win_deal(). To 'undo' a won deal you'd
+     have to cascade-delete the linked records, which we don't do."
+  - "Dropped deals are READ-ONLY in the lifecycle sense but NOT in the
+     field-locking sense. isLocked() returns FALSE for dropped deals
+     even when status ∈ {A,S}. Reasoning: a dropped deal might need a
+     loss_reason update or a notes correction even after drop. Field
+     locking enforces 'this deal is still active and we can't change
+     scope underneath the contract' — once dropped, the contract no
+     longer exists."
+  - "dropped_at_stage captures the deals.status string (lead /
+     qualified / negotiation), NOT the rank letter. Analytics layer
+     maps to C/B/A via Deal::STATUS_TO_RANK."
+  - "win_probability is zeroed on drop. Forecasting (⑧) MUST filter on
+     lifecycle_status='active' rather than win_probability > 0 — a deal
+     could legitimately be at win_probability=0 if a sales rep manually
+     downgraded it (although the field is locked at A/S, so this is rare)."
+
+placeholders:
+  - "Migration 000007 is named 'drop_lost_from_deals_status_check' but
+     the migration body's implementation status should be verified before
+     this proposal merges. If still a pending planning placeholder, it
+     stays as-is and this proposal documents the eventual removal.
+     canBeDropped's defensive 'status !== lost' check stays in place
+     either way."
+  - "There's no 'un-drop' endpoint. A dropped deal that was dropped by
+     mistake gets another, new deal. Cheap to recreate. If this ever
+     becomes a pain point, add POST /deals/{deal}/restore that refuses
+     if any contract draft was signed."
+
+risk: |
+  - Forecasting changes: any chart filtering on status='lost' must be
+    rewritten to filter on lifecycle_status='dropped'. Audit the
+    frontend's CRM dashboard and stats endpoints before fully removing
+    'lost'.
+  - The DropDeal endpoint validates `reason` as required (lines 287–289).
+    Frontend MUST always send a reason — a no-reason drop is meaningless
+    for analytics. Don't relax this validation.
+  - Soft-delete vs drop: Deal::SoftDeletes is still active. A dropped
+    deal is NOT soft-deleted; it stays in queries. Soft-delete is a
+    separate concept (admin manual cleanup). Do not conflate the two
+    in the frontend.
+
+rollback: |
+  Reversing migration 000002 drops the three columns. Drop history is
+  lost but no other data. Safe-ish.
+  DealController::drop endpoint and the model methods can stay in place
+  even if the columns are reverted (model methods would just error on
+  the missing fields — caller should not call drop()).
+
+manual_steps:
+  - No new manual steps. Migration 000002 already applied.
+
+review_checklist:
+  - "Does Deal::canBeDropped reject status='won' (S) AND status='lost'?"
+  - "Does Deal::drop set win_probability=0?"
+  - "Does DealController::update return 422 on attempts to write status
+     when the deal is already dropped?"
+  - "Does Deal::isLocked() return FALSE for a dropped deal at status
+     ='negotiation'? Yes — confirmed line 211. Make sure the
+     review-checklist asserter understands this is INTENTIONAL."
+  - "Is dropped_at_stage populated by Deal::drop(), or does the test
+     suite rely on the controller setting it? Model owns the write
+     (lines 384–385)."
+  - "Is there any code path still writing status='lost'? Grep the
+     codebase before allowing migration 000007 to remove it from the
+     CHECK constraint."
+
+affected_specs:
+  - business-logic
+  - domain-models
+  - database-schema
+  - api-contracts
