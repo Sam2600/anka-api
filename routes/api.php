@@ -143,116 +143,204 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         Route::post('/estimation-versions/{id}/send', [EstimationVersionController::class, 'sendXlsx']);
     });
 
-    // Contracts (created only via win_deal; no store route)
-    Route::apiResource('contracts', ContractController::class)->only(['index', 'show', 'update', 'destroy']);
-    Route::get('/contracts/{contract}/project', [ContractController::class, 'linkedProject']);
+    // Contracts (created only via win_deal; no store route). Reads shared by
+    // CRM (deal -> linked contract lookup) and the dedicated Contracts page.
+    Route::middleware('permission:view_contracts|view_crm')->group(function () {
+        Route::get('/contracts',                       [ContractController::class, 'index']);
+        Route::get('/contracts/{contract}',            [ContractController::class, 'show']);
+        Route::get('/contracts/{contract}/project',    [ContractController::class, 'linkedProject']);
+    });
+    Route::middleware('permission:manage_crm')->group(function () {
+        Route::put   ('/contracts/{contract}', [ContractController::class, 'update']);
+        Route::patch ('/contracts/{contract}', [ContractController::class, 'update']);
+        Route::delete('/contracts/{contract}', [ContractController::class, 'destroy']);
+    });
 
-    // Invoices
-    Route::apiResource('invoices', InvoiceController::class)->only(['index', 'show', 'store', 'destroy']);
-    Route::patch('/invoices/{invoice}',      [InvoiceController::class, 'update']);
-    Route::patch('/invoices/{invoice}/pay',  [InvoiceController::class, 'pay']);
-    Route::post('/invoices/{invoice}/send',  [InvoiceController::class, 'send']);
+    // Invoices — reads gated to anyone with billing/CRM visibility, mutations
+    // require manage_crm (invoicing is the agency-side CRM extension).
+    Route::middleware('permission:view_contracts|view_crm')->group(function () {
+        Route::get('/invoices',            [InvoiceController::class, 'index']);
+        Route::get('/invoices/{invoice}',  [InvoiceController::class, 'show']);
+    });
+    Route::middleware('permission:manage_crm')->group(function () {
+        Route::post  ('/invoices',                  [InvoiceController::class, 'store']);
+        Route::patch ('/invoices/{invoice}',        [InvoiceController::class, 'update']);
+        Route::delete('/invoices/{invoice}',        [InvoiceController::class, 'destroy']);
+        Route::patch ('/invoices/{invoice}/pay',    [InvoiceController::class, 'pay']);
+        Route::post  ('/invoices/{invoice}/send',   [InvoiceController::class, 'send']);
+    });
 
-    // Projects (created only via win_deal; no store route)
-    Route::apiResource('projects', ProjectController::class)->only(['index', 'show', 'update', 'destroy']);
+    // Projects (created only via win_deal; no store route). Read access is
+    // shared by Delivery and CRM (linked project lookup); writes are Delivery's.
+    Route::middleware('permission:view_projects|view_crm|view_schedule_tracking')->group(function () {
+        Route::get('/projects',            [ProjectController::class, 'index']);
+        Route::get('/projects/{project}',  [ProjectController::class, 'show']);
+    });
+    Route::middleware('permission:manage_projects')->group(function () {
+        Route::put   ('/projects/{project}', [ProjectController::class, 'update']);
+        Route::patch ('/projects/{project}', [ProjectController::class, 'update']);
+        Route::delete('/projects/{project}', [ProjectController::class, 'destroy']);
+    });
 
-    // Time Entries
-    Route::apiResource('time-entries', TimeEntryController::class)->only(['index', 'show', 'store', 'destroy']);
-    Route::patch('/time-entries/{time_entry}/approve', [TimeEntryController::class, 'approve']);
-    Route::patch('/time-entries/{time_entry}/submit',  [TimeEntryController::class, 'submit']);
-    Route::patch('/time-entries/{time_entry}/reject',  [TimeEntryController::class, 'reject']);
+    // Time Entries — own entries gated to track_time; approval/reject require
+    // approve_time (a manager permission). Reads visible to anyone who can
+    // log or approve time.
+    Route::middleware('permission:track_time|approve_time')->group(function () {
+        Route::get('/time-entries',                 [TimeEntryController::class, 'index']);
+        Route::get('/time-entries/{time_entry}',    [TimeEntryController::class, 'show']);
+    });
+    Route::middleware('permission:track_time')->group(function () {
+        Route::post  ('/time-entries',                                [TimeEntryController::class, 'store']);
+        Route::delete('/time-entries/{time_entry}',                   [TimeEntryController::class, 'destroy']);
+        Route::patch ('/time-entries/{time_entry}/submit',            [TimeEntryController::class, 'submit']);
+    });
+    Route::middleware('permission:approve_time')->group(function () {
+        Route::patch('/time-entries/{time_entry}/approve', [TimeEntryController::class, 'approve']);
+        Route::patch('/time-entries/{time_entry}/reject',  [TimeEntryController::class, 'reject']);
+    });
 
-    // Organization
-    Route::get('/departments', [OrganizationController::class, 'indexDepartments']);
-    Route::post('/departments', [OrganizationController::class, 'storeDepartment']);
-    Route::put('/departments/{department}', [OrganizationController::class, 'updateDepartment']);
-    Route::delete('/departments/{department}', [OrganizationController::class, 'destroyDepartment']);
+    // Organization — departments and legacy job roles surface throughout the
+    // app (employee lists, deal staffing, project assignments), so reads are
+    // intentionally broad. Writes are HR/Admin via manage_organization.
+    Route::middleware('permission:manage_organization|view_employees|view_crm|view_projects')->group(function () {
+        Route::get('/departments', [OrganizationController::class, 'indexDepartments']);
+        Route::get('/roles',       [OrganizationController::class, 'indexRoles']);
+    });
+    Route::middleware('permission:manage_organization')->group(function () {
+        Route::post  ('/departments',               [OrganizationController::class, 'storeDepartment']);
+        Route::put   ('/departments/{department}',  [OrganizationController::class, 'updateDepartment']);
+        Route::delete('/departments/{department}',  [OrganizationController::class, 'destroyDepartment']);
+        Route::post  ('/roles',         [OrganizationController::class, 'storeRole']);
+        Route::put   ('/roles/{role}',  [OrganizationController::class, 'updateRole']);
+        Route::delete('/roles/{role}',  [OrganizationController::class, 'destroyRole']);
+    });
 
-    Route::get('/roles', [OrganizationController::class, 'indexRoles']);
-    Route::post('/roles', [OrganizationController::class, 'storeRole']);
-    Route::put('/roles/{role}', [OrganizationController::class, 'updateRole']);
-    Route::delete('/roles/{role}', [OrganizationController::class, 'destroyRole']);
+    // Employees — read needed by CRM (assignment), Projects, AI Team Builder,
+    // and HR. Writes are HR's manage_employees.
+    Route::middleware('permission:view_employees|view_crm|view_projects|manage_organization')->group(function () {
+        Route::get('/employees', [OrganizationController::class, 'indexEmployees']);
+    });
+    Route::middleware('permission:manage_employees')->group(function () {
+        Route::post  ('/employees',             [OrganizationController::class, 'storeEmployee']);
+        Route::put   ('/employees/{employee}',  [OrganizationController::class, 'updateEmployee']);
+        Route::delete('/employees/{employee}',  [OrganizationController::class, 'destroyEmployee']);
+    });
 
-    Route::get('/employees', [OrganizationController::class, 'indexEmployees']);
-    Route::post('/employees', [OrganizationController::class, 'storeEmployee']);
-    Route::put('/employees/{employee}', [OrganizationController::class, 'updateEmployee']);
-    Route::delete('/employees/{employee}', [OrganizationController::class, 'destroyEmployee']);
+    // Public holidays — drives holiday-aware capacity math everywhere, so
+    // reads are broad. Writes are HR/Admin.
+    Route::middleware('permission:manage_organization|view_employees|view_projects|view_crm')->group(function () {
+        Route::get('/holidays',      [HolidayController::class, 'index']);
+        Route::get('/team-capacity', [TeamCapacityController::class, 'index']);
+    });
+    Route::middleware('permission:manage_organization')->group(function () {
+        Route::post  ('/holidays',            [HolidayController::class, 'store']);
+        Route::patch ('/holidays/{holiday}',  [HolidayController::class, 'update']);
+        Route::delete('/holidays/{holiday}',  [HolidayController::class, 'destroy']);
+    });
 
-    // Public holidays — tenant-scoped, drives holiday-aware capacity math
-    // in the AI scheduler and the Time Tracking utilization KPI.
-    Route::get   ('/holidays',            [HolidayController::class, 'index']);
-    Route::post  ('/holidays',            [HolidayController::class, 'store']);
-    Route::patch ('/holidays/{holiday}',  [HolidayController::class, 'update']);
-    Route::delete('/holidays/{holiday}',  [HolidayController::class, 'destroy']);
+    // Salary history — sensitive. Reads gated to view_employees; writes to
+    // manage_employees. CRM does NOT need salary history.
+    Route::middleware('permission:view_employees')->group(function () {
+        Route::get('/employees/{employee}/salary-history', [OrganizationController::class, 'indexSalaryHistory']);
+    });
+    Route::middleware('permission:manage_employees')->group(function () {
+        Route::post  ('/employees/{employee}/salary-history',             [OrganizationController::class, 'storeSalaryHistory']);
+        Route::put   ('/employees/{employee}/salary-history/{history}',   [OrganizationController::class, 'updateSalaryHistory']);
+        Route::delete('/employees/{employee}/salary-history/{history}',   [OrganizationController::class, 'destroySalaryHistory']);
+    });
 
-    // Tenant-wide holiday-aware capacity. Sums Σ available_hours across
-    // active employees for an arbitrary date range. Time Tracking page's
-    // utilization denominator reads from here so the KPI drops in months
-    // with more public holidays.
-    Route::get   ('/team-capacity',       [TeamCapacityController::class, 'index']);
+    // Global overheads — read by estimation; written by HR/Admin.
+    Route::middleware('permission:manage_organization|manage_estimation|view_crm')->group(function () {
+        Route::get('/global-overheads', [OrganizationController::class, 'indexOverheads']);
+    });
+    Route::middleware('permission:manage_organization')->group(function () {
+        Route::post  ('/global-overheads',                  [OrganizationController::class, 'storeOverhead']);
+        Route::put   ('/global-overheads/{globalOverhead}', [OrganizationController::class, 'updateOverhead']);
+        Route::delete('/global-overheads/{globalOverhead}', [OrganizationController::class, 'destroyOverhead']);
+    });
 
-    // Salary history (spec ②.1.B) — one row per (employee, target_month).
-    Route::get('/employees/{employee}/salary-history', [OrganizationController::class, 'indexSalaryHistory']);
-    Route::post('/employees/{employee}/salary-history', [OrganizationController::class, 'storeSalaryHistory']);
-    Route::put('/employees/{employee}/salary-history/{history}', [OrganizationController::class, 'updateSalaryHistory']);
-    Route::delete('/employees/{employee}/salary-history/{history}', [OrganizationController::class, 'destroySalaryHistory']);
-
-    Route::get('/global-overheads', [OrganizationController::class, 'indexOverheads']);
-    Route::post('/global-overheads', [OrganizationController::class, 'storeOverhead']);
-    Route::put('/global-overheads/{globalOverhead}', [OrganizationController::class, 'updateOverhead']);
-    Route::delete('/global-overheads/{globalOverhead}', [OrganizationController::class, 'destroyOverhead']);
-
+    // Company settings — read by every dashboard surface (currency, tax,
+    // exchange rates display). Writes are tenant admin.
     Route::get('/company-settings', [OrganizationController::class, 'getSettings']);
-    Route::put('/company-settings', [OrganizationController::class, 'upsertSettings']);
+    Route::middleware('permission:manage_tenant')->group(function () {
+        Route::put('/company-settings', [OrganizationController::class, 'upsertSettings']);
+    });
 
-    // Initial Budgets — year-scoped target profit, replaces the singleton
-    // company_settings.annual_initial_budget. Routed on fiscal_year so the
-    // frontend can upsert without first looking up the row id.
-    Route::get('/initial-budgets', [OrganizationController::class, 'indexInitialBudgets']);
-    Route::put('/initial-budgets/{fiscal_year}', [OrganizationController::class, 'upsertInitialBudget'])
-        ->whereNumber('fiscal_year');
-    Route::delete('/initial-budgets/{fiscal_year}', [OrganizationController::class, 'destroyInitialBudget'])
-        ->whereNumber('fiscal_year');
+    // Initial Budgets — year-scoped target profit. Read by Finance/Forecast;
+    // written by tenant admin (target-setting is an exec decision).
+    Route::middleware('permission:view_reports|manage_tenant')->group(function () {
+        Route::get('/initial-budgets', [OrganizationController::class, 'indexInitialBudgets']);
+    });
+    Route::middleware('permission:manage_tenant')->group(function () {
+        Route::put('/initial-budgets/{fiscal_year}', [OrganizationController::class, 'upsertInitialBudget'])
+            ->whereNumber('fiscal_year');
+        Route::delete('/initial-budgets/{fiscal_year}', [OrganizationController::class, 'destroyInitialBudget'])
+            ->whereNumber('fiscal_year');
+    });
 
-    // Capacity Roles
-    Route::get('/capacity-roles', [OrganizationController::class, 'indexCapacityRoles']);
-    Route::post('/capacity-roles', [OrganizationController::class, 'storeCapacityRole']);
-    Route::put('/capacity-roles/{capacityRole}', [OrganizationController::class, 'updateCapacityRole']);
-    Route::delete('/capacity-roles/{capacityRole}', [OrganizationController::class, 'destroyCapacityRole']);
+    // Capacity Roles — read by employee assignment, CRM staffing, AI team
+    // builder. Written by HR/Admin.
+    Route::middleware('permission:manage_organization|view_employees|view_crm|view_projects')->group(function () {
+        Route::get('/capacity-roles', [OrganizationController::class, 'indexCapacityRoles']);
+    });
+    Route::middleware('permission:manage_organization')->group(function () {
+        Route::post  ('/capacity-roles',                  [OrganizationController::class, 'storeCapacityRole']);
+        Route::put   ('/capacity-roles/{capacityRole}',   [OrganizationController::class, 'updateCapacityRole']);
+        Route::delete('/capacity-roles/{capacityRole}',   [OrganizationController::class, 'destroyCapacityRole']);
+    });
 
-    // Ranks — tenant-managed seniority tiers used by the AI Team Builder.
-    // Defaults seeded as Junior/Mid/Senior/Lead but tenants can add custom
-    // ranks (e.g. "Principal", "Staff Engineer") via this endpoint.
-    Route::get('/ranks', [RankController::class, 'index']);
-    Route::post('/ranks', [RankController::class, 'store']);
-    Route::put('/ranks/{rank}', [RankController::class, 'update']);
-    Route::delete('/ranks/{rank}', [RankController::class, 'destroy']);
+    // Ranks — read by CRM staffing and HR. Written by HR/Admin.
+    Route::middleware('permission:manage_organization|view_employees|view_crm|view_projects')->group(function () {
+        Route::get('/ranks', [RankController::class, 'index']);
+    });
+    Route::middleware('permission:manage_organization')->group(function () {
+        Route::post  ('/ranks',         [RankController::class, 'store']);
+        Route::put   ('/ranks/{rank}',  [RankController::class, 'update']);
+        Route::delete('/ranks/{rank}',  [RankController::class, 'destroy']);
+    });
 
-    // Skills
-    Route::get('/skills', [OrganizationController::class, 'indexSkills']);
-    Route::post('/skills', [OrganizationController::class, 'storeSkill']);
-    Route::put('/skills/{skill}', [OrganizationController::class, 'updateSkill']);
-    Route::delete('/skills/{skill}', [OrganizationController::class, 'destroySkill']);
+    // Skills — read everywhere employees appear; written by HR/Admin.
+    Route::middleware('permission:manage_organization|view_employees|view_crm|view_projects')->group(function () {
+        Route::get('/skills', [OrganizationController::class, 'indexSkills']);
+    });
+    Route::middleware('permission:manage_organization')->group(function () {
+        Route::post  ('/skills',          [OrganizationController::class, 'storeSkill']);
+        Route::put   ('/skills/{skill}',  [OrganizationController::class, 'updateSkill']);
+        Route::delete('/skills/{skill}',  [OrganizationController::class, 'destroySkill']);
+    });
 
-    // Employee Skills
-    Route::get('/employees/{employee}/skills', [OrganizationController::class, 'employeeSkills']);
-    Route::post('/employees/{employee}/skills', [OrganizationController::class, 'assignSkill']);
-    Route::delete('/employees/{employee}/skills/{skill}', [OrganizationController::class, 'removeSkill']);
+    // Employee Skills — read alongside employees; written by HR.
+    Route::middleware('permission:view_employees|view_crm|view_projects')->group(function () {
+        Route::get('/employees/{employee}/skills', [OrganizationController::class, 'employeeSkills']);
+    });
+    Route::middleware('permission:manage_employees')->group(function () {
+        Route::post  ('/employees/{employee}/skills',           [OrganizationController::class, 'assignSkill']);
+        Route::delete('/employees/{employee}/skills/{skill}',   [OrganizationController::class, 'removeSkill']);
+    });
 
-    // AI usage logging (tenant-scoped)
+    // AI usage logging — any authenticated tenant user can write a telemetry
+    // event (these are emitted by the frontend whenever an AI feature runs).
+    // No specific permission required beyond tenant scope.
     Route::post('/ai-usage', [AiUsageController::class, 'store']);
 
-    // Exchange Rates
-    Route::get('/exchange-rates', [ExchangeRateController::class, 'index']);
-    Route::put('/exchange-rates', [ExchangeRateController::class, 'upsert']);
-    Route::delete('/exchange-rates/{rate}', [ExchangeRateController::class, 'destroy']);
+    // Exchange Rates — read used in currency conversion across CRM, Finance,
+    // Forecast. Writes are tenant admin.
+    Route::middleware('permission:view_reports|view_crm|manage_tenant')->group(function () {
+        Route::get('/exchange-rates', [ExchangeRateController::class, 'index']);
+    });
+    Route::middleware('permission:manage_tenant')->group(function () {
+        Route::put   ('/exchange-rates',          [ExchangeRateController::class, 'upsert']);
+        Route::delete('/exchange-rates/{rate}',   [ExchangeRateController::class, 'destroy']);
+    });
 
-    // Tenant settings (own tenant only)
+    // Tenant settings (own tenant only) — read is open to every tenant user
+    // (the Sidebar/Header reads tenant name & logo). Writes are admin.
     Route::get('/tenant', [TenantController::class, 'show']);
-    Route::put('/tenant', [TenantController::class, 'update']);
-    // Multipart logo upload + remove. Used by the Organization → Company tab.
-    Route::post('/tenant/logo', [TenantController::class, 'uploadLogo']);
-    Route::delete('/tenant/logo', [TenantController::class, 'deleteLogo']);
+    Route::middleware('permission:manage_tenant')->group(function () {
+        Route::put   ('/tenant',        [TenantController::class, 'update']);
+        Route::post  ('/tenant/logo',   [TenantController::class, 'uploadLogo']);
+        Route::delete('/tenant/logo',   [TenantController::class, 'deleteLogo']);
+    });
 
     // Tenant-managed app roles + admin-editable permissions. List/catalog
     // are readable by anyone in the tenant (sidebar + role pickers); writes
@@ -266,44 +354,71 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         Route::delete('/tenant/app-roles/{appRoleId}', [TenantAppRoleController::class, 'destroy']);
     });
 
-    // Milestones
-    Route::apiResource('milestones', MilestoneController::class);
-    Route::patch('/milestones/{milestone}/accept', [MilestoneController::class, 'accept']);
+    // Milestones — read shared by Contracts page and CRM; writes are CRM.
+    Route::middleware('permission:view_contracts|view_crm')->group(function () {
+        Route::get('/milestones',               [MilestoneController::class, 'index']);
+        Route::get('/milestones/{milestone}',   [MilestoneController::class, 'show']);
+    });
+    Route::middleware('permission:manage_crm')->group(function () {
+        Route::post  ('/milestones',                       [MilestoneController::class, 'store']);
+        Route::put   ('/milestones/{milestone}',           [MilestoneController::class, 'update']);
+        Route::patch ('/milestones/{milestone}',           [MilestoneController::class, 'update']);
+        Route::delete('/milestones/{milestone}',           [MilestoneController::class, 'destroy']);
+        Route::patch ('/milestones/{milestone}/accept',    [MilestoneController::class, 'accept']);
+    });
 
-    // Project Team Assignments
-    Route::get('/projects/{project}/team', [AiAutoAssignController::class, 'index']);
-    Route::post('/projects/{project}/team', [AiAutoAssignController::class, 'store']);
-    Route::delete('/projects/{project}/team/{assignment}', [AiAutoAssignController::class, 'destroy']);
-    // @deprecated — replaced by the plan-team + confirm-team preview flow.
-    // No frontend consumer; retained until cleanup pass after the new flow ships.
-    Route::post('/projects/{project}/auto-assign', [AiAutoAssignController::class, 'autoAssign']);
+    // Project Team Assignments — read is shared with anyone viewing the
+    // project; mutations require manage_projects.
+    Route::middleware('permission:view_projects|view_crm|view_schedule_tracking')->group(function () {
+        Route::get('/projects/{project}/team',               [AiAutoAssignController::class, 'index']);
+        Route::get('/projects/{project}/task-assignments',   [AiAutoAssignController::class, 'taskAssignmentsIndex']);
+    });
+    Route::middleware('permission:manage_projects')->group(function () {
+        Route::post  ('/projects/{project}/team',                       [AiAutoAssignController::class, 'store']);
+        Route::delete('/projects/{project}/team/{assignment}',          [AiAutoAssignController::class, 'destroy']);
+        // @deprecated — replaced by the plan-team + confirm-team preview flow.
+        Route::post('/projects/{project}/auto-assign',                  [AiAutoAssignController::class, 'autoAssign']);
 
-    // AI team build — preview proposes employees for unfilled ghost roles;
-    // confirm writes only the picks the user accepted. No DB writes in preview.
-    Route::post('/projects/{project}/plan-team',    [AiAutoAssignController::class, 'planTeamPreview']);
-    Route::post('/projects/{project}/confirm-team', [AiAutoAssignController::class, 'confirmTeamPlan']);
+        // AI team build — preview proposes employees for unfilled ghost roles;
+        // confirm writes only the picks the user accepted. No DB writes in preview.
+        Route::post('/projects/{project}/plan-team',                    [AiAutoAssignController::class, 'planTeamPreview']);
+        Route::post('/projects/{project}/confirm-team',                 [AiAutoAssignController::class, 'confirmTeamPlan']);
 
-    // Project Task Assignments (xlsx-driven AI task allocation, per-phase)
-    Route::post('/projects/{project}/assign-tasks', [AiAutoAssignController::class, 'assignTasks']);
-    Route::get('/projects/{project}/task-assignments', [AiAutoAssignController::class, 'taskAssignmentsIndex']);
-    Route::patch('/projects/{project}/task-phase-assignments/{phaseAssignment}', [AiAutoAssignController::class, 'updateTaskPhaseAssignment']);
+        // Project Task Assignments (xlsx-driven AI task allocation, per-phase)
+        Route::post ('/projects/{project}/assign-tasks',                                       [AiAutoAssignController::class, 'assignTasks']);
+        Route::patch('/projects/{project}/task-phase-assignments/{phaseAssignment}',           [AiAutoAssignController::class, 'updateTaskPhaseAssignment']);
+    });
 
     // Schedule tracking — daily progress logs + project/phase variance.
-    // See SCHEDULE_TRACKING_IMPLEMENTATION_PLAN.md for the design.
-    Route::get   ('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'index']);
-    Route::post  ('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'store']);
-    // Literal /summary must precede the /{log} wildcard or Laravel binds
-    // "summary" as the log id and answers 405 instead of dispatching here.
-    Route::get   ('/phase-progress-logs/summary',                        [PhaseProgressLogController::class, 'summary']);
-    Route::patch ('/phase-progress-logs/{log}',                          [PhaseProgressLogController::class, 'update']);
-    Route::delete('/phase-progress-logs/{log}',                          [PhaseProgressLogController::class, 'destroy']);
-    Route::post  ('/phase-progress-logs/{log}/unlock',                   [PhaseProgressLogController::class, 'unlock']);
-    Route::get   ('/me/schedule-tracking/today',                         [PhaseProgressLogController::class, 'today']);
+    // See SCHEDULE_TRACKING_IMPLEMENTATION_PLAN.md for the design. Reads
+    // shared by dashboard viewers and the ICs logging the work; writes
+    // require log_progress; unlock/destroy require manage_projects or
+    // approve_time (a manager unlocking a sealed day).
+    Route::middleware('permission:view_schedule_tracking|log_progress|manage_projects')->group(function () {
+        Route::get('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'index']);
+        // Literal /summary must precede the /{log} wildcard or Laravel binds
+        // "summary" as the log id and answers 405 instead of dispatching here.
+        Route::get('/phase-progress-logs/summary',  [PhaseProgressLogController::class, 'summary']);
+        Route::get('/me/schedule-tracking/today',   [PhaseProgressLogController::class, 'today']);
+    });
+    Route::middleware('permission:log_progress')->group(function () {
+        Route::post ('/phase-assignments/{phaseAssignment}/progress-logs', [PhaseProgressLogController::class, 'store']);
+        Route::patch('/phase-progress-logs/{log}',                         [PhaseProgressLogController::class, 'update']);
+    });
+    Route::middleware('permission:manage_projects|approve_time')->group(function () {
+        Route::delete('/phase-progress-logs/{log}',          [PhaseProgressLogController::class, 'destroy']);
+        Route::post  ('/phase-progress-logs/{log}/unlock',   [PhaseProgressLogController::class, 'unlock']);
+    });
 
-    Route::get('/projects/{project}/schedule-tracking',             [ScheduleTrackingController::class, 'index']);
-    Route::get('/projects/{project}/schedule-tracking/summary',     [ScheduleTrackingController::class, 'summary']);
-    Route::get('/projects/{project}/schedule-tracking/by-assignee', [ScheduleTrackingController::class, 'byAssignee']);
+    Route::middleware('permission:view_schedule_tracking|manage_projects')->group(function () {
+        Route::get('/projects/{project}/schedule-tracking',             [ScheduleTrackingController::class, 'index']);
+        Route::get('/projects/{project}/schedule-tracking/summary',     [ScheduleTrackingController::class, 'summary']);
+        Route::get('/projects/{project}/schedule-tracking/by-assignee', [ScheduleTrackingController::class, 'byAssignee']);
+    });
     // Per-day per-developer late-hours breakdown. Drives the Finance page's
-    // overtime calc and the "Late Hours by Developer" table.
-    Route::get('/projects/{project}/late-hours-by-day',             [ScheduleTrackingController::class, 'lateHoursByDay']);
+    // overtime calc and the "Late Hours by Developer" table — view_reports
+    // is the Finance gate.
+    Route::middleware('permission:view_reports|view_schedule_tracking|manage_projects')->group(function () {
+        Route::get('/projects/{project}/late-hours-by-day', [ScheduleTrackingController::class, 'lateHoursByDay']);
+    });
 });

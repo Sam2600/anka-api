@@ -48,10 +48,19 @@ class CheckPermission
             return $next($request);
         }
 
-        $allowed = self::permissionsFor($user);
+        $allowed  = self::permissionsFor($user);
+        // `permission:a|b|c` grants access when the user holds ANY of the
+        // listed keys. Used for read routes that several personas need
+        // (e.g. GET /employees is reached from CRM, Organization, and HR).
+        $required = explode('|', $permission);
 
-        if (in_array('all', $allowed, true) || in_array($permission, $allowed, true)) {
+        if (in_array('all', $allowed, true)) {
             return $next($request);
+        }
+        foreach ($required as $key) {
+            if (in_array($key, $allowed, true)) {
+                return $next($request);
+            }
         }
 
         $roleName = $user->app_role ?? 'unknown';
@@ -79,25 +88,41 @@ class CheckPermission
 
         $userId   = $user->id ?? null;
         $roleName = $user->app_role ?? null;
+        $roleId   = $user->app_role_id ?? null;
         $tenantId = $user->tenant_id ?? null;
 
         if (! $userId) {
             // Anonymous / unsaved user — skip the cache.
-            return self::lookup($tenantId, $roleName);
+            return self::lookup($tenantId, $roleId, $roleName);
         }
 
-        // Cache key includes the role name so an in-request role change
-        // (e.g. an admin edits their own role) still recomputes correctly.
-        $cacheKey = "{$userId}|{$tenantId}|{$roleName}";
+        // Cache key includes the role name AND id so an in-request role rename
+        // or reassignment recomputes correctly.
+        $cacheKey = "{$userId}|{$tenantId}|{$roleId}|{$roleName}";
         if (isset(self::$cache[$cacheKey])) {
             return self::$cache[$cacheKey];
         }
 
-        return self::$cache[$cacheKey] = self::lookup($tenantId, $roleName);
+        return self::$cache[$cacheKey] = self::lookup($tenantId, $roleId, $roleName);
     }
 
-    private static function lookup(?string $tenantId, ?string $roleName): array
+    /**
+     * Resolve permission keys for a role. Prefers the FK ($roleId) — that path
+     * is resilient to role renames. Falls back to the legacy (tenant_id, name)
+     * join for users whose app_role_id is still null (orphans that the
+     * backfill couldn't resolve, or pre-FK rows from a partial migration).
+     */
+    private static function lookup(?string $tenantId, ?string $roleId, ?string $roleName): array
     {
+        if ($roleId) {
+            return DB::table('tenant_app_role_permissions as p')
+                ->join('tenant_app_roles as r', 'r.id', '=', 'p.role_id')
+                ->whereNull('r.deleted_at')
+                ->where('r.id', $roleId)
+                ->pluck('p.permission_key')
+                ->all();
+        }
+
         if (! $tenantId || ! $roleName) {
             return [];
         }

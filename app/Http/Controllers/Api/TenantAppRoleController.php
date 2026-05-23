@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Middleware\CheckPermission;
 use App\Models\TenantAppRole;
 use App\Models\TenantAppRolePermission;
 use App\Models\User;
@@ -96,6 +97,40 @@ class TenantAppRoleController extends Controller
             }
         }
 
+        // Forbid stripping a role with assigned users to zero permissions —
+        // that locks every assignee out of every page. Tenant admins must
+        // either reassign the users first or grant at least one key.
+        if (array_key_exists('permissions', $validated) && count($validated['permissions']) === 0) {
+            $assignedCount = User::where('tenant_id', $role->tenant_id)
+                ->where('app_role', $role->name)
+                ->count();
+            if ($assignedCount > 0) {
+                throw ValidationException::withMessages([
+                    'permissions' => ["Role '{$role->name}' has {$assignedCount} user(s) assigned — granting zero permissions would lock them out. Reassign them first or grant at least one permission."],
+                ]);
+            }
+        }
+
+        // Forbid the editor from removing manage_tenant from their OWN role.
+        // Without manage_tenant they can no longer reach the /tenant/app-roles
+        // endpoint to undo the change — they would lock themselves out of the
+        // recovery path. Super admins bypass (they edit via /admin and aren't
+        // subject to app-role permissions in the first place).
+        $editor = $request->user();
+        if (
+            $editor
+            && ! ($editor->is_super_admin ?? false)
+            && (string) $editor->tenant_id === (string) $role->tenant_id
+            && $editor->app_role === $role->name
+            && array_key_exists('permissions', $validated)
+            && ! in_array('all', $validated['permissions'], true)
+            && ! in_array('manage_tenant', $validated['permissions'], true)
+        ) {
+            throw ValidationException::withMessages([
+                'permissions' => ['You cannot remove "manage_tenant" from your own role — doing so would lock you out of role administration. Ask another admin to make this change, or remove yourself from this role first.'],
+            ]);
+        }
+
         DB::transaction(function () use ($role, $validated) {
             $previousName = $role->name;
 
@@ -122,6 +157,12 @@ class TenantAppRoleController extends Controller
             }
         });
 
+        // Bust the per-process permission cache for every user assigned to this
+        // role (under whatever name it now carries, post-rename). Without this,
+        // long-running queue workers keep returning the old permission list
+        // until the worker process restarts.
+        $this->flushPermissionCacheForRole($role->tenant_id, $role->name);
+
         return response()->json(['data' => $this->shape($role->fresh()->load('permissions'))]);
     }
 
@@ -147,6 +188,19 @@ class TenantAppRoleController extends Controller
 
         $role->delete();
         return response()->json(['message' => 'Role deleted.']);
+    }
+
+    /**
+     * Drop cached permission lists for every user holding $roleName in $tenantId.
+     * Static cache is keyed by `{userId}|{tenantId}|{roleName}`, so we flush
+     * one entry per user. Idempotent if the cache key is missing.
+     */
+    private function flushPermissionCacheForRole(string $tenantId, string $roleName): void
+    {
+        User::where('tenant_id', $tenantId)
+            ->where('app_role', $roleName)
+            ->pluck('id')
+            ->each(fn ($id) => CheckPermission::flushCache((string) $id));
     }
 
     private function shape(TenantAppRole $role): array
