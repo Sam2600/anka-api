@@ -1,6 +1,13 @@
 id: chg-011-project-pipeline-and-contract-drafting
 name: Project Pipeline backend — rank state machine, deal field locking, AI contract drafting
-status: proposed
+status: archived
+archived: 2026-05-23
+archived_reason: |
+  Implementation shipped end-to-end. Migrations 2026_05_15_000001-2 added the
+  final_* fields, lifecycle_status, dropped_at_stage, and structured OT columns.
+  DealController enforces ALLOWED_STATUS_TRANSITIONS + FIELDS_LOCKED_IN_A_OR_S.
+  ContractDraftService + DealContractDraftController + 3 ContractTemplate seed
+  variants are live. Spec coverage consolidated into chg-012/013/015/016/017.
 created: 2026-05-14
 owners: [claude.max@brycenmyanmar.com.mm]
 paired_with: anka-frontend/openspec/changes/chg-009-project-pipeline-rewrite.yaml

@@ -1,0 +1,209 @@
+id: chg-018-ai-usage-logging-and-ledger
+name: AI usage logging + cost ledger — per-call rows from every AI feature, tenant-scoped aggregation
+status: proposed
+created: 2026-05-23
+owners: [claude.max@brycenmyanmar.com.mm]
+
+why: |
+  Six AI features call out to Anthropic Claude (contract analysis,
+  contract drafting, estimation generation, estimation delta, AI team
+  builder, and the validator). Without per-call accounting:
+    - We can't tell which tenant is driving cost.
+    - We can't tell which feature is the heavy user.
+    - We can't bill back AI usage to tenants in a future paid-tier model.
+    - We can't spot a runaway loop (e.g. retry storm) until the Anthropic
+      invoice lands.
+
+  The ai_usage_logs table already exists (AiUsageLog model, no
+  BelongsToTenant trait, manual tenant scoping in AiUsageController).
+  Verified backend writers (grep on 2026-05-23): only EstimationAiService.
+  Frontend writers via POST /ai-usage: ai-team-builder, ai-forecast,
+  ai-chatbot Next.js routes. NOT logging today: ContractDraftService
+  (generateDraft + regenerateSection) and AiAutoAssignController.
+  This proposal pins the contract and adds the missing two loggers.
+
+  This proposal pins the contract: every Claude call from any of the six
+  features MUST log a row, tagged with a feature key, before returning.
+  The aggregation endpoint (super-admin) is already in place; this
+  proposal adds per-tenant aggregation for the admin UI and a per-model
+  rate table so the cost calculation is centralised.
+
+what: |
+  Model (app/Models/AiUsageLog.php — already in place):
+    - No BelongsToTenant trait (line 9 comment) — tenant scoping is
+      done manually in AiUsageController so super-admin can query across
+      tenants.
+    - UPDATED_AT = null (line 15) — audit logs are immutable.
+    - Fillable: tenant_id, user_id, feature, model, input_tokens,
+      output_tokens, estimated_cost_usd (lines 17–25).
+    - belongs_to tenant + user.
+    - No model changes in this proposal.
+
+  Canonical feature keys (the `feature` string column; app-layer enum,
+  no DB constraint):
+    - contract_analysis → ContractAnalysisService (chg-005)
+    - contract_drafting → ContractDraftService::generateDraft (chg-011)
+    - contract_section_regen → ContractDraftService::regenerateSection (chg-011)
+    - estimation_generation → EstimationAiService::generateDraft (chg-014)
+    - estimation_delta → EstimationAiService::delta (sibling of chg-014)
+    - ai_team_builder → frontend feature; logs via POST /ai-usage (the
+      existing AiUsageController::store endpoint)
+    - team_plan_validator → AiTeamPlanValidator service (referenced
+      from auto-assign; not its own proposal)
+  Any new AI feature MUST add a feature key to this list and call the
+  logger.
+
+  Service surface:
+    - ContractAnalysisService — verified logger calls exist (chg-005,
+      feature='contract_analysis').
+    - EstimationAiService — verified logger calls exist (chg-007/014,
+      feature='estimation_generation').
+    - ContractDraftService::callClaude (referenced from generateDraft
+      at line 65). VERIFICATION NEEDED: does this service log to
+      ai_usage_logs after each Claude call? If yes, no change. If no,
+      this proposal calls for adding logger calls inside callClaude()
+      with feature='contract_drafting' / 'contract_section_regen'.
+      Flagged in `placeholders` below.
+    - AiTeamPlanValidator — referenced in code citations. VERIFICATION
+      NEEDED whether this service logs to ai_usage_logs. Flagged.
+
+  Controllers (app/Http/Controllers/Api/AiUsageController.php — already
+  in place):
+    - POST /ai-usage (store, tenant-scoped, line 14) — endpoint frontend
+      features call to log their own AI calls (currently the AI Team
+      Builder, which runs Claude from Next.js, posts here from a route
+      handler).
+    - GET /admin/ai-usage (adminIndex, super-admin, line 34) — aggregates
+      total_calls / input_tokens / output_tokens / cost_usd per tenant.
+
+  New endpoints:
+    - GET /admin/ai-usage/by-feature (NEW) — super-admin only. Returns
+      per-feature breakdown:
+        { totals: {...}, features: [{ feature, total_calls,
+            total_input_tokens, total_output_tokens, total_cost }, ...] }
+      Useful for spotting the heavy feature ("contract_drafting is
+      eating 60% of our cost").
+    - GET /admin/ai-usage/by-tenant-feature (NEW) — super-admin only.
+      Two-level grouping: tenant → feature. Returns the per-feature
+      payload nested under each tenant. Useful for "which tenant is
+      driving contract_drafting cost".
+
+  Cost calculation (centralise via app/Support/AiCostRates.php — NEW):
+    - Today estimated_cost_usd is calculated CALLER-SIDE — every service
+      needs the current per-model rate table. Fragile.
+    - AiCostRates::RATES constant — model name keyed array of
+      [input_per_token, output_per_token]. Initial draft:
+        claude-3-5-sonnet-latest    → [3.00 / 1_000_000, 15.00 / 1_000_000]
+        claude-3-5-sonnet-20241022  → [3.00 / 1_000_000, 15.00 / 1_000_000]
+        claude-3-5-haiku-latest     → [0.80 / 1_000_000,  4.00 / 1_000_000]
+        claude-3-opus-latest        → [15.00 / 1_000_000, 75.00 / 1_000_000]
+    - Static method usdFor(string $model, int $inTokens, int $outTokens):
+      float — all six services call. AiUsageLog::create() takes the
+      computed value as today; the change is the source of the calc.
+    - Unknown model name: falls back to sonnet rate with a Log::warning.
+
+  Background writes:
+    - All logger writes are SYNCHRONOUS today (inside the request that
+      made the AI call). Acceptable in v1 — the write is one INSERT
+      and dwarfed by the Claude call latency. If logger writes become a
+      bottleneck, move to a queued job.
+
+scope_decisions:
+  - "feature is a string column with an app-layer enum (no DB CHECK).
+     Intentional — adding a new feature shouldn't require a migration."
+  - "ai_usage_logs has no foreign key to ai-side artifacts (no link to
+     DealContractDraft, EstimationVersion, etc.). The log captures
+     metadata only — token counts, model, feature, who triggered it.
+     Cross-referencing is done by reading the request log at debug time.
+     If we later need 'show me every Claude call for this contract
+     draft', add a polymorphic resource_type + resource_id column."
+  - "Cost rates live in PHP code (AiCostRates::RATES), not DB. Anthropic
+     publishes rate changes via PR review; rate-change migrations would
+     mean re-running historical aggregations against the new rate, which
+     would be wrong. Historical rows keep the cost_usd they were logged
+     with."
+  - "Super-admin only for the aggregation endpoints. Tenant-side
+     visibility (a tenant seeing 'my AI usage this month') is a v2
+     feature; for now, ask ops."
+
+placeholders:
+  - "IMPLEMENTED 2026-05-23: ContractDraftService::callClaude now writes
+     to ai_usage_logs after every successful Claude response, with
+     feature='contract_drafting' on generateDraft path and
+     feature='contract_section_regen' on regenerateSection path.
+     Helper: ContractDraftService::logUsage (best-effort, swallows
+     logger failures so AI flow isn't broken)."
+  - "IMPLEMENTED 2026-05-23: AiAutoAssignController now writes to
+     ai_usage_logs at all three Claude call sites
+     (team-build, plan-team, schedule), feature='auto_assign'. The
+     three sub-calls share one feature key for now; splitting into
+     'auto_assign_team' / 'auto_assign_schedule' for finer cost
+     accounting is a future chg-018 amendment."
+  - "AiCostRates::RATES is initial-draft. Anthropic's pricing page is
+     the source of truth; rates may need adjustment before merge."
+  - "Centralising the cost calc means existing services that compute it
+     inline (ContractAnalysisService, EstimationAiService) need a small
+     refactor to use AiCostRates::usdFor(). Trivial change but surfaces
+     in three files."
+
+risk: |
+  - If a service forgets to log (verification gap above), we silently
+    underestimate cost. Mitigation: add a feature test per service that
+    asserts an ai_usage_logs row exists after a Claude call. Three
+    tests today (analysis, estimation, draft).
+  - Synchronous logger writes inside long-running Claude calls: if the
+    DB is slow, the logger write could time out the request after
+    Claude has already returned. Wrap in try/catch and Log::error the
+    failure rather than letting it bubble — the AI result is more
+    valuable than the log row.
+  - Per-tenant feature breakdown queries (the new endpoints) could be
+    slow on large datasets. Add (tenant_id, feature, created_at) index
+    to ai_usage_logs as a follow-up if p95 query latency exceeds 500ms.
+
+rollback: |
+  The two new endpoints can be removed without affecting existing flows.
+  AiCostRates is a static class; removing it requires reverting the
+  three service refactors.
+  No data migration — ai_usage_logs schema is unchanged.
+
+manual_steps:
+  - composer dump-autoload (new AiCostRates class)
+  - composer test --filter=AiUsageLoggingTest (NEW test file)
+
+review_checklist:
+  - "Are all six AI features writing to ai_usage_logs? Grep for
+     'AiUsageLog::create' across app/Services."
+  - "Is the feature key string consistent with the canonical list above
+     for every caller? Typos like 'contract-drafting' vs
+     'contract_drafting' will fragment the aggregation."
+  - "Does AiCostRates::usdFor handle unknown model names gracefully?
+     Suggestion: fall back to the sonnet rate with a Log::warning."
+  - "Are the new endpoints behind the super_admin middleware?"
+  - "Does the logger write run in a try/catch so a DB failure doesn't
+     blow up the AI response path?"
+
+fixups:
+  - id: model-and-feature-test-coverage
+    summary: |
+      Add tests/Feature/AiUsageLoggingTest.php that stubs each of the
+      six services' Claude call and asserts a matching ai_usage_logs
+      row was written. Without this we don't catch a future refactor
+      that drops the logger call.
+
+  - id: tenant-self-service-aggregation
+    summary: |
+      Add GET /ai-usage (tenant-scoped) that returns the tenant's own
+      per-feature breakdown. Deferred until the v2 admin UI ships a
+      "your AI usage" panel.
+
+  - id: rate-tables-source
+    summary: |
+      AiCostRates::RATES is hardcoded. If the agency switches to
+      different model pricing (negotiated rates with Anthropic) we
+      need a per-tenant rate override. Out of scope today.
+
+affected_specs:
+  - api-contracts
+  - business-logic
+  - database-schema
+  - domain-models

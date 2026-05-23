@@ -1,0 +1,140 @@
+id: chg-012-deal-lifecycle-state-machine
+name: Deal lifecycle state machine — forward-only transitions + per-rank field locking
+status: proposed
+created: 2026-05-23
+owners: [claude.max@brycenmyanmar.com.mm]
+paired_with: chg-011-project-pipeline-and-contract-drafting
+
+why: |
+  chg-011 introduced the C→B→A→S rank model and shipped the structural
+  pieces (final_* fields, lifecycle_status, drop flow). What's still
+  implicit across the codebase is the rule the manager keeps insisting on:
+  rank changes are forward-only, event-driven, and never overridable from
+  the UI. Today the rules are split between Deal::canTransitionTo,
+  DealController::update validation strings, and Deal::isLocked /
+  lockViolations. They work, but the contract isn't named anywhere a new
+  developer can find it.
+
+  This proposal extracts the state machine into a documented, testable
+  contract spec. No new tables, no breaking API changes — it pins down
+  behaviour that the team will otherwise erode the first time a sales rep
+  asks for "just one manual override". It also locks in the field-locking
+  matrix per rank so future feature work (e.g. customer_requirements,
+  payment policy) doesn't reopen scope-creep on locked deals.
+
+what: |
+  Single source-of-truth state machine documented on Deal.
+
+  States:
+    - lead (C)
+    - qualified (B)
+    - negotiation (A)
+    - won (S)
+
+  Transitions (only these four writes to deals.status succeed):
+    - lead → qualified         : DealController::update auto-promote when
+                                  hasStartedEstimation() flips true via
+                                  Deal::maybePromoteToQualified
+    - qualified → negotiation  : DealController::update auto-promote when
+                                  missingEstimationFields() returns []
+                                  AND final_confirmed_at is set
+    - negotiation → won        : ContractDraftService::markSigned only,
+                                  via the fireWinDeal() stored procedure
+    - drop                     : DealController::drop → lifecycle_status
+                                  ='dropped', preserves status string at
+                                  the rank-at-drop value
+
+  All other transitions throw ValidationException with a 422
+  "Invalid rank transition" message. Dropped deals
+  (lifecycle_status='dropped') cannot transition at all —
+  Deal::canTransitionTo short-circuits to false.
+
+  Manual rank override is forbidden. The frontend MUST NOT POST a
+  status change directly; only the four writes above succeed.
+
+  Model surface (app/Models/Deal.php — already in place, no edits):
+    - ALLOWED_STATUS_TRANSITIONS (line 29)
+    - FIELDS_LOCKED_IN_A_OR_S (line 38, 20 field names)
+    - LOCKED_STATUSES = ['negotiation', 'won']
+    - canTransitionTo($newStatus): bool (line 231)
+    - isLocked(), lockedFields(), lockViolations() (lines 208–217, 401)
+    - maybePromoteToQualified() (line 284)
+    - isContractEligible() / missingEstimationFields() (lines 242, 257)
+
+  Controller surface (app/Http/Controllers/Api/DealController.php —
+  already in place):
+    - update() enforces lock + transition rules (lines 142–168).
+    - Proposal adds a docblock at the top of update() naming the state
+      machine and linking to this contract spec section.
+
+  New tests:
+    - tests/Unit/DealStateMachineTest.php pins valid forward transitions,
+      backward transitions return false (C↔B, B↔A, A↔S, A→C, S→A, etc.),
+      skip transitions (C→A, C→S, B→S) return false, dropped deal returns
+      false for every canTransitionTo target, won deal returns false for
+      every canTransitionTo target (terminal — to amend, create a new
+      deal), canBeDropped returns false for status 'won' and 'lost'
+      (lost is the deprecated string still allowed by CHECK until chg-017).
+    - tests/Feature/DealLockingTest.php pins: PATCH workload_description
+      on status='negotiation' → 422 with locked-field message; same PATCH
+      on status='qualified' succeeds; all 20 fields in
+      FIELDS_LOCKED_IN_A_OR_S are rejected when locked (parameterised
+      test loading the constant at runtime); PATCH status='lead' on
+      status='negotiation' deal → 422 (backward); PATCH status='qualified'
+      on a dropped status='lead' deal → 422 (re-promotion guard).
+
+scope_decisions:
+  - "Forward-only. No `force_status` flag, no admin override endpoint."
+  - "Won (S) is terminal. To amend a signed deal, drop it and create a new one."
+  - "Locking applies per RANK, not per FIELD AGE. Even fields populated at
+     C-rank become read-only once the deal hits A. Matches the manager's
+     'scope locks at contract handoff' rule."
+  - "Drop is orthogonal to rank — Deal::drop() writes lifecycle_status
+     ='dropped' and preserves the status string so analytics can report
+     'dropped at A after burning estimation effort'. Confirmed in
+     migration 2026_05_15_000002 docblock."
+  - "win_probability is NOT in FIELDS_LOCKED_IN_A_OR_S — it's auto-bumped
+     by the controller on each forward transition (B=50 → A=80 → S=100),
+     so locking it would block the transition itself."
+
+placeholders:
+  - "The deprecated 'lost' status string is still allowed by the
+     deals_status CHECK constraint. Migration
+     2026_05_15_000007_drop_lost_from_deals_status_check.php plans the
+     drop but is still pending data audit. chg-017 owns removing it;
+     this proposal leaves Deal::canBeDropped defensive (status !== 'lost'
+     && status !== 'won')."
+  - "No PATCH /deals/{deal}/stage endpoint to remove — chg-011 already
+     killed it. If any internal script still calls it, the route won't
+     exist."
+
+risk: |
+  - Adding parameterised tests over all 20 locked fields could overfit the
+    test to the current field list. Mitigation: the test loads
+    Deal::FIELDS_LOCKED_IN_A_OR_S at runtime, so future additions are
+    covered automatically.
+  - Pinning the state machine in tests means future "let admins override
+    rank" requests will fail CI before code review. That's intentional —
+    forces a real conversation rather than a quiet PR.
+
+rollback: |
+  Tests-only proposal. Removing the new test files is the rollback.
+  Docblock additions on DealController/Deal.php are harmless.
+
+manual_steps:
+  - composer test --filter=DealStateMachineTest
+  - composer test --filter=DealLockingTest
+
+review_checklist:
+  - "Do the new tests load FIELDS_LOCKED_IN_A_OR_S from the model constant
+     (not a hardcoded array in the test)?"
+  - "Does the dropped-deal test cover all four target statuses?"
+  - "Is the won-deal test asserting canTransitionTo returns false for
+     every possible target, including 'won' itself?"
+  - "Does DealLockingTest run against both PostgreSQL and SQLite drivers,
+     or does it skip on SQLite for any reason? Lock enforcement is
+     PHP-side, not CHECK-side, so SQLite should pass."
+
+affected_specs:
+  - business-logic
+  - domain-models

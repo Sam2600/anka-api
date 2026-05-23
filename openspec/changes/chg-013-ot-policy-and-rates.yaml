@@ -1,0 +1,128 @@
+id: chg-013-ot-policy-and-rates
+name: OT policy model + rates — structured overtime fields for estimation, profit, and contracts
+status: proposed
+created: 2026-05-23
+owners: [claude.max@brycenmyanmar.com.mm]
+
+why: |
+  Until now the deal's overtime expectation lived as a freeform string in
+  `deals.final_ot_policy`. The Estimation menu treated it as a note; ⑦
+  Profit Calculate couldn't subtract OT cost when the agency absorbed it;
+  the Contract Drafting AI had to guess the clause from prose.
+
+  Migration 2026_05_15_000008 already added the four structured columns
+  (ot_policy_model / ot_rate_per_hour / ot_included_hours_per_month /
+  ot_notes) plus a 4-value CHECK constraint mirroring Deal::OT_POLICY_MODELS.
+  This proposal documents the contract those columns satisfy and pins the
+  integration points so the next feature touching profit or contracts
+  doesn't reinvent it.
+
+what: |
+  Model surface (app/Models/Deal.php — already in place):
+    - OT_POLICY_MODELS constant (line 61) — the 4-value enum:
+        'customer_pays_per_hour' — customer billed per OT hour (typical SES).
+        'capped_then_customer_pays' — N hours/month absorbed by Provider,
+          beyond that customer pays. Matches Yazaki Veritas pattern
+          (12 hrs/mo support, then per-hour).
+        'absorbed_by_provider' — Provider eats OT cost. ⑦ Profit Calculate
+          subtracts it.
+        'no_overtime_allowed' — contract forbids OT entirely; rare; flags
+          fixed-scope work.
+    - isOvertimeAbsorbed(): bool (line 359) — true for absorbed_by_provider
+      AND capped_then_customer_pays (partial absorption).
+    - All four ot_* fields are listed in FIELDS_LOCKED_IN_A_OR_S
+      (lines 42–45), so they're read-only once rank ∈ {A, S}.
+    - No model changes in this proposal.
+
+  Database (migration 2026_05_15_000008 — already applied):
+    - ot_policy_model VARCHAR(32) nullable, plus a Postgres CHECK
+      constraint allowing the 4 enum values.
+    - ot_rate_per_hour DECIMAL(10,2) nullable, CHECK >= 0.
+    - ot_included_hours_per_month INTEGER nullable, CHECK in [0, 744]
+      (max hours in a 31-day month).
+    - ot_notes TEXT nullable.
+
+  Controller validation (DealController::update — already in place,
+  lines 186–189):
+    - ot_policy_model: in:customer_pays_per_hour,capped_then_customer_pays,absorbed_by_provider,no_overtime_allowed
+    - ot_rate_per_hour: numeric|min:0
+    - ot_included_hours_per_month: integer|min:0|max:744
+    - ot_notes: string|max:2000
+
+  Service integration:
+    - ContractDraftService::generateDraft already pulls ot_policy_model,
+      ot_rate_per_hour, ot_included_hours_per_month into the prompt's
+      deal context (verified in app/Services/ContractDraftService.php).
+      This proposal pins the contract: the three SES templates' OT clause
+      MUST be driven by ot_policy_model, not by freeform final_ot_policy
+      text. If the structured field is null, the AI falls back to the
+      freeform string; if both are null, the clause renders as a {{TODO}}
+      token.
+    - EstimationAiService should include the deal's ot_policy_model and
+      isOvertimeAbsorbed() result in the prompt context so AI-suggested
+      hours respect the OT model. No code change in this proposal —
+      flagged as a follow-up against chg-014.
+
+  Compatibility kept in place:
+    - The deprecated `final_ot_policy` text column on deals stays as a
+      compatibility / notes layer. Estimation can still write it; contract
+      drafting reads it only when the structured field is null. Removal
+      deferred until all three template variants have shipped end-to-end
+      without falling back to it.
+
+scope_decisions:
+  - "Four OT models only. No 'other' / 'custom' escape hatch. If a deal
+     genuinely doesn't fit, the salesperson leaves ot_policy_model null
+     and puts the explanation in ot_notes — the AI flags it as a {{TODO}}."
+  - "ot_rate_per_hour applies to BOTH customer_pays_per_hour AND
+     capped_then_customer_pays (rate kicks in after the cap). For the
+     other two models the field is informational only — ⑦ Profit Calculate
+     uses the engineer's cost rate, not this field, when absorbing OT."
+  - "ot_included_hours_per_month is logically required when
+     ot_policy_model='capped_then_customer_pays'. Currently SOFT — the
+     controller accepts null with a warning."
+  - "OT fields are LOCKED at rank A/S — confirmed they're listed in
+     FIELDS_LOCKED_IN_A_OR_S. To change the OT model after estimation
+     handoff, drop the deal and start a new one."
+
+placeholders:
+  - "⑦ Profit Calculate doesn't exist as a feature yet. When it ships,
+     it MUST read Deal::isOvertimeAbsorbed() and subtract actual OT hours
+     × engineer cost_per_hour from project profit. This contract is locked
+     in here so the Profit Calculate proposal can cite it."
+  - "Validation rule 'ot_included_hours_per_month required when
+     ot_policy_model=capped_then_customer_pays' is currently soft.
+     Tightening to a 422 is a follow-up; needs UX coordination with the
+     frontend's wizard UI."
+
+risk: |
+  - The 744-hour upper bound is generous (a 31-day month at 24h/day).
+    Realistic SES contracts cap at 40 hours. Not narrowing the constraint
+    in case a tenant has an unusual contract; UX can tighten in the form.
+  - Reading the OT clause from structured data means the contract drafting
+    AI loses the salesperson's nuanced wording in ot_notes. The wizard
+    UI surfaces ot_notes as a separate "Notes" field on the OT step so
+    the AI can quote it verbatim when present.
+
+rollback: |
+  Migration 000008 is additive; reversible if every column is dropped.
+  Reversing would lose any deal's structured OT data — falls back to the
+  freeform final_ot_policy string, which is preserved.
+  Deal::OT_POLICY_MODELS constant and isOvertimeAbsorbed() are
+  no-impact-if-unused; can be left in place after rollback.
+
+manual_steps:
+  - No new manual steps. Migration 000008 already applied.
+
+review_checklist:
+  - "When ContractDraftService renders the OT clause, does it prefer
+     structured fields over freeform final_ot_policy?"
+  - "Does the OT clause render as {{TODO}} when BOTH structured and
+     freeform fields are null?"
+  - "Is ot_rate_per_hour displayed in the contract DOCX only for the two
+     pays-per-hour models, not for absorbed / forbidden?"
+
+affected_specs:
+  - business-logic
+  - domain-models
+  - database-schema

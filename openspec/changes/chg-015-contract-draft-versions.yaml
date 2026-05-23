@@ -1,0 +1,150 @@
+id: chg-015-contract-draft-versions
+name: Contract draft versioning — regenerate bumps version, prior becomes superseded
+status: proposed
+created: 2026-05-23
+owners: [claude.max@brycenmyanmar.com.mm]
+paired_with: chg-011-project-pipeline-and-contract-drafting
+
+why: |
+  The contract drafting flow from chg-011 already produces a
+  DealContractDraft row per generation, but the lifecycle around
+  multi-attempt drafting wasn't pinned. A salesperson tweaking wizard
+  inputs and re-running "Generate Draft" needs the previous draft
+  preserved (audit + the customer may have already seen it), the new
+  draft to have a sensible version number, and a clear "this is the
+  active draft" signal so the UI doesn't have to guess.
+
+  Verified in ContractDraftService::generateDraft (lines 80–93) — newer
+  drafts already supersede older ones, and the new version number is
+  max(version)+1. This proposal codifies that contract so the rule
+  survives future refactors, adds the missing audit affordances (lifecycle
+  invariants, visibility through the API), and pins the test surface.
+
+what: |
+  Model surface (app/Models/DealContractDraft.php — already in place,
+  lines 23–32):
+    - STATUS_DRAFT = 'draft'
+    - STATUS_SENT = 'sent_to_customer'
+    - STATUS_SIGNED = 'signed'
+    - STATUS_SUPERSEDED = 'superseded'
+
+  Lifecycle invariants this proposal pins:
+    - Only one draft per deal can be in status='draft' OR
+      status='sent_to_customer' at a time.
+    - Generating a new draft transitions ALL prior status='draft' rows
+      on the same deal to 'superseded' (confirmed in
+      ContractDraftService::generateDraft lines 80–83).
+    - status='sent_to_customer' is NOT auto-superseded — a draft that's
+      been emailed cannot be silently replaced. The salesperson must
+      explicitly regenerate, which the service permits but logs.
+    - status='signed' and status='superseded' are TERMINAL. No state
+      can leave them.
+
+  Service (app/Services/ContractDraftService.php — already in place):
+    - generateDraft() supersedes prior draft rows for the deal before
+      inserting (line 81–83).
+    - version = max(version) + 1 across all rows for the deal,
+      regardless of state (a v3 after a signed v2 is allowed).
+    - regenerateSection method DOES NOT bump the parent version — it
+      mutates the existing draft's sections JSON. This proposal pins
+      the distinction: "regenerate-section ≠ regenerate-draft."
+    - Audit: every generation persists wizard_inputs and ai_outputs
+      verbatim alongside the merged `sections`. Drafts are soft-deleted
+      (SoftDeletes trait, line 21) — never hard-deleted by the
+      application. Hard delete only via DB maintenance.
+
+  Controller surface (app/Http/Controllers/Api/DealContractDraftController.php):
+    - GET /deals/{deal}/contract-drafts (index) returns all drafts for
+      a deal including superseded ones, most-recent first. This proposal
+      pins that contract; the frontend uses version + status to render
+      an audit trail.
+    - POST /deals/{deal}/contract-drafts (line 111 of routes/api.php):
+      when called against a deal with an existing draft, supersedes it
+      (no body flag required). When called against a deal with a signed
+      draft, returns 422 (cannot regenerate after sign — to amend, drop
+      and start a new deal; see chg-012).
+
+  New tests (tests/Feature/ContractDraftVersionsTest.php):
+    - Generating a draft on a deal with no prior drafts yields version=1,
+      status='draft'.
+    - Generating again supersedes v1 and yields v2 status='draft'; v1
+      ends at status='superseded' with the same wizard_inputs /
+      ai_outputs preserved.
+    - markSent on v2 sets status='sent_to_customer'. Generating v3
+      supersedes v2 (sent_to_customer → superseded). v2's sent_to_email
+      / sent_at are preserved on the row.
+    - markSigned on v3 sets status='signed' and fires win_deal.
+      Attempting POST /deals/{deal}/contract-drafts (a fourth generate)
+      returns 422 with "deal is already won".
+    - PATCH /contract-drafts/{draft}/sections/{key} on a signed draft
+      returns 422.
+    - PATCH on a superseded draft returns 422.
+    - regenerate-section on the active draft does NOT bump version but
+      updates the draft's sections JSON in place.
+
+scope_decisions:
+  - "Version is a per-deal counter on DealContractDraft, NOT a per-template
+     counter. A deal that uses template A v1, then regenerates with
+     template B v1, gets DealContractDraft.version=1,2 — the template's
+     own version number is captured separately in
+     DealContractDraft.template_version_at_generation."
+  - "Soft delete only. The audit trail is the product feature; never
+     hard-delete a draft from the app. DB cleanup is a separate ops task."
+  - "Regenerating a sent_to_customer draft is permitted but the service
+     SHOULD log a warning (customer may have a stale PDF in their inbox).
+     UI surfaces a confirmation modal in the frontend."
+  - "Once a deal is signed, the contract-draft endpoints reject further
+     writes. To amend, drop the deal and start a new one. Matches
+     chg-012's S-is-terminal rule."
+
+placeholders:
+  - "The 'customer may have stale PDF' warning is currently a server-side
+     Log::info only — no email notification to the customer. If needed,
+     add a follow-up that emails the customer a 'this draft has been
+     superseded' notice when a sent_to_customer draft is replaced."
+
+risk: |
+  - Race condition on simultaneous generates: two POST /contract-drafts
+    requests arriving within ms of each other could both read
+    max(version)=N and both insert N+1. Mitigation:
+    ContractDraftService::generateDraft runs inside a DB::transaction
+    (line 68); add a lockForUpdate on the deal row at the start of the
+    transaction. Currently NOT in place — flag as a fixup if the test
+    pinning the version sequence becomes flaky.
+  - The DealContractDraft.version is an integer counter, not a UUID. If
+    the supersede update fails partway (network glitch between the
+    UPDATE and the INSERT), the deal could be left with two drafts both
+    at status='draft'. The transaction wrap should prevent it, but the
+    test suite should include a transaction-rollback scenario.
+
+rollback: |
+  Tests-only proposal. Removing the new test files is the rollback.
+  If lockForUpdate is added as a fixup (see risk above), reverting the
+  Eloquent call is two lines.
+
+manual_steps:
+  - composer test --filter=ContractDraftVersionsTest
+
+review_checklist:
+  - "Does ContractDraftService::generateDraft wrap the supersede + insert
+     in a single transaction? Current code: yes, line 68."
+  - "Does the index endpoint return superseded drafts by default? The
+     frontend needs them for the audit trail."
+  - "Does the PATCH section endpoint reject signed AND superseded drafts
+     (not just signed)?"
+  - "Is the version counter scoped per-deal, not per-tenant? A multi-tenant
+     deployment must not share counters."
+
+fixups:
+  - id: lockForUpdate-on-generate
+    summary: |
+      Add ->lockForUpdate() on the Deal row at the start of
+      ContractDraftService::generateDraft's transaction so two
+      simultaneous POSTs don't both read max(version)=N. Pending
+      whether the race actually surfaces in load testing — flagged
+      here so the review checklist remembers to look for it.
+
+affected_specs:
+  - api-contracts
+  - business-logic
+  - domain-models
