@@ -64,7 +64,7 @@ class TimeEntryController extends Controller
             'employee_id' => 'required|exists:employees,id',
             'task'        => 'required|string|max:500',
             'date'        => 'required|date',
-            'hours'       => 'required|numeric|min:0.5|max:80',
+            'hours'       => 'required|numeric|min:0.5|max:16',
             'billable'    => 'sometimes|boolean',
             'notes'       => 'nullable|string|max:2000',
         ]);
