@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Mail\ContractDraftEmail;
+use App\Models\AiUsageLog;
 use App\Models\ContractTemplate;
 use App\Models\Deal;
 use App\Models\DealContractDraft;
@@ -561,6 +562,11 @@ class ContractDraftService
         }
 
         $body = $response->json();
+
+        if (isset($body['usage'])) {
+            $this->logUsage($deal, $body['usage'], $onlySectionKey !== null ? 'contract_section_regen' : 'contract_drafting', $model);
+        }
+
         $raw = trim($body['content'][0]['text'] ?? '');
         if (str_starts_with($raw, '```')) {
             $raw = preg_replace('/^```(?:json)?\s*/i', '', $raw);
@@ -1010,6 +1016,34 @@ TXT;
                 'won_at' => now(),
             ]);
         });
+    }
+
+    /**
+     * Per chg-018: every Claude call must land in ai_usage_logs so the
+     * super-admin cost ledger and per-tenant aggregation are complete.
+     * Best-effort — a logger failure must NOT break the AI flow.
+     */
+    private function logUsage(Deal $deal, array $usage, string $feature, string $model): void
+    {
+        try {
+            $inputTokens = (int) ($usage['input_tokens'] ?? 0);
+            $outputTokens = (int) ($usage['output_tokens'] ?? 0);
+            // Claude 3.5 Sonnet public pricing — keep in sync with
+            // EstimationAiService::estimateCost until chg-018 centralises rates.
+            $costUsd = round(($inputTokens / 1_000_000) * 3 + ($outputTokens / 1_000_000) * 15, 6);
+
+            AiUsageLog::create([
+                'tenant_id' => $deal->tenant_id,
+                'user_id' => auth()->id(),
+                'feature' => $feature,
+                'model' => $model,
+                'input_tokens' => $inputTokens,
+                'output_tokens' => $outputTokens,
+                'estimated_cost_usd' => $costUsd,
+            ]);
+        } catch (Throwable $e) {
+            Log::warning('ContractDraftService: failed to log AI usage', ['error' => $e->getMessage()]);
+        }
     }
 
 }

@@ -1,0 +1,179 @@
+id: chg-016-contract-templates
+name: Contract template variants — 3 SES global templates + tenant override path
+status: proposed
+created: 2026-05-23
+owners: [claude.max@brycenmyanmar.com.mm]
+paired_with: chg-011-project-pipeline-and-contract-drafting
+
+why: |
+  Three SES contract variants were seeded by chg-011 (cloud_backup,
+  managed_hosting, engineer_dispatch) as global rows (tenant_id IS NULL)
+  in the contract_templates table. The ContractTemplate model exposes
+  both global and tenant-owned templates to every tenant via a custom
+  global scope. What's still implicit: the rules around which template
+  variant gets chosen, how a tenant overrides a global one, and the
+  contract for the sections JSON that drives the AI prompt.
+
+  This proposal documents the variant catalog, the override path, and
+  the sections JSON schema so future template additions (Japanese
+  versions, per-tenant variants, the v2 CRUD UI) have a stable contract
+  to write against.
+
+what: |
+  Database (already applied):
+    - 2026_05_15_000004_create_contract_templates_table.php — columns:
+      id (uuid), tenant_id (uuid nullable), name, slug (unique per
+      tenant; null tenant_id is its own group), umbrella (varchar,
+      'SES' for v1), version (int default 1), sections (jsonb),
+      is_active (bool), timestamps, deletes.
+    - 2026_05_15_000006_seed_three_ses_template_variants.php — seeds
+      three global rows with tenant_id=NULL.
+    - 2026_05_15_000007_update_ses_template_ai_prompts.php — refined
+      the AI prompts inside the sections JSON after first-round
+      drafting feedback.
+
+  Model (app/Models/ContractTemplate.php — already in place):
+    - Custom global scope `tenant_or_global` (lines 49–61): a query
+      sees BOTH global templates (tenant_id IS NULL) AND the current
+      tenant's templates. Skipped when no tenant context (super-admin,
+      console, tests without bound tenant).
+    - scopeActive() filter on is_active=true.
+    - scopeForUmbrella('SES') filter.
+    - isGlobal(): bool helper (line 73).
+    - No model changes in this proposal.
+
+  Variant catalog (the three seeded SES templates):
+    - cloud_backup: modeled after the Yazaki Veritas Backup Exec
+      contract. TB-tiered pricing structure. Cloud config slot
+      (GCP / AWS / Azure). Data deletion-on-termination clauses.
+      Suggested by Estimation when the deal mentions backup, restore,
+      retention, or DR keywords.
+    - managed_hosting: 24/7 monitoring + SLA-based pricing. Incident
+      response / escalation clauses. Tiered support hours per month.
+      Suggested by Estimation when the deal mentions hosting, monitoring,
+      uptime, or SLA keywords.
+    - engineer_dispatch: traditional SES. Engineer assigned for X
+      hours/month. Working hours + rate card. Overage governed by
+      Deal.ot_policy_model (see chg-013). Default suggestion when no
+      specialised keywords match.
+
+  sections JSON schema (the jsonb column on contract_templates):
+    Ordered array of section objects with:
+      key (string, unique within template, e.g. 'preamble')
+      title (string, human-facing section heading)
+      type ('fixed' | 'ai_written' | 'slot_filled')
+      fixed_text (string, for type='fixed')
+      ai_prompt (string, for type='ai_written' — Claude instruction)
+      wizard_questions (array, for type='ai_written' — Path C questions)
+      output_format ('prose' | 'bullets' | 'table')
+    ContractDraftService builds the Claude prompt from this array;
+    ai_written sections become keys in the AI's JSON response; fixed
+    sections are copied verbatim into the rendered DOCX; slot_filled
+    sections drop wizard / deal values into {{slot}} tokens with a
+    {{TODO}} fallback when the value is null.
+
+  Tenant override path:
+    - A tenant creates a per-tenant variant by POSTing /contract-templates
+      (NOT YET IMPLEMENTED — see deferred_to_v2) with name, slug,
+      umbrella='SES', sections JSON. The new row has tenant_id=<their
+      tenant>; the custom global scope makes it visible alongside globals.
+    - Slug collision: a tenant CAN create a template with the same slug
+      as a global one. The UI MUST prefer the tenant's variant when both
+      exist with the same slug.
+    - There is no "deactivate global for this tenant" path in v1. A
+      tenant that wants to hide a global template overrides it by
+      creating a tenant-scoped row with the same slug, then making
+      their override the canonical version.
+
+  What stays in place:
+    - The three seeded global templates are immutable in v1 — no UI
+      to edit them. Refining their sections JSON requires a new
+      migration (like 000007). Acceptable: only the platform team
+      should be editing the global SES contracts.
+
+scope_decisions:
+  - "Umbrella = 'SES' only for v1. Other umbrellas (consulting, product)
+     would each get their own seeded catalog. Not in scope."
+  - "Global templates are READ-ONLY from the API. The seeded rows are
+     the platform's contracts; only migrations change them."
+  - "Tenant overrides are full clones, not delta patches. A tenant that
+     wants to tweak one paragraph of cloud_backup must clone the entire
+     sections JSON. Intentional — partial overrides are impossible to
+     reason about when the global template version is bumped."
+  - "When a tenant template AND a global template share a slug, the
+     tenant variant wins. API endpoints filter by tenant_id, and the
+     UI's template-picker logic deduplicates by slug preferring non-null
+     tenant_id."
+
+placeholders:
+  - "Tenant CRUD UI for templates (POST/PATCH/DELETE on
+     /contract-templates) is deferred to v2. v1 only has GET endpoints.
+     To get a tenant override in production today, ops runs a one-off
+     INSERT via tinker. Acceptable for early-customer phase."
+  - "Japanese-language template variants are out of scope. Seeded rows
+     are English-only. Frontend wraps placeholders in i18n.t() so UI
+     strings translate, but the contract body is one language per
+     template."
+  - "The wizard_questions arrays inside the three sections JSONs are
+     first drafts. Expect 1–2 rounds of refinement after the first real
+     customer contract is drafted end-to-end."
+
+risk: |
+  - A tenant inserts a malformed sections JSON (missing required keys,
+    wrong type values) — the ContractDraftService prompt builder will
+    silently skip the broken sections, producing a contract with gaps.
+    Add a sections-JSON validator in the v2 CRUD endpoint so this can't
+    happen via the API.
+  - Global template version bumps don't propagate to in-flight drafts.
+    Existing DealContractDraft rows have template_version_at_generation
+    captured — they keep using the version they were generated against.
+    New drafts use the current version. Correct, but the review-checklist
+    should confirm the controller does NOT 'upgrade' drafts to the new
+    template version on regenerate.
+
+rollback: |
+  Migrations 000004 / 000006 / 000007 are additive. Reversing them
+  would also need to drop the deal_contract_drafts.template_id FK
+  (migration 000005). Don't roll back unless absolutely necessary.
+  Removing the three seed rows would orphan any existing drafts'
+  template_id; do not delete seeded rows in production.
+
+manual_steps:
+  - No new manual steps. All three migrations already applied.
+
+deferred_to_v2:
+  - Admin CRUD UI for editing global templates
+  - Tenant CRUD UI for creating tenant-scoped templates
+  - Re-usable contract_clauses library table (build complex sections
+    from clause primitives)
+  - Multi-language variants (Japanese first)
+  - Per-tenant SMTP for the contract-draft-sent email (uses platform
+    default in v1)
+  - Sections-JSON schema validator (used by the v2 CRUD endpoints)
+  - Regenerate flag that upgrades a draft to the new template version
+
+fixups:
+  - id: tenant-vs-global-slug-collision-test
+    summary: |
+      Add a feature test pinning the "tenant variant wins" rule when
+      a tenant template shares a slug with a global one. The current
+      implementation relies on the API filter ordering; if a future
+      refactor inverts the order, drafts could silently switch to
+      the global template.
+
+review_checklist:
+  - "Does GET /contract-templates return BOTH globals and tenant
+     templates for the current tenant?"
+  - "Does the tenant-or-global global scope skip when no tenant is
+     bound (super-admin paths)?"
+  - "Are the three seeded global rows visible to every tenant via the
+     custom scope?"
+  - "Does the deal_contract_drafts.template_version_at_generation
+     column capture the template's version at generation time?
+     Critical for replay / audit."
+
+affected_specs:
+  - api-contracts
+  - business-logic
+  - domain-models
+  - database-schema

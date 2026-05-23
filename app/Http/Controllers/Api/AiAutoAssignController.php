@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\ProjectTaskAssignmentResource;
 use App\Http\Resources\ProjectTaskPhaseAssignmentResource;
 use App\Http\Resources\ProjectTeamAssignmentResource;
+use App\Models\AiUsageLog;
 use App\Models\DealGhostRole;
 use App\Models\Employee;
 use App\Models\Holiday;
@@ -90,6 +91,11 @@ class AiAutoAssignController extends Controller
             ]);
 
             $body = $response->json();
+
+            if (isset($body['usage'])) {
+                $this->logUsage($tenantId, $body['usage'], 'auto_assign', $model);
+            }
+
             $text = $body['content'][0]['text'] ?? '';
 
             $text = trim($text);
@@ -792,6 +798,11 @@ PROMPT;
             ]);
 
             $body = $response->json();
+
+            if (isset($body['usage'])) {
+                $this->logUsage($project->tenant_id, $body['usage'], 'auto_assign', $model);
+            }
+
             $text = trim($body['content'][0]['text'] ?? '');
             if (str_starts_with($text, '```')) {
                 $text = preg_replace('/^```(?:json)?\s*/i', '', $text);
@@ -1125,6 +1136,11 @@ PROMPT;
                     ]);
 
                 $body = $response->json();
+
+                if (isset($body['usage'])) {
+                    $this->logUsage($tenantId, $body['usage'], 'auto_assign', $model);
+                }
+
                 $text = trim($body['content'][0]['text'] ?? '');
 
                 try {
@@ -2452,5 +2468,33 @@ PROMPT;
         usort($active, fn ($a, $b) => $a['order'] <=> $b['order']);
 
         return $active;
+    }
+
+    /**
+     * Per chg-018: every Claude call must land in ai_usage_logs so the
+     * super-admin cost ledger and per-tenant aggregation are complete.
+     * Best-effort — a logger failure must NOT break the AI flow.
+     */
+    private function logUsage(string $tenantId, array $usage, string $feature, string $model): void
+    {
+        try {
+            $inputTokens = (int) ($usage['input_tokens'] ?? 0);
+            $outputTokens = (int) ($usage['output_tokens'] ?? 0);
+            // Claude 3.5 Sonnet public pricing — keep in sync with
+            // EstimationAiService::estimateCost until chg-018 centralises rates.
+            $costUsd = round(($inputTokens / 1_000_000) * 3 + ($outputTokens / 1_000_000) * 15, 6);
+
+            AiUsageLog::create([
+                'tenant_id' => $tenantId,
+                'user_id' => auth()->id(),
+                'feature' => $feature,
+                'model' => $model,
+                'input_tokens' => $inputTokens,
+                'output_tokens' => $outputTokens,
+                'estimated_cost_usd' => $costUsd,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('AiAutoAssign: failed to log AI usage', ['error' => $e->getMessage()]);
+        }
     }
 }

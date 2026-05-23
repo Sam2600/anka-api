@@ -1,0 +1,134 @@
+id: chg-014-ai-estimation-draft
+name: AI Estimation Draft — Claude-driven preview that user saves to a real EstimationVersion
+status: proposed
+created: 2026-05-23
+owners: [claude.max@brycenmyanmar.com.mm]
+
+why: |
+  Hand-built estimations are slow and structurally repetitive. The agency
+  has a consistent way to break down features, hours, phases and team mix,
+  so a model can produce a credible first pass. Adding an "AI draft" entry
+  point on the existing EstimationVersion flow lets the sales engineer
+  click one button, get a structured per-sheet JSON back, review and
+  adjust, then save via the normal POST /deals/{deal}/estimation-versions.
+
+  The AI never writes to estimation_versions, estimation_resources, or
+  deal_overheads — preview-first by design (matches chg-006's "save
+  triggers XLSX gen" rule). Token usage is logged to ai_usage_logs
+  with feature='estimation_generation'.
+
+what: |
+  Service (app/Services/EstimationAiService.php — already in place):
+    - generateDraft(Deal $deal): array — the preview returner.
+    - Provider: Anthropic Claude (claude-3-5-sonnet-latest); reuses the
+      same ANTHROPIC_API_KEY env var already wired by
+      ContractAnalysisService (chg-005).
+    - Per-sheet output schema, validated server-side before return:
+        sheet1_summary, sheet2_features (function_id keyed),
+        sheet3_manhours (joined by function_id), sheet4_milestone
+        (phase_durations object), sheet5_team_stack (role + count +
+        monthly_allocation array).
+    - On Claude failure (missing key, 5xx, malformed JSON after one retry):
+      controller returns 503 with normalised error.
+    - ai_usage_logs row on every call (success or fail), feature key
+      'estimation_generation', tokens_in / tokens_out / cost.
+
+  Prompt template (resources/prompts/estimation_generation.txt):
+    - Externalised so the sales team can tune wording without a redeploy.
+    - Slots: {client_name}, {workload_description}, {client_budget},
+      {timeline_months}, {target_margin}, {contract_documents_text},
+      {org_roles_block}, {few_shot_deals_block}.
+    - Contract document text capped at ~50k chars before injection.
+
+  Controller (app/Http/Controllers/Api/EstimationVersionController.php
+  ::aiDraft — already in place, line 320):
+    - Loads Deal through the tenant-scoped query (cross-tenant → 404).
+    - Validates deal has workload_description OR an attached contract
+      document with analysis_status in ('approved','pending'); otherwise
+      422 with "Deal needs a workload description or attached contract
+      document…" message.
+    - Calls EstimationAiService::generateDraft($deal).
+    - Returns 200 with per-sheet JSON wrapped in `data`.
+    - On AI failure: 503 with normalised error.
+    - Does NOT persist anything — preview-only.
+
+  Routes (routes/api.php — already registered, line 139):
+    - POST /deals/{deal}/estimation-versions/ai-draft →
+      EstimationVersionController::aiDraft, tenant-scoped,
+      gated by permission:manage_crm (AI draft is a write-intent action
+      — racks up token cost — so read-only users are blocked).
+
+  What stays in place:
+    - The normal POST /deals/{deal}/estimation-versions endpoint is still
+      the only path that creates a real version. AI output is a preview
+      payload the frontend loads into the Estimation Simulator's editable
+      state; the user reviews and triggers a normal Save.
+
+scope_decisions:
+  - "Preview-first. Service never touches estimation_versions /
+     estimation_resources / deal_overheads. Confirmed in the controller's
+     docblock (lines 314–319)."
+  - "manage_crm permission — read-only users cannot trigger AI calls
+     even though the result is read-only. Token cost is a write-side
+     consideration."
+  - "One retry on malformed JSON with a tightened 'respond with valid
+     JSON only' preamble. Beyond that, the user sees a toast and tries
+     again."
+  - "Few-shot retrieval: latest 2–3 won deals by updated_at DESC within
+     the same tenant. Semantic similarity (embeddings) is out of scope."
+  - "Role names: prompt instructs Claude to use names from
+     {org_roles_block}. Validator does NOT reject unknown names; sheet 5
+     writer fuzzy-matches at XLSX generation time (chg-006)."
+
+placeholders:
+  - "SUPERSEDES chg-007-ai-estimation-generation. chg-007 was authored
+     2026-05-13 with status='proposed' and described the same feature
+     pre-implementation. The implementation that shipped matches chg-007
+     closely. This proposal pins the canonical contract. This proposal
+     does NOT archive chg-007 — the user archives stale proposals
+     separately. It only points later readers here."
+  - "The ai-delta endpoint (POST /deals/{deal}/estimation-versions
+     /ai-delta, route registered at line 140) is a sibling feature —
+     not in scope for this proposal."
+  - "Tenant opt-out flag (tenants.ai_estimation_enabled) is not
+     implemented. If any tenant raises a PII concern with sending
+     contract document text to Anthropic, add the flag as a follow-up."
+
+risk: |
+  - Token cost is the main concern. ContractAnalysisService averages
+    ~3–8k input tokens; estimation generation with few-shot + contract
+    docs is expected to average 15–25k input + 2–4k output. Monitor
+    ai_usage_logs.tokens_in p95 in the first week.
+  - PII in prompts: contract document text and past deal descriptions
+    are sent to Anthropic. Tenant terms must permit this; flag as a
+    legal review item before turning on for a regulated tenant.
+  - Few-shot leakage: confirmed tenant-scoped via BelongsToTenant on
+    Deal. Code review checkpoint — service MUST NOT use DB::table('deals')
+    (bypasses scope). Use Deal::query().
+  - The aiDraft controller method calls set_time_limit(0) and bumps
+    memory_limit to 512M (lines 326–332). Don't drop these — the
+    Anthropic proxy can take up to ~180s for the structured draft and
+    PHP-FPM default (60s) silently kills the request mid-flight.
+
+rollback: |
+  Remove the route registration; controller method can stay (unused).
+  No DB schema to revert; the service writes only to ai_usage_logs,
+  which is append-only and harmless to leave.
+
+manual_steps:
+  - Ensure ANTHROPIC_API_KEY is set in .env (reused from chg-005).
+  - Verify resources/prompts/estimation_generation.txt is deployed
+    (code-tracked asset, not env file).
+
+review_checklist:
+  - "Does aiDraft validate the deal has SOMETHING (description OR
+     contract doc) before calling Claude? Saves cost on misconfigured deals."
+  - "Does the controller still set set_time_limit(0) and ini_set memory
+     to 512M? Critical for the long Anthropic call."
+  - "Does the service log to ai_usage_logs on BOTH success and failure?"
+  - "Is the prompt template loaded from the .txt file at runtime, not
+     hardcoded in PHP?"
+
+affected_specs:
+  - api-contracts
+  - business-logic
