@@ -229,7 +229,7 @@ class AiAutoAssignController extends Controller
 
     public function index(Project $project)
     {
-        $project->load('teamAssignments.employee');
+        $project->load('teamAssignments.employee.department', 'teamAssignments.employee.rank');
 
         return ProjectTeamAssignmentResource::collection($project->teamAssignments);
     }
