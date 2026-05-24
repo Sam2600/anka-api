@@ -21,6 +21,7 @@ use App\Services\EstimateFileResolver;
 use App\Services\Scheduling\AiSchedulePayload;
 use App\Services\Scheduling\AiScheduleValidator;
 use App\Services\Scheduling\CalendarFactory;
+use App\Services\Scheduling\PhaseReassignmentService;
 use App\Services\Scheduling\WorkingDayCalendar;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -1906,6 +1907,139 @@ PROMPT;
         $phaseAssignment->load('assignee.rank');
 
         return new ProjectTaskPhaseAssignmentResource($phaseAssignment);
+    }
+
+    public function checkReassignment(Request $request, Project $project, ProjectTaskPhaseAssignment $phaseAssignment)
+    {
+        $phaseAssignment->loadMissing('taskAssignment');
+        if (! $phaseAssignment->taskAssignment || $phaseAssignment->taskAssignment->project_id !== $project->id) {
+            abort(404);
+        }
+
+        $validated = $request->validate([
+            'assignee_id' => 'required|uuid|exists:employees,id',
+        ]);
+
+        if (! $phaseAssignment->planned_start || ! $phaseAssignment->planned_end) {
+            return response()->json([
+                'has_conflicts'    => false,
+                'conflicts'        => [],
+                'readjusted_dates' => null,
+                'cascade_preview'  => [],
+                'warnings'         => [],
+                'remaining_hours'  => (float) $phaseAssignment->estimated_hours,
+            ]);
+        }
+
+        $tenantId = app('tenant_id');
+        $project->load('contract.deal');
+        $windowStart = $project->start_date ? Carbon::parse($project->start_date)->startOfDay() : Carbon::today()->subYear();
+        $windowEnd = $project->effectiveEndDate() ?? Carbon::today()->addYear();
+        $calendar = CalendarFactory::forTenant($tenantId, $windowStart, $windowEnd);
+        $service = new PhaseReassignmentService($calendar);
+
+        $conflicts = $service->detectConflicts(
+            $validated['assignee_id'],
+            $phaseAssignment->planned_start,
+            $phaseAssignment->planned_end,
+            $phaseAssignment->id,
+        );
+
+        $readjustedDates = null;
+        $cascadePreview = [];
+        $warnings = [];
+
+        if (count($conflicts) > 0) {
+            $readjustedDates = $service->calculateReadjustedDates(
+                $validated['assignee_id'],
+                $phaseAssignment->planned_start,
+                $phaseAssignment->planned_end,
+                (float) $phaseAssignment->estimated_hours,
+                $phaseAssignment->id,
+            );
+
+            $cascadeResult = $service->cascadeShift(
+                $validated['assignee_id'],
+                Carbon::parse($readjustedDates['planned_end']),
+                $phaseAssignment->id,
+                dryRun: true,
+            );
+            $cascadePreview = $cascadeResult['shifted'];
+            $warnings = $cascadeResult['warnings'];
+        }
+
+        return response()->json([
+            'has_conflicts'    => count($conflicts) > 0,
+            'conflicts'        => $conflicts,
+            'readjusted_dates' => $readjustedDates,
+            'cascade_preview'  => $cascadePreview,
+            'warnings'         => $warnings,
+            'remaining_hours'  => $service->remainingHours($phaseAssignment),
+        ]);
+    }
+
+    public function reassignPhase(Request $request, Project $project, ProjectTaskPhaseAssignment $phaseAssignment)
+    {
+        $phaseAssignment->loadMissing('taskAssignment');
+        if (! $phaseAssignment->taskAssignment || $phaseAssignment->taskAssignment->project_id !== $project->id) {
+            abort(404);
+        }
+
+        $validated = $request->validate([
+            'assignee_id'                     => 'required|uuid|exists:employees,id',
+            'mode'                            => 'required|in:direct,readjust,swap',
+            'swap_with_phase_assignment_id'   => 'required_if:mode,swap|uuid|exists:project_task_phase_assignments,id',
+        ]);
+
+        $tenantId = app('tenant_id');
+        $project->load('contract.deal');
+        $windowStart = $project->start_date ? Carbon::parse($project->start_date)->startOfDay() : Carbon::today()->subYear();
+        $windowEnd = $project->effectiveEndDate() ?? Carbon::today()->addYear();
+        $calendar = CalendarFactory::forTenant($tenantId, $windowStart, $windowEnd);
+        $service = new PhaseReassignmentService($calendar);
+
+        if ($validated['mode'] === 'swap') {
+            $phaseB = ProjectTaskPhaseAssignment::findOrFail($validated['swap_with_phase_assignment_id']);
+            $result = $service->executeSwap($phaseAssignment, $phaseB);
+
+            return response()->json([
+                'phase_a'        => new ProjectTaskPhaseAssignmentResource($result['phase_a']),
+                'phase_b'        => new ProjectTaskPhaseAssignmentResource($result['phase_b']),
+                'shifted_phases' => [],
+                'warnings'       => $result['warnings'],
+            ]);
+        }
+
+        $newStart = null;
+        $newEnd = null;
+        $cascade = false;
+
+        if ($validated['mode'] === 'readjust' && $phaseAssignment->planned_start && $phaseAssignment->planned_end) {
+            $readjusted = $service->calculateReadjustedDates(
+                $validated['assignee_id'],
+                $phaseAssignment->planned_start,
+                $phaseAssignment->planned_end,
+                (float) $phaseAssignment->estimated_hours,
+                $phaseAssignment->id,
+            );
+            $newStart = $readjusted['planned_start'];
+            $newEnd = $readjusted['planned_end'];
+            $cascade = true;
+        }
+
+        $result = $service->executeReassignment(
+            $phaseAssignment,
+            $validated['assignee_id'],
+            $newStart,
+            $newEnd,
+            $cascade,
+        );
+
+        return response()->json([
+            'phase'          => new ProjectTaskPhaseAssignmentResource($result['phase']),
+            'shifted_phases' => $result['shifted_phases'],
+            'warnings'       => $result['warnings'],
+        ]);
     }
 
     private function readEstimateSheet(?string $absolutePath = null): array

@@ -292,6 +292,8 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::post('/projects/{project}/assign-tasks', [AiAutoAssignController::class, 'assignTasks']);
     Route::get('/projects/{project}/task-assignments', [AiAutoAssignController::class, 'taskAssignmentsIndex']);
     Route::patch('/projects/{project}/task-phase-assignments/{phaseAssignment}', [AiAutoAssignController::class, 'updateTaskPhaseAssignment']);
+    Route::post('/projects/{project}/task-phase-assignments/{phaseAssignment}/check-reassignment', [AiAutoAssignController::class, 'checkReassignment']);
+    Route::post('/projects/{project}/task-phase-assignments/{phaseAssignment}/reassign', [AiAutoAssignController::class, 'reassignPhase']);
 
     // Schedule tracking — daily progress logs + project/phase variance.
     // See SCHEDULE_TRACKING_IMPLEMENTATION_PLAN.md for the design.
