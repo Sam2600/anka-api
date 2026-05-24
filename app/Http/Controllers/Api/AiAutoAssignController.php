@@ -699,6 +699,27 @@ PROMPT;
             ], 422);
         }
 
+        // Department guard — defence-in-depth against picking non-delivery
+        // staff (Sales/HR/Finance who carry a pm capacity_role for internal
+        // coordination, not customer-delivery work). The idle-pool scope
+        // already filters these out, so the dialog won't surface them — but
+        // an API caller bypassing the dialog, or a stale dialog from before
+        // a tenant flipped the department flag, could still try to confirm
+        // one. Reject 422 with the list of offenders so the caller knows
+        // exactly which pick to drop or which department to re-enable.
+        // Exempts already-kept members so existing teams don't break if a
+        // department's eligibility flag is flipped after the fact.
+        $nonDeliveryPicks = Employee::whereIn('id', $pickedIds)
+            ->whereNotIn('id', $keptIds)
+            ->whereHas('department', fn ($q) => $q->where('is_delivery_eligible', false))
+            ->pluck('name', 'id');
+        if ($nonDeliveryPicks->isNotEmpty()) {
+            return response()->json([
+                'error' => 'These employees belong to a non-delivery department and cannot be staffed on customer projects: '.$nonDeliveryPicks->values()->implode(', '),
+                'non_delivery_employee_ids' => $nonDeliveryPicks->keys()->values()->all(),
+            ], 422);
+        }
+
         $deal = $project->contract?->deal;
         $ghostRoles = $deal?->ghost_roles ?? collect();
 
@@ -1165,6 +1186,14 @@ PROMPT;
                     ?? 'unknown',
             ])
             ->all();
+        // Rank-fit input for the new rank_mismatch (SOFT) validator rule.
+        // Members without a rank fall to Mid (level 20) — same default the
+        // demo path uses, so the validator's behaviour matches the assigner.
+        $rankLevelByAssignee = $teamAssignments
+            ->mapWithKeys(fn ($a) => [
+                $a->employee_id => (int) (optional(optional($a->employee)->rank)->level ?? 20),
+            ])
+            ->all();
 
         $dbHolidays = $this->dbHolidaysForPrompt($tenantId, $windowStart, $effectiveEnd);
         $prompt = $this->buildAssignTasksPrompt($project, $tasks, $activePhases, $teamMembers, $windowStart, $effectiveEnd, $dbHolidays, $rawSheet);
@@ -1257,6 +1286,7 @@ PROMPT;
                     $allocatedHoursByAssignee,
                     $engagementMonthsByAssignee,
                     $capacityRoleByAssignee,
+                    $rankLevelByAssignee,
                 );
 
                 if (empty($violations)) {
@@ -1274,7 +1304,10 @@ PROMPT;
                 // window). Same class of "fix the team structure" finding as
                 // over_allocation and engagement_window_exceeded — not worth
                 // a fallback to demo which has its own over-cap issues.
-                $softCodes = ['over_allocation', 'engagement_window_exceeded'];
+                // rank_mismatch is advisory — the prompt classifies rank-fit
+                // as PREFER (not HARD), so violations represent quality risk
+                // worth logging but should not force a retry / fallback.
+                $softCodes = ['over_allocation', 'engagement_window_exceeded', 'rank_mismatch'];
                 if ($shifted > 0) {
                     $softCodes[] = 'double_booking';
                 }
@@ -1298,6 +1331,30 @@ PROMPT;
                         'soft_count' => count($softViolations),
                         'codes' => array_count_values(array_column($softViolations, 'code')),
                     ]);
+
+                    // Surface rank_mismatch details separately — operator
+                    // wants to see WHICH (row, phase, assignee) was a stretch
+                    // so they can judge quality risk per task, not just a
+                    // bucket count. Sample first 10 to keep the log readable.
+                    $rankMismatches = array_values(array_filter(
+                        $softViolations,
+                        fn ($v) => $v['code'] === 'rank_mismatch'
+                    ));
+                    if (! empty($rankMismatches)) {
+                        Log::warning('AI Schedule: rank_mismatch details', [
+                            'total' => count($rankMismatches),
+                            'samples' => array_map(
+                                fn ($v) => [
+                                    'row_no' => $v['context']['row_no'] ?? null,
+                                    'phase_code' => $v['context']['phase_code'] ?? null,
+                                    'assignee_rank' => $v['context']['assignee_rank'] ?? null,
+                                    'required_rank' => $v['context']['required_rank'] ?? null,
+                                    'difficulty' => $v['context']['difficulty'] ?? null,
+                                ],
+                                array_slice($rankMismatches, 0, 10)
+                            ),
+                        ]);
+                    }
 
                     return $this->persistAiAssignments($project, $tasks, $payload, $tenantId, $windowStart, $effectiveEnd, $calendar);
                 }

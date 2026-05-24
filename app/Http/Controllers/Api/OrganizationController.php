@@ -49,12 +49,13 @@ class OrganizationController extends Controller
                 Rule::unique('departments', 'name')
                     ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
             ],
-            'manager'    => 'nullable|string|max:255',
-            'manager_id' => 'nullable|uuid|exists:employees,id',
-            'headcount'  => 'sometimes|integer|min:0',
+            'manager'               => 'nullable|string|max:255',
+            'manager_id'            => 'nullable|uuid|exists:employees,id',
+            'headcount'             => 'sometimes|integer|min:0',
+            'is_delivery_eligible'  => 'sometimes|boolean',
         ]);
 
-        $dept = new Department($request->only(['name', 'manager', 'manager_id', 'headcount']));
+        $dept = new Department($request->only(['name', 'manager', 'manager_id', 'headcount', 'is_delivery_eligible']));
         if ($request->filled('id')) {
             $dept->id = $request->input('id');
         }
@@ -73,12 +74,13 @@ class OrganizationController extends Controller
                     ->ignore($department->id)
                     ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
             ],
-            'manager'    => 'sometimes|nullable|string|max:255',
-            'manager_id' => 'sometimes|nullable|uuid|exists:employees,id',
-            'headcount'  => 'sometimes|integer|min:0',
+            'manager'               => 'sometimes|nullable|string|max:255',
+            'manager_id'            => 'sometimes|nullable|uuid|exists:employees,id',
+            'headcount'             => 'sometimes|integer|min:0',
+            'is_delivery_eligible'  => 'sometimes|boolean',
         ]);
 
-        $department->update($request->only(['name', 'manager', 'manager_id', 'headcount']));
+        $department->update($request->only(['name', 'manager', 'manager_id', 'headcount', 'is_delivery_eligible']));
 
         return new DepartmentResource($department->loadCount('employees')->load('managerEmployee'));
     }

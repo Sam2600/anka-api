@@ -129,16 +129,25 @@ class Employee extends Model
 
     /**
      * "Available to staff a new project." Active full-timers with no current
-     * project_team_assignments row at all. Used by both the AI Team Builder
-     * pool (planTeamPreview) and the manual employee picker on the Team
-     * Preview dialog so both sides draw from the same conceptual pool.
+     * project_team_assignments row at all, AND in a department flagged as
+     * delivery-eligible (departments.is_delivery_eligible = true).
+     *
+     * The department filter is the canonical guard against picking non-IT
+     * staff (Sales/HR/Finance) who carry a `pm` capacity_role for internal
+     * coordination reasons but should NOT be staffed on customer-delivery
+     * projects. Setting the rule here means every consumer of the idle pool
+     * — the available-employees endpoint, planTeamPreview, and the manual
+     * employee picker — enforces it consistently. confirmTeamPlan does a
+     * defence-in-depth re-check at write time in case the flag changed
+     * mid-session or an API caller bypassed the dialog.
      */
     public function scopeIdleAndFullTime($query)
     {
         return $query
             ->where('status', 'Active')
             ->where('workable_hours', '>=', 160)
-            ->whereDoesntHave('teamAssignments');
+            ->whereDoesntHave('teamAssignments')
+            ->whereHas('department', fn ($q) => $q->where('is_delivery_eligible', true));
     }
 
     public function capacityRole()

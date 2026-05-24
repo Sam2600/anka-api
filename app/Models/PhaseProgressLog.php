@@ -20,6 +20,7 @@ class PhaseProgressLog extends Model
         'log_date',
         'progress_hours',
         'used_hours',
+        'late_hours',
         'note',
         'locked_at',
     ];
@@ -28,8 +29,14 @@ class PhaseProgressLog extends Model
         'log_date'       => 'date',
         'progress_hours' => 'float',
         'used_hours'     => 'float',
+        'late_hours'     => 'float',
         'locked_at'      => 'datetime',
     ];
+
+    public static function computeLateHours(float $usedHours, float $progressHours): float
+    {
+        return round(max(0.0, $usedHours - $progressHours), 2);
+    }
 
     public function phaseAssignment()
     {

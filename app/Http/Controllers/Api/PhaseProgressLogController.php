@@ -51,6 +51,11 @@ class PhaseProgressLogController extends Controller
             ->whereDate('log_date', $logDate)
             ->first();
 
+        $lateHours = PhaseProgressLog::computeLateHours(
+            (float) $validated['used_hours'],
+            (float) $validated['progress_hours'],
+        );
+
         if ($log) {
             if ($log->locked_at) {
                 return response()->json(['error' => 'This log is locked and cannot be modified.'], 403);
@@ -58,6 +63,7 @@ class PhaseProgressLogController extends Controller
             $log->update([
                 'progress_hours' => $validated['progress_hours'],
                 'used_hours'     => $validated['used_hours'],
+                'late_hours'     => $lateHours,
                 'note'           => $validated['note'] ?? null,
             ]);
         } else {
@@ -68,6 +74,7 @@ class PhaseProgressLogController extends Controller
                 'log_date'            => $logDate,
                 'progress_hours'      => $validated['progress_hours'],
                 'used_hours'          => $validated['used_hours'],
+                'late_hours'          => $lateHours,
                 'note'                => $validated['note'] ?? null,
             ]);
         }
@@ -84,10 +91,19 @@ class PhaseProgressLogController extends Controller
         }
 
         $validated = $request->validate([
+            'log_date'       => 'sometimes|date',
             'progress_hours' => 'sometimes|numeric|min:0',
             'used_hours'     => 'sometimes|numeric|min:0',
             'note'           => 'nullable|string|max:2000',
         ]);
+
+        if (isset($validated['log_date'])) {
+            $validated['log_date'] = Carbon::parse($validated['log_date'])->toDateString();
+        }
+
+        $progress = (float) ($validated['progress_hours'] ?? $log->progress_hours);
+        $used     = (float) ($validated['used_hours'] ?? $log->used_hours);
+        $validated['late_hours'] = PhaseProgressLog::computeLateHours($used, $progress);
 
         $log->update($validated);
         $log->load('employee');
