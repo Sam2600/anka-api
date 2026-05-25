@@ -1,6 +1,11 @@
 id: chg-007-ai-estimation-generation
 name: AI-powered estimation draft generation (Claude, per-sheet output)
-status: proposed
+status: archived
+archived: 2026-05-23
+archived_reason: |
+  Implementation shipped. EstimationAiService + EstimationVersionController@aiDraft
+  are live. Spec coverage is consolidated in chg-014-ai-estimation-draft (which
+  supersedes this proposal and tightens scope for v1 acceptance).
 created: 2026-05-13
 owners: [claude.max@brycenmyanmar.com.mm]
 

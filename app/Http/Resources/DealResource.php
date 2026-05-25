@@ -67,6 +67,10 @@ class DealResource extends JsonResource
             'loss_reason' => $this->loss_reason,
             'has_sent_contract_draft' => (bool) ($this->has_sent_contract_draft ?? false),
             'active_contract_draft_id' => $this->active_contract_draft_id ?? null,
+            // Exposed for the AI Forecast Summary's "days in stage" proxy.
+            // Real stage_entered_at tracking is a future feature; updated_at
+            // is close enough and replaces the legacy expectedCloseDate-30d hack.
+            'updated_at' => $this->updated_at?->toIso8601String(),
             'ghost_roles' => $this->whenLoaded('ghost_roles', fn () => $this->ghost_roles->map(fn ($gr) => [
                 'id' => $gr->id,
                 'role_type' => $gr->role_type,

@@ -2,17 +2,17 @@
 
 namespace App\Models;
 
+use App\Traits\BelongsToTenant;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
-use App\Traits\BelongsToTenant;
 use Illuminate\Support\Facades\DB;
 
 // cost_per_hour is a PostgreSQL GENERATED column — never add it to $fillable.
 class Employee extends Model
 {
-    use HasFactory, HasUuids, SoftDeletes, BelongsToTenant;
+    use BelongsToTenant, HasFactory, HasUuids, SoftDeletes;
 
     protected $fillable = [
         'tenant_id',
@@ -36,12 +36,12 @@ class Employee extends Model
     ];
 
     protected $casts = [
-        'id'             => 'string',
-        'basic_salary'   => 'float',
-        'allowance'      => 'float',
+        'id' => 'string',
+        'basic_salary' => 'float',
+        'allowance' => 'float',
         'monthly_salary' => 'float',
         'workable_hours' => 'integer',
-        'cost_per_hour'  => 'float',
+        'cost_per_hour' => 'float',
     ];
 
     /**
@@ -120,6 +120,34 @@ class Employee extends Model
     public function hardAssignments()
     {
         return $this->hasMany(DealHardAssignment::class);
+    }
+
+    public function teamAssignments()
+    {
+        return $this->hasMany(ProjectTeamAssignment::class);
+    }
+
+    /**
+     * "Available to staff a new project." Active full-timers with no current
+     * project_team_assignments row at all, AND in a department flagged as
+     * delivery-eligible (departments.is_delivery_eligible = true).
+     *
+     * The department filter is the canonical guard against picking non-IT
+     * staff (Sales/HR/Finance) who carry a `pm` capacity_role for internal
+     * coordination reasons but should NOT be staffed on customer-delivery
+     * projects. Setting the rule here means every consumer of the idle pool
+     * — the available-employees endpoint, planTeamPreview, and the manual
+     * employee picker — enforces it consistently. confirmTeamPlan does a
+     * defence-in-depth re-check at write time in case the flag changed
+     * mid-session or an API caller bypassed the dialog.
+     */
+    public function scopeIdleAndFullTime($query)
+    {
+        return $query
+            ->where('status', 'Active')
+            ->where('workable_hours', '>=', 160)
+            ->whereDoesntHave('teamAssignments')
+            ->whereHas('department', fn ($q) => $q->where('is_delivery_eligible', true));
     }
 
     public function capacityRole()

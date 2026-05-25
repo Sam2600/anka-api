@@ -18,12 +18,14 @@ class Department extends Model
         'manager',
         'manager_id',
         'headcount',
+        'is_delivery_eligible',
     ];
 
     protected $casts = [
         'id'        => 'string',
         'manager_id' => 'string',
         'headcount' => 'integer',
+        'is_delivery_eligible' => 'boolean',
     ];
 
     public function tenant()
