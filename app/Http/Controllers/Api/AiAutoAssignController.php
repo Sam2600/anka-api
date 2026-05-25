@@ -488,6 +488,7 @@ PROMPT;
         $eligible = Employee::with(['rank', 'capacityRole'])
             ->idleAndFullTime()
             ->whereNotIn('id', $keptEmployeeIds)
+            ->whereNotIn('id', $busyEmployeeIds)
             ->get();
 
         $employeePool = $eligible->map(fn ($emp) => [
