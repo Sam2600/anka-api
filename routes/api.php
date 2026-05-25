@@ -196,6 +196,9 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::post('/employees/{employee}/salary-history', [OrganizationController::class, 'storeSalaryHistory']);
     Route::put('/employees/{employee}/salary-history/{history}', [OrganizationController::class, 'updateSalaryHistory']);
     Route::delete('/employees/{employee}/salary-history/{history}', [OrganizationController::class, 'destroySalaryHistory']);
+    // Tenant-wide salary timeline — Forecast page reads it to compute
+    // past-month payroll from applicable historical salaries.
+    Route::get('/employee-salary-history', [OrganizationController::class, 'indexAllSalaryHistory']);
 
     Route::get('/global-overheads', [OrganizationController::class, 'indexOverheads']);
     Route::post('/global-overheads', [OrganizationController::class, 'storeOverhead']);

@@ -567,6 +567,24 @@ class OrganizationController extends Controller
         );
     }
 
+    /**
+     * Tenant-wide salary history. Used by the Forecast page to compute
+     * past-month payroll cost from applicable historical salaries instead
+     * of today's salary applied retroactively. BelongsToTenant scope on
+     * the model filters to the active tenant automatically. Ordered
+     * (employee_id, target_month asc) so the client can build per-employee
+     * timelines in a single pass.
+     */
+    public function indexAllSalaryHistory()
+    {
+        return EmployeeSalaryHistoryResource::collection(
+            EmployeeSalaryHistory::query()
+                ->orderBy('employee_id')
+                ->orderBy('target_month')
+                ->get()
+        );
+    }
+
     public function storeSalaryHistory(Request $request, Employee $employee)
     {
         $data = $request->validate([
