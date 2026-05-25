@@ -249,6 +249,12 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         Route::delete('/employees/{employee}/salary-history/{history}',   [OrganizationController::class, 'destroySalaryHistory']);
     });
 
+    // Tenant-wide salary timeline — Forecast page reads it to compute
+    // past-month payroll from applicable historical salaries.
+    Route::middleware('permission:view_employees')->group(function () {
+        Route::get('/employee-salary-history', [OrganizationController::class, 'indexAllSalaryHistory']);
+    });
+
     // Global overheads — read by estimation; written by HR/Admin.
     Route::middleware('permission:manage_organization|manage_estimation|view_crm')->group(function () {
         Route::get('/global-overheads', [OrganizationController::class, 'indexOverheads']);
