@@ -34,6 +34,9 @@ class TenantController extends Controller
             'name' => 'sometimes|required|string|max:255',
             'signatory_name' => 'sometimes|nullable|string|max:255',
             'signatory_title' => 'sometimes|nullable|string|max:255',
+            // Invoice XLSX export reads these for the company block.
+            'address' => 'sometimes|nullable|string|max:1000',
+            'phone' => 'sometimes|nullable|string|max:50',
             'tax_rate' => 'sometimes|numeric|min:0|max:1',
             'avg_delivery_lag_months' => 'sometimes|integer|min:0|max:24',
             'avg_payment_days_late' => 'sometimes|integer|min:0|max:365',
