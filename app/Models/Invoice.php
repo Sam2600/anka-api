@@ -30,20 +30,24 @@ class Invoice extends Model
         'sent_to_email',
         'reminder_sent_count',
         'notes',
+        'memo',
+        'billing_period_label',
+        'line_items',
     ];
 
     protected $casts = [
-        'id'                  => 'string',
-        'issue_date'          => 'date',
-        'due_date'            => 'date',
-        'amount'              => 'float',
-        'tax'                 => 'float',
-        'paid_amount'         => 'float',
-        'total'               => 'float',
-        'paid_at'             => 'datetime',
-        'issued_at'           => 'datetime',
-        'reminder_sent_count' => 'integer',
-        'deleted_at'          => 'datetime',
+        'id'                   => 'string',
+        'issue_date'           => 'date',
+        'due_date'             => 'date',
+        'amount'               => 'float',
+        'tax'                  => 'float',
+        'paid_amount'          => 'float',
+        'total'                => 'float',
+        'paid_at'              => 'datetime',
+        'issued_at'            => 'datetime',
+        'reminder_sent_count'  => 'integer',
+        'line_items'           => 'array',
+        'deleted_at'           => 'datetime',
     ];
 
     public function contract()
