@@ -152,6 +152,10 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::patch('/invoices/{invoice}',      [InvoiceController::class, 'update']);
     Route::patch('/invoices/{invoice}/pay',  [InvoiceController::class, 'pay']);
     Route::post('/invoices/{invoice}/send',  [InvoiceController::class, 'send']);
+    // New Invoice menu: preview line items before save + XLSX export of a
+    // saved invoice matching the template layout.
+    Route::post('/contracts/{contract}/invoices/preview', [InvoiceController::class, 'preview']);
+    Route::get('/invoices/{invoice}/export.xlsx', [InvoiceController::class, 'export']);
 
     // Projects (created only via win_deal; no store route)
     Route::apiResource('projects', ProjectController::class)->only(['index', 'show', 'update', 'destroy']);
