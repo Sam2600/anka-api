@@ -71,11 +71,61 @@ class AiScheduleValidator
     ];
 
     /**
+     * Doc/design phases — anything in this set is treated as documentation
+     * work for the rank-fit check, regardless of difficulty. Mirrors the
+     * `$designPhases` list in AiAutoAssignController.
+     */
+    private const DESIGN_PHASES = ['requirement', 'system_arch', 'basic_doc', 'detail_doc'];
+
+    /**
+     * Minimum acceptable rank LEVEL (ranks.level) per phase category. Mirrors
+     * the rank-fit guidance in the system prompt's rule 5:
+     *
+     *   - Doc/design phases require Senior (level 30) or higher — Juniors
+     *     and Mids shouldn't own specs/architecture even when the higher-
+     *     ranked pool is saturated. Quality risk is too high.
+     *
+     *   - Execution phases (development, unit_test, combine_test,
+     *     system_test) scale by the task's `difficulty` column:
+     *       簡単 (easy)   → Junior OK   (level 10)
+     *       普通 (normal) → Mid+        (level 20)
+     *       難しい (hard) → Senior+     (level 30)
+     *
+     * This check fires as SOFT — same severity as over_allocation — because
+     * rank-fit is a PREFER rule in the prompt, not HARD. A team without
+     * higher-ranked engineers will legitimately stretch DOWN; we surface
+     * those stretches as warnings so the operator can see the quality risk,
+     * not as retry triggers that would block honest schedules.
+     */
+    public const MIN_RANK_LEVEL_FOR_DESIGN = 30;
+    public const MIN_RANK_LEVEL_FOR_EXECUTION = [
+        '簡単' => 10,
+        '普通' => 20,
+        '難しい' => 30,
+    ];
+
+    /**
+     * Resolve the minimum acceptable rank level for a (phase, difficulty)
+     * pair. Falls back to Mid (20) for unrecognised difficulty values — the
+     * xlsx parser already coerces unknown strings to 普通, so this is
+     * defence in depth rather than a real branch.
+     */
+    public static function minRankLevelFor(string $phaseCode, ?string $difficulty): int
+    {
+        if (in_array($phaseCode, self::DESIGN_PHASES, true)) {
+            return self::MIN_RANK_LEVEL_FOR_DESIGN;
+        }
+
+        return self::MIN_RANK_LEVEL_FOR_EXECUTION[$difficulty ?? '普通'] ?? 20;
+    }
+
+    /**
      * @param  array<int, array{row_no:int, phases:array<int, array{code:string, hours:float}>}>  $tasks
      * @param  array<int, string>  $teamIds
      * @param  array<string, float>  $allocatedHoursByAssignee  employee_id => capacity ceiling. Empty/omitted skips the check.
      * @param  array<string, float>  $engagementMonthsByAssignee  employee_id => contracted months. Empty/omitted skips the engagement-window check.
      * @param  array<string, string>  $capacityRoleByAssignee  employee_id => capacity_role code (backend, frontend, pm, qa, design). Empty/omitted skips the role-mismatch check.
+     * @param  array<string, int>  $rankLevelByAssignee  employee_id => ranks.level (Junior 10, Mid 20, Senior 30, Lead 40). Empty/omitted skips the rank-mismatch check.
      * @return array<int, array{code:string, message:string, context:array<string,mixed>}>
      */
     public function validate(
@@ -88,6 +138,7 @@ class AiScheduleValidator
         array $allocatedHoursByAssignee = [],
         array $engagementMonthsByAssignee = [],
         array $capacityRoleByAssignee = [],
+        array $rankLevelByAssignee = [],
     ): array {
         $violations = [];
         $teamSet = array_flip($teamIds);
@@ -180,6 +231,45 @@ class AiScheduleValidator
                                 'eligible_roles' => $eligibleRoles,
                             ],
                         ];
+                    }
+                }
+
+                // Rank-fit (SOFT). Surfaces quality risk when the assigner had
+                // to stretch DOWN past the rank floor for this (phase,
+                // difficulty) pair — e.g. a Junior owning detail_doc, or a
+                // Mid owning a 難しい development phase. Always classified as
+                // soft in the controller, so an honest schedule on a tight
+                // team still persists; the operator sees the warning and can
+                // judge whether to widen the team's seniority mix.
+                if (! empty($rankLevelByAssignee)) {
+                    $assigneeLevel = $rankLevelByAssignee[$assigneeId] ?? null;
+                    if ($assigneeLevel !== null) {
+                        $difficulty = $task['difficulty'] ?? '普通';
+                        $minLevel = self::minRankLevelFor($phaseCode, $difficulty);
+                        if ($assigneeLevel < $minLevel) {
+                            $rankCodeByLevel = [10 => 'Junior', 20 => 'Mid', 30 => 'Senior', 40 => 'Lead'];
+                            $actual = $rankCodeByLevel[$assigneeLevel] ?? "level {$assigneeLevel}";
+                            $required = $rankCodeByLevel[$minLevel] ?? "level {$minLevel}";
+                            $phaseLabel = in_array($phaseCode, self::DESIGN_PHASES, true)
+                                ? "doc/design phase {$phaseCode}"
+                                : "{$difficulty} execution phase {$phaseCode}";
+                            $violations[] = [
+                                'code' => 'rank_mismatch',
+                                'message' => "Assignee {$assigneeId} is {$actual} but {$phaseLabel} (row {$rowNo}) "
+                                    ."should go to {$required} or higher. Reassign to a higher-ranked teammate, "
+                                    ."or accept the quality risk if the senior pool is saturated.",
+                                'context' => [
+                                    'row_no' => $rowNo,
+                                    'phase_code' => $phaseCode,
+                                    'assignee_id' => $assigneeId,
+                                    'assignee_rank' => $actual,
+                                    'required_rank' => $required,
+                                    'assignee_level' => $assigneeLevel,
+                                    'required_level' => $minLevel,
+                                    'difficulty' => $difficulty,
+                                ],
+                            ];
+                        }
                     }
                 }
 

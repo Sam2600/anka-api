@@ -21,6 +21,7 @@ use App\Services\EstimateFileResolver;
 use App\Services\Scheduling\AiSchedulePayload;
 use App\Services\Scheduling\AiScheduleValidator;
 use App\Services\Scheduling\CalendarFactory;
+use App\Services\Scheduling\PhaseReassignmentService;
 use App\Services\Scheduling\WorkingDayCalendar;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -228,7 +229,7 @@ class AiAutoAssignController extends Controller
 
     public function index(Project $project)
     {
-        $project->load('teamAssignments.employee');
+        $project->load('teamAssignments.employee.department', 'teamAssignments.employee.rank');
 
         return ProjectTeamAssignmentResource::collection($project->teamAssignments);
     }
@@ -272,6 +273,34 @@ class AiAutoAssignController extends Controller
         $assignment->delete();
 
         return response()->noContent();
+    }
+
+    /**
+     * "Idle" employee pool — active full-timers (≥160h) who have zero rows in
+     * project_team_assignments across the whole tenant. The Team Preview
+     * dialog uses this to populate manual replacement / add dropdowns so the
+     * user can override AI picks without accidentally staffing someone who is
+     * already committed elsewhere. Shape matches the `proposed` row payload
+     * from planTeamPreview so the frontend can reuse the same display fields.
+     */
+    public function availableEmployees(Project $project)
+    {
+        $employees = Employee::with(['rank', 'capacityRole'])
+            ->idleAndFullTime()
+            ->orderBy('name')
+            ->get();
+
+        return [
+            'data' => $employees->map(fn (Employee $e) => [
+                'employee_id' => $e->id,
+                'name' => $e->name,
+                'rank_code' => optional($e->rank)->code,
+                'rank_name' => optional($e->rank)->name,
+                'capacity_role' => optional($e->capacityRole)->code ?? $e->capacity_role,
+                'workable_hours' => (float) $e->workable_hours,
+                'monthly_salary' => (float) $e->monthly_salary,
+            ])->values(),
+        ];
     }
 
     private function extractSkillsFromDescription(string $description): array
@@ -448,44 +477,16 @@ PROMPT;
             ]);
         }
 
-        // 3a. Cross-project overlap exclusion. An employee already booked on
-        //     ANOTHER project whose [start_date, end_date] window overlaps
-        //     this project's window is dropped from the candidate pool — so
-        //     the AI never sees them, never picks them, and they can't get
-        //     double-booked. Sequential schedules (Project A ends May 31,
-        //     Project B starts June 1) do NOT overlap and the same employee
-        //     remains reusable on the second project.
-        //
-        //     Skip entirely when this project has no start_date/end_date —
-        //     we can't compute overlap without a window, so we fall through
-        //     to the legacy "active + 160h/mo" filter only. Other projects
-        //     are skipped from the check when their own dates are null, the
-        //     project is soft-deleted, or status = Completed.
-        $busyEmployeeIds = [];
-        if ($project->start_date && $project->end_date) {
-            $busyEmployeeIds = DB::table('project_team_assignments as pta')
-                ->join('projects as p', 'p.id', '=', 'pta.project_id')
-                ->where('pta.tenant_id', $tenantId)
-                ->where('p.id', '!=', $project->id)
-                ->whereNull('p.deleted_at')
-                ->where('p.status', '!=', 'Completed')
-                ->whereNotNull('p.start_date')
-                ->whereNotNull('p.end_date')
-                ->where('p.start_date', '<=', $project->end_date)
-                ->where('p.end_date', '>=', $project->start_date)
-                ->pluck('pta.employee_id')
-                ->unique()
-                ->values()
-                ->all();
-        }
-
-        // 3b. Eligible employee pool — active, full-time (>=160h/mo), in tenant,
-        //     not already on this project's team, and not booked on any
-        //     overlapping project (see 3a).
+        // 3. Eligible employee pool — active, full-time (>=160h/mo), with no
+        //    rows in project_team_assignments anywhere in the tenant. Same
+        //    conceptual pool the Team Preview dialog's manual picker draws
+        //    from, so AI and human draws don't disagree on availability.
+        //    Tenant scoping is automatic via BelongsToTenant.
+        //    `whereNotIn($keptEmployeeIds)` is redundant against the scope
+        //    (kept members already have team rows) but kept defensively in
+        //    case the relation eager-load order ever drifts.
         $eligible = Employee::with(['rank', 'capacityRole'])
-            ->where('tenant_id', $tenantId)
-            ->where('status', 'Active')
-            ->where('workable_hours', '>=', 160)
+            ->idleAndFullTime()
             ->whereNotIn('id', $keptEmployeeIds)
             ->whereNotIn('id', $busyEmployeeIds)
             ->get();
@@ -558,7 +559,13 @@ PROMPT;
             }
             $months = max(1, (int) ($gr['months'] ?? 1));
             $workable = (float) ($emp['workable_hours'] ?? 160);
-            $allocatedHours = (float) ($pick['allocated_hours'] ?? ($workable * $months));
+            // Always recompute server-side — the AI is supposed to honor
+            // "allocated_hours = workable_hours × months" (prompt RULE 5)
+            // but in practice it sometimes outputs 160 regardless of months.
+            // Trusting that value makes the dialog row read 160 for a 5-month
+            // role while the manual-addition row (which already computes
+            // workable × months) reads 800. Inconsistent. Force the math.
+            $allocatedHours = $workable * $months;
 
             $picksDecorated[] = [
                 'ghost_role_id' => $pick['ghost_role_id'],
@@ -674,6 +681,47 @@ PROMPT;
         // time. Proposed picks consume their own ghost_role_id directly; only
         // the kept rows need slot pairing.
         $project->load(['contract.deal.ghost_roles', 'teamAssignments.employee']);
+
+        // Race guard — between preview render and confirm submit, another
+        // tab or user could have staffed one of the picked employees on a
+        // different project. The dialog is otherwise unaware. Reject with
+        // 422 listing the conflicting names so the user knows what changed.
+        // Employees already on *this* project's team are exempt (they're
+        // the "kept" set whose allocated_hours we rewrite, not new picks).
+        $pickedIds = collect($validated['picks'])->pluck('employee_id')->unique();
+        $keptIds = $project->teamAssignments->pluck('employee_id');
+        $conflicts = Employee::whereIn('id', $pickedIds)
+            ->whereNotIn('id', $keptIds)
+            ->whereHas('teamAssignments')
+            ->pluck('name', 'id');
+        if ($conflicts->isNotEmpty()) {
+            return response()->json([
+                'error' => 'These employees are no longer idle and cannot be added: '.$conflicts->values()->implode(', '),
+                'conflict_employee_ids' => $conflicts->keys()->values()->all(),
+            ], 422);
+        }
+
+        // Department guard — defence-in-depth against picking non-delivery
+        // staff (Sales/HR/Finance who carry a pm capacity_role for internal
+        // coordination, not customer-delivery work). The idle-pool scope
+        // already filters these out, so the dialog won't surface them — but
+        // an API caller bypassing the dialog, or a stale dialog from before
+        // a tenant flipped the department flag, could still try to confirm
+        // one. Reject 422 with the list of offenders so the caller knows
+        // exactly which pick to drop or which department to re-enable.
+        // Exempts already-kept members so existing teams don't break if a
+        // department's eligibility flag is flipped after the fact.
+        $nonDeliveryPicks = Employee::whereIn('id', $pickedIds)
+            ->whereNotIn('id', $keptIds)
+            ->whereHas('department', fn ($q) => $q->where('is_delivery_eligible', false))
+            ->pluck('name', 'id');
+        if ($nonDeliveryPicks->isNotEmpty()) {
+            return response()->json([
+                'error' => 'These employees belong to a non-delivery department and cannot be staffed on customer projects: '.$nonDeliveryPicks->values()->implode(', '),
+                'non_delivery_employee_ids' => $nonDeliveryPicks->keys()->values()->all(),
+            ], 422);
+        }
+
         $deal = $project->contract?->deal;
         $ghostRoles = $deal?->ghost_roles ?? collect();
 
@@ -1140,6 +1188,14 @@ PROMPT;
                     ?? 'unknown',
             ])
             ->all();
+        // Rank-fit input for the new rank_mismatch (SOFT) validator rule.
+        // Members without a rank fall to Mid (level 20) — same default the
+        // demo path uses, so the validator's behaviour matches the assigner.
+        $rankLevelByAssignee = $teamAssignments
+            ->mapWithKeys(fn ($a) => [
+                $a->employee_id => (int) (optional(optional($a->employee)->rank)->level ?? 20),
+            ])
+            ->all();
 
         $dbHolidays = $this->dbHolidaysForPrompt($tenantId, $windowStart, $effectiveEnd);
         $prompt = $this->buildAssignTasksPrompt($project, $tasks, $activePhases, $teamMembers, $windowStart, $effectiveEnd, $dbHolidays, $rawSheet);
@@ -1232,6 +1288,7 @@ PROMPT;
                     $allocatedHoursByAssignee,
                     $engagementMonthsByAssignee,
                     $capacityRoleByAssignee,
+                    $rankLevelByAssignee,
                 );
 
                 if (empty($violations)) {
@@ -1249,7 +1306,10 @@ PROMPT;
                 // window). Same class of "fix the team structure" finding as
                 // over_allocation and engagement_window_exceeded — not worth
                 // a fallback to demo which has its own over-cap issues.
-                $softCodes = ['over_allocation', 'engagement_window_exceeded'];
+                // rank_mismatch is advisory — the prompt classifies rank-fit
+                // as PREFER (not HARD), so violations represent quality risk
+                // worth logging but should not force a retry / fallback.
+                $softCodes = ['over_allocation', 'engagement_window_exceeded', 'rank_mismatch'];
                 if ($shifted > 0) {
                     $softCodes[] = 'double_booking';
                 }
@@ -1273,6 +1333,30 @@ PROMPT;
                         'soft_count' => count($softViolations),
                         'codes' => array_count_values(array_column($softViolations, 'code')),
                     ]);
+
+                    // Surface rank_mismatch details separately — operator
+                    // wants to see WHICH (row, phase, assignee) was a stretch
+                    // so they can judge quality risk per task, not just a
+                    // bucket count. Sample first 10 to keep the log readable.
+                    $rankMismatches = array_values(array_filter(
+                        $softViolations,
+                        fn ($v) => $v['code'] === 'rank_mismatch'
+                    ));
+                    if (! empty($rankMismatches)) {
+                        Log::warning('AI Schedule: rank_mismatch details', [
+                            'total' => count($rankMismatches),
+                            'samples' => array_map(
+                                fn ($v) => [
+                                    'row_no' => $v['context']['row_no'] ?? null,
+                                    'phase_code' => $v['context']['phase_code'] ?? null,
+                                    'assignee_rank' => $v['context']['assignee_rank'] ?? null,
+                                    'required_rank' => $v['context']['required_rank'] ?? null,
+                                    'difficulty' => $v['context']['difficulty'] ?? null,
+                                ],
+                                array_slice($rankMismatches, 0, 10)
+                            ),
+                        ]);
+                    }
 
                     return $this->persistAiAssignments($project, $tasks, $payload, $tenantId, $windowStart, $effectiveEnd, $calendar);
                 }
@@ -1824,6 +1908,139 @@ PROMPT;
         $phaseAssignment->load('assignee.rank');
 
         return new ProjectTaskPhaseAssignmentResource($phaseAssignment);
+    }
+
+    public function checkReassignment(Request $request, Project $project, ProjectTaskPhaseAssignment $phaseAssignment)
+    {
+        $phaseAssignment->loadMissing('taskAssignment');
+        if (! $phaseAssignment->taskAssignment || $phaseAssignment->taskAssignment->project_id !== $project->id) {
+            abort(404);
+        }
+
+        $validated = $request->validate([
+            'assignee_id' => 'required|uuid|exists:employees,id',
+        ]);
+
+        if (! $phaseAssignment->planned_start || ! $phaseAssignment->planned_end) {
+            return response()->json([
+                'has_conflicts'    => false,
+                'conflicts'        => [],
+                'readjusted_dates' => null,
+                'cascade_preview'  => [],
+                'warnings'         => [],
+                'remaining_hours'  => (float) $phaseAssignment->estimated_hours,
+            ]);
+        }
+
+        $tenantId = app('tenant_id');
+        $project->load('contract.deal');
+        $windowStart = $project->start_date ? Carbon::parse($project->start_date)->startOfDay() : Carbon::today()->subYear();
+        $windowEnd = $project->effectiveEndDate() ?? Carbon::today()->addYear();
+        $calendar = CalendarFactory::forTenant($tenantId, $windowStart, $windowEnd);
+        $service = new PhaseReassignmentService($calendar);
+
+        $conflicts = $service->detectConflicts(
+            $validated['assignee_id'],
+            $phaseAssignment->planned_start,
+            $phaseAssignment->planned_end,
+            $phaseAssignment->id,
+        );
+
+        $readjustedDates = null;
+        $cascadePreview = [];
+        $warnings = [];
+
+        if (count($conflicts) > 0) {
+            $readjustedDates = $service->calculateReadjustedDates(
+                $validated['assignee_id'],
+                $phaseAssignment->planned_start,
+                $phaseAssignment->planned_end,
+                (float) $phaseAssignment->estimated_hours,
+                $phaseAssignment->id,
+            );
+
+            $cascadeResult = $service->cascadeShift(
+                $validated['assignee_id'],
+                Carbon::parse($readjustedDates['planned_end']),
+                $phaseAssignment->id,
+                dryRun: true,
+            );
+            $cascadePreview = $cascadeResult['shifted'];
+            $warnings = $cascadeResult['warnings'];
+        }
+
+        return response()->json([
+            'has_conflicts'    => count($conflicts) > 0,
+            'conflicts'        => $conflicts,
+            'readjusted_dates' => $readjustedDates,
+            'cascade_preview'  => $cascadePreview,
+            'warnings'         => $warnings,
+            'remaining_hours'  => $service->remainingHours($phaseAssignment),
+        ]);
+    }
+
+    public function reassignPhase(Request $request, Project $project, ProjectTaskPhaseAssignment $phaseAssignment)
+    {
+        $phaseAssignment->loadMissing('taskAssignment');
+        if (! $phaseAssignment->taskAssignment || $phaseAssignment->taskAssignment->project_id !== $project->id) {
+            abort(404);
+        }
+
+        $validated = $request->validate([
+            'assignee_id'                     => 'required|uuid|exists:employees,id',
+            'mode'                            => 'required|in:direct,readjust,swap',
+            'swap_with_phase_assignment_id'   => 'required_if:mode,swap|uuid|exists:project_task_phase_assignments,id',
+        ]);
+
+        $tenantId = app('tenant_id');
+        $project->load('contract.deal');
+        $windowStart = $project->start_date ? Carbon::parse($project->start_date)->startOfDay() : Carbon::today()->subYear();
+        $windowEnd = $project->effectiveEndDate() ?? Carbon::today()->addYear();
+        $calendar = CalendarFactory::forTenant($tenantId, $windowStart, $windowEnd);
+        $service = new PhaseReassignmentService($calendar);
+
+        if ($validated['mode'] === 'swap') {
+            $phaseB = ProjectTaskPhaseAssignment::findOrFail($validated['swap_with_phase_assignment_id']);
+            $result = $service->executeSwap($phaseAssignment, $phaseB);
+
+            return response()->json([
+                'phase_a'        => new ProjectTaskPhaseAssignmentResource($result['phase_a']),
+                'phase_b'        => new ProjectTaskPhaseAssignmentResource($result['phase_b']),
+                'shifted_phases' => [],
+                'warnings'       => $result['warnings'],
+            ]);
+        }
+
+        $newStart = null;
+        $newEnd = null;
+        $cascade = false;
+
+        if ($validated['mode'] === 'readjust' && $phaseAssignment->planned_start && $phaseAssignment->planned_end) {
+            $readjusted = $service->calculateReadjustedDates(
+                $validated['assignee_id'],
+                $phaseAssignment->planned_start,
+                $phaseAssignment->planned_end,
+                (float) $phaseAssignment->estimated_hours,
+                $phaseAssignment->id,
+            );
+            $newStart = $readjusted['planned_start'];
+            $newEnd = $readjusted['planned_end'];
+            $cascade = true;
+        }
+
+        $result = $service->executeReassignment(
+            $phaseAssignment,
+            $validated['assignee_id'],
+            $newStart,
+            $newEnd,
+            $cascade,
+        );
+
+        return response()->json([
+            'phase'          => new ProjectTaskPhaseAssignmentResource($result['phase']),
+            'shifted_phases' => $result['shifted_phases'],
+            'warnings'       => $result['warnings'],
+        ]);
     }
 
     private function readEstimateSheet(?string $absolutePath = null): array

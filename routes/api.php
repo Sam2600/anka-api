@@ -1,9 +1,9 @@
 <?php
 
+use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AiAutoAssignController;
 use App\Http\Controllers\Api\AiTeamBuilderContextController;
 use App\Http\Controllers\Api\AiUsageController;
-use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ContractController;
 use App\Http\Controllers\Api\ContractTemplateController;
@@ -12,14 +12,14 @@ use App\Http\Controllers\Api\DealController;
 use App\Http\Controllers\Api\EstimationVersionController;
 use App\Http\Controllers\Api\ExchangeRateController;
 use App\Http\Controllers\Api\HolidayController;
-use App\Http\Controllers\Api\TeamCapacityController;
 use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\MilestoneController;
 use App\Http\Controllers\Api\OrganizationController;
 use App\Http\Controllers\Api\PhaseProgressLogController;
 use App\Http\Controllers\Api\ProjectController;
-use App\Http\Controllers\Api\ScheduleTrackingController;
 use App\Http\Controllers\Api\RankController;
+use App\Http\Controllers\Api\ScheduleTrackingController;
+use App\Http\Controllers\Api\TeamCapacityController;
 use App\Http\Controllers\Api\TenantAppRoleController;
 use App\Http\Controllers\Api\TenantController;
 use App\Http\Controllers\Api\TimeEntryController;
@@ -352,10 +352,10 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     // are readable by anyone in the tenant (sidebar + role pickers); writes
     // require manage_tenant. The permission catalog itself is code-defined
     // in App\Support\PermissionCatalog — admins compose, they don't invent.
-    Route::get('/tenant/app-roles',          [TenantAppRoleController::class, 'index']);
+    Route::get('/tenant/app-roles', [TenantAppRoleController::class, 'index']);
     Route::get('/tenant/permission-catalog', [TenantAppRoleController::class, 'catalog']);
     Route::middleware('permission:manage_tenant')->group(function () {
-        Route::post('/tenant/app-roles',              [TenantAppRoleController::class, 'store']);
+        Route::post('/tenant/app-roles', [TenantAppRoleController::class, 'store']);
         Route::patch('/tenant/app-roles/{appRoleId}', [TenantAppRoleController::class, 'update']);
         Route::delete('/tenant/app-roles/{appRoleId}', [TenantAppRoleController::class, 'destroy']);
     });
@@ -390,9 +390,16 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         Route::post('/projects/{project}/plan-team',                    [AiAutoAssignController::class, 'planTeamPreview']);
         Route::post('/projects/{project}/confirm-team',                 [AiAutoAssignController::class, 'confirmTeamPlan']);
 
+        // Idle full-time employees the Team Preview dialog can pick from for
+        // manual replacements / additions. Returns ZERO project_team_assignments
+        // employees only — the same pool the AI now draws from.
+        Route::get('/projects/{project}/available-employees',           [AiAutoAssignController::class, 'availableEmployees']);
+
         // Project Task Assignments (xlsx-driven AI task allocation, per-phase)
-        Route::post ('/projects/{project}/assign-tasks',                                       [AiAutoAssignController::class, 'assignTasks']);
-        Route::patch('/projects/{project}/task-phase-assignments/{phaseAssignment}',           [AiAutoAssignController::class, 'updateTaskPhaseAssignment']);
+        Route::post ('/projects/{project}/assign-tasks',                                                          [AiAutoAssignController::class, 'assignTasks']);
+        Route::patch('/projects/{project}/task-phase-assignments/{phaseAssignment}',                              [AiAutoAssignController::class, 'updateTaskPhaseAssignment']);
+        Route::post ('/projects/{project}/task-phase-assignments/{phaseAssignment}/check-reassignment',           [AiAutoAssignController::class, 'checkReassignment']);
+        Route::post ('/projects/{project}/task-phase-assignments/{phaseAssignment}/reassign',                     [AiAutoAssignController::class, 'reassignPhase']);
     });
 
     // Schedule tracking — daily progress logs + project/phase variance.
