@@ -1923,12 +1923,13 @@ PROMPT;
 
         if (! $phaseAssignment->planned_start || ! $phaseAssignment->planned_end) {
             return response()->json([
-                'has_conflicts'    => false,
-                'conflicts'        => [],
+                'has_conflicts' => false,
+                'conflicts' => [],
+                'reverse_conflicts' => [],
                 'readjusted_dates' => null,
-                'cascade_preview'  => [],
-                'warnings'         => [],
-                'remaining_hours'  => (float) $phaseAssignment->estimated_hours,
+                'cascade_preview' => [],
+                'warnings' => [],
+                'remaining_hours' => (float) $phaseAssignment->estimated_hours,
             ]);
         }
 
@@ -1950,6 +1951,8 @@ PROMPT;
         $cascadePreview = [];
         $warnings = [];
 
+        $reverseConflicts = [];
+
         if (count($conflicts) > 0) {
             $readjustedDates = $service->calculateReadjustedDates(
                 $validated['assignee_id'],
@@ -1967,15 +1970,41 @@ PROMPT;
             );
             $cascadePreview = $cascadeResult['shifted'];
             $warnings = $cascadeResult['warnings'];
+
+            $currentAssigneeId = $phaseAssignment->assignee_id;
+            if ($currentAssigneeId) {
+                foreach ($conflicts as $conflict) {
+                    $conflictPhase = ProjectTaskPhaseAssignment::find($conflict['phase_assignment_id']);
+                    if (! $conflictPhase || ! $conflictPhase->planned_start || ! $conflictPhase->planned_end) {
+                        continue;
+                    }
+
+                    $aConflicts = $service->detectConflicts(
+                        $currentAssigneeId,
+                        $conflictPhase->planned_start,
+                        $conflictPhase->planned_end,
+                        $conflictPhase->id,
+                    );
+
+                    if (count($aConflicts) > 0) {
+                        $reverseConflicts[] = [
+                            'swap_phase_id' => $conflict['phase_assignment_id'],
+                            'swap_phase_name' => $conflict['phase_name'],
+                            'conflicts' => $aConflicts,
+                        ];
+                    }
+                }
+            }
         }
 
         return response()->json([
-            'has_conflicts'    => count($conflicts) > 0,
-            'conflicts'        => $conflicts,
+            'has_conflicts' => count($conflicts) > 0,
+            'conflicts' => $conflicts,
+            'reverse_conflicts' => $reverseConflicts,
             'readjusted_dates' => $readjustedDates,
-            'cascade_preview'  => $cascadePreview,
-            'warnings'         => $warnings,
-            'remaining_hours'  => $service->remainingHours($phaseAssignment),
+            'cascade_preview' => $cascadePreview,
+            'warnings' => $warnings,
+            'remaining_hours' => $service->remainingHours($phaseAssignment),
         ]);
     }
 
@@ -1987,9 +2016,9 @@ PROMPT;
         }
 
         $validated = $request->validate([
-            'assignee_id'                     => 'required|uuid|exists:employees,id',
-            'mode'                            => 'required|in:direct,readjust,swap',
-            'swap_with_phase_assignment_id'   => 'required_if:mode,swap|uuid|exists:project_task_phase_assignments,id',
+            'assignee_id' => 'required|uuid|exists:employees,id',
+            'mode' => 'required|in:direct,readjust,swap,assign_anyway',
+            'swap_with_phase_assignment_id' => 'required_if:mode,swap|uuid|exists:project_task_phase_assignments,id',
         ]);
 
         $tenantId = app('tenant_id');
@@ -2004,11 +2033,28 @@ PROMPT;
             $result = $service->executeSwap($phaseAssignment, $phaseB);
 
             return response()->json([
-                'phase_a'        => new ProjectTaskPhaseAssignmentResource($result['phase_a']),
-                'phase_b'        => new ProjectTaskPhaseAssignmentResource($result['phase_b']),
+                'phase_a' => new ProjectTaskPhaseAssignmentResource($result['phase_a']),
+                'phase_b' => new ProjectTaskPhaseAssignmentResource($result['phase_b']),
                 'shifted_phases' => [],
-                'warnings'       => $result['warnings'],
+                'warnings' => $result['warnings'],
             ]);
+        }
+
+        if ($validated['mode'] === 'assign_anyway') {
+            return DB::transaction(function () use ($phaseAssignment, $validated) {
+                $phaseAssignment->lockForUpdate();
+                $phaseAssignment->update([
+                    'assignee_id' => $validated['assignee_id'],
+                    'assignment_source' => 'manual',
+                ]);
+                $phaseAssignment->load('assignee.rank');
+
+                return response()->json([
+                    'phase' => new ProjectTaskPhaseAssignmentResource($phaseAssignment),
+                    'shifted_phases' => [],
+                    'warnings' => [],
+                ]);
+            });
         }
 
         $newStart = null;
@@ -2037,9 +2083,9 @@ PROMPT;
         );
 
         return response()->json([
-            'phase'          => new ProjectTaskPhaseAssignmentResource($result['phase']),
+            'phase' => new ProjectTaskPhaseAssignmentResource($result['phase']),
             'shifted_phases' => $result['shifted_phases'],
-            'warnings'       => $result['warnings'],
+            'warnings' => $result['warnings'],
         ]);
     }
 
@@ -2261,7 +2307,7 @@ PROMPT;
         if (stripos($devHeader, 'Develop') !== false || str_contains($devHeader, '開発工数')) {
             $phaseDefs[] = [
                 'code' => 'development',
-                'name' => 'Development',
+                'name' => '実装',
                 'cols' => [4, 5],
                 'order' => 5,
                 'is_execution' => true,
