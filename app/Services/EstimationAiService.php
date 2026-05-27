@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\AiUsageLog;
+use App\Models\CapacityRole;
 use App\Models\Deal;
 use App\Models\DealContractDocument;
 use App\Models\DealHardAssignment;
@@ -27,7 +28,7 @@ use Throwable;
  */
 class EstimationAiService
 {
-    private const MODEL = 'claude-3-5-sonnet-latest';
+    private const MODEL = 'claude-sonnet-4-6';
 
     private const DEFAULT_BASE_URL = 'https://api.anthropic.com';
 
@@ -97,13 +98,14 @@ class EstimationAiService
         string $contextNotes,
         array $currentResources,
         array $currentOverheads,
+        array $currentRoles = [],
     ): array {
         $apiKey = config('services.anthropic.api_key') ?? env('ANTHROPIC_API_KEY');
         if (! $apiKey) {
             throw new \RuntimeException('ANTHROPIC_API_KEY not configured.');
         }
 
-        $prompt = $this->buildDeltaPrompt($deal, $contextNotes, $currentResources, $currentOverheads);
+        $prompt = $this->buildDeltaPrompt($deal, $contextNotes, $currentResources, $currentOverheads, $currentRoles);
 
         try {
             $delta = $this->callClaudeRaw($apiKey, $prompt, $deal, 'estimation_delta');
@@ -128,6 +130,18 @@ class EstimationAiService
                 $deal,
                 'estimation_delta',
             );
+        }
+
+        // Older prompts / the occasional vague-notes response may omit the
+        // roles section entirely. Default it to an empty diff so a missing
+        // `roles` key never 503s an otherwise-valid scope/overhead delta.
+        if (! isset($delta['roles']) || ! is_array($delta['roles'])) {
+            $delta['roles'] = ['add' => [], 'remove' => [], 'modify' => []];
+        }
+        foreach (['add', 'remove', 'modify'] as $op) {
+            if (! isset($delta['roles'][$op]) || ! is_array($delta['roles'][$op])) {
+                $delta['roles'][$op] = [];
+            }
         }
 
         $this->validateDeltaShape($delta);
@@ -498,7 +512,7 @@ class EstimationAiService
 
     private function estimateCost(int $inputTokens, int $outputTokens): float
     {
-        // Claude 3.5 Sonnet public pricing — same numbers as ContractAnalysisService.
+        // Claude Sonnet 4.6 public pricing — same numbers as ContractAnalysisService.
         return round(($inputTokens / 1_000_000) * 3 + ($outputTokens / 1_000_000) * 15, 6);
     }
 
@@ -558,6 +572,7 @@ class EstimationAiService
         string $contextNotes,
         array $currentResources,
         array $currentOverheads,
+        array $currentRoles = [],
     ): string {
         $tplPath = base_path(self::DELTA_PROMPT_TEMPLATE_PATH);
         if (! is_file($tplPath)) {
@@ -572,8 +587,11 @@ class EstimationAiService
             '{{CURRENCY}}' => $deal->final_currency ?? '(unset)',
             '{{CURRENT_RESOURCES_BLOCK}}' => $this->formatResourcesForPrompt($currentResources),
             '{{CURRENT_OVERHEADS_BLOCK}}' => $this->formatOverheadsForPrompt($currentOverheads),
+            '{{CURRENT_ROLES_BLOCK}}' => $this->formatRolesForPrompt($currentRoles),
             '{{CONTEXT_NOTES}}' => trim($contextNotes) === '' ? '(empty)' : trim($contextNotes),
             '{{ORG_ROLES_BLOCK}}' => $this->buildRolesBlock($deal),
+            '{{CAPACITY_ROLES_BLOCK}}' => $this->buildCapacityRolesBlock($deal),
+            '{{DELIVERY_SALARY_BLOCK}}' => $this->buildDeliverySalaryBlock($deal),
         ]);
     }
 
@@ -609,6 +627,85 @@ class EstimationAiService
     }
 
     /**
+     * Current project staffing mix (deal ghost roles) as fed by the frontend.
+     * Accepts both snake_case and camelCase keys so it works whether the rows
+     * come straight off the request or from an internal array.
+     */
+    private function formatRolesForPrompt(array $roles): string
+    {
+        if (empty($roles)) {
+            return '(none — the deal has no project roles yet)';
+        }
+        $lines = [];
+        foreach ($roles as $r) {
+            $type = $r['role_type'] ?? $r['roleType'] ?? '?';
+            $qty = $r['quantity'] ?? 1;
+            $months = $r['months'] ?? 1;
+            $min = $r['min_monthly_salary'] ?? $r['minMonthlySalary'] ?? 0;
+            $max = $r['max_monthly_salary'] ?? $r['maxMonthlySalary'] ?? 0;
+            $lines[] = "- {$type} — qty {$qty}, {$months} months, monthly salary {$min}–{$max}";
+        }
+
+        return implode("\n", $lines);
+    }
+
+    /**
+     * Tenant's capacity-role taxonomy (code + display name). The delta AI may
+     * only emit a `role_type` that appears here verbatim — this is what makes
+     * the role mix dynamic instead of a hardcoded frontend/backend/... enum.
+     */
+    private function buildCapacityRolesBlock(Deal $deal): string
+    {
+        $roles = CapacityRole::query()
+            ->where('tenant_id', $deal->tenant_id)
+            ->orderBy('name')
+            ->get(['code', 'name']);
+
+        if ($roles->isEmpty()) {
+            return '(no capacity roles defined — do not propose any role changes)';
+        }
+
+        return $roles
+            ->map(fn ($r) => "- {$r->code} ({$r->name})")
+            ->implode("\n");
+    }
+
+    /**
+     * Observed monthly salary ranges per capacity role, computed ONLY from
+     * employees in delivery-eligible departments (departments.is_delivery_eligible
+     * = true). Non-delivery staff (Sales/HR/Finance) are excluded so their pay
+     * doesn't skew the AI's salary anchors. Grounds the role-delta salary
+     * proposals in real tenant data.
+     */
+    private function buildDeliverySalaryBlock(Deal $deal): string
+    {
+        $rows = Employee::query()
+            ->where('employees.tenant_id', $deal->tenant_id)
+            ->join('departments', 'employees.department_id', '=', 'departments.id')
+            ->join('capacity_roles', 'employees.capacity_role_id', '=', 'capacity_roles.id')
+            ->where('departments.is_delivery_eligible', true)
+            ->get(['capacity_roles.code as code', 'employees.monthly_salary as monthly_salary']);
+
+        if ($rows->isEmpty()) {
+            return '(no salary data for delivery-eligible departments — propose conservative ranges anchored to the deal budget)';
+        }
+
+        $lines = $rows
+            ->groupBy('code')
+            ->map(function ($group, $code) {
+                $salaries = $group->pluck('monthly_salary')->map(fn ($s) => (float) $s)->sort()->values();
+                $min = (int) round($salaries->first());
+                $max = (int) round($salaries->last());
+                $count = $salaries->count();
+
+                return "- {$code}: {$count} people, monthly salary {$min}–{$max}";
+            })
+            ->values();
+
+        return $lines->implode("\n");
+    }
+
+    /**
      * Asserts the AI delta JSON has the expected top-level shape so the
      * frontend can render the review panel without defensive null-checks.
      * Throws RuntimeException with "delta missing key:" prefix so the retry
@@ -616,12 +713,12 @@ class EstimationAiService
      */
     private function validateDeltaShape(array $delta): void
     {
-        foreach (['resources', 'overheads', 'summary', 'confidence'] as $key) {
+        foreach (['resources', 'overheads', 'roles', 'summary', 'confidence'] as $key) {
             if (! array_key_exists($key, $delta)) {
                 throw new \RuntimeException('delta missing key: '.$key);
             }
         }
-        foreach (['resources', 'overheads'] as $section) {
+        foreach (['resources', 'overheads', 'roles'] as $section) {
             if (! is_array($delta[$section])) {
                 throw new \RuntimeException('delta missing key: '.$section.' (must be object)');
             }
