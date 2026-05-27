@@ -38,13 +38,13 @@ class PhaseReassignmentService
 
         return $conflicts->map(fn (ProjectTaskPhaseAssignment $p) => [
             'phase_assignment_id' => $p->id,
-            'phase_name'          => $p->phase_name,
-            'phase_code'          => $p->phase_code,
-            'function_name'       => optional($p->taskAssignment)->function_name ?? '',
-            'project_name'        => optional(optional($p->taskAssignment)->project)->name ?? '',
-            'planned_start'       => $p->planned_start->toDateString(),
-            'planned_end'         => $p->planned_end->toDateString(),
-            'estimated_hours'     => (float) $p->estimated_hours,
+            'phase_name' => $p->phase_name,
+            'phase_code' => $p->phase_code,
+            'function_name' => optional($p->taskAssignment)->function_name ?? '',
+            'project_name' => optional(optional($p->taskAssignment)->project)->name ?? '',
+            'planned_start' => $p->planned_start->toDateString(),
+            'planned_end' => $p->planned_end->toDateString(),
+            'estimated_hours' => (float) $p->estimated_hours,
         ])->all();
     }
 
@@ -68,7 +68,7 @@ class PhaseReassignmentService
         if (! $latestEnd) {
             return [
                 'planned_start' => $originalStart->toDateString(),
-                'planned_end'   => $originalEnd->toDateString(),
+                'planned_end' => $originalEnd->toDateString(),
             ];
         }
 
@@ -85,7 +85,7 @@ class PhaseReassignmentService
 
         return [
             'planned_start' => $newStart->toDateString(),
-            'planned_end'   => $newEnd->toDateString(),
+            'planned_end' => $newEnd->toDateString(),
         ];
     }
 
@@ -138,18 +138,18 @@ class PhaseReassignmentService
 
                 $shifted[] = [
                     'phase_assignment_id' => $phase->id,
-                    'phase_name'          => $phase->phase_name,
-                    'function_name'       => optional($phase->taskAssignment)->function_name ?? '',
-                    'original_start'      => $currentStart->toDateString(),
-                    'original_end'        => $currentEnd->toDateString(),
-                    'new_start'           => $newStart->toDateString(),
-                    'new_end'             => $newEnd->toDateString(),
+                    'phase_name' => $phase->phase_name,
+                    'function_name' => optional($phase->taskAssignment)->function_name ?? '',
+                    'original_start' => $currentStart->toDateString(),
+                    'original_end' => $currentEnd->toDateString(),
+                    'new_start' => $newStart->toDateString(),
+                    'new_end' => $newEnd->toDateString(),
                 ];
 
                 if (! $dryRun) {
                     $phase->update([
                         'planned_start' => $newStart->toDateString(),
-                        'planned_end'   => $newEnd->toDateString(),
+                        'planned_end' => $newEnd->toDateString(),
                     ]);
                 }
 
@@ -176,7 +176,7 @@ class PhaseReassignmentService
             $phase->lockForUpdate();
 
             $updates = [
-                'assignee_id'       => $newAssigneeId,
+                'assignee_id' => $newAssigneeId,
                 'assignment_source' => 'manual',
             ];
             if ($newPlannedStart !== null) {
@@ -200,9 +200,9 @@ class PhaseReassignmentService
             }
 
             return [
-                'phase'          => $phase,
+                'phase' => $phase,
                 'shifted_phases' => $cascadeResult['shifted'],
-                'warnings'       => $cascadeResult['warnings'],
+                'warnings' => $cascadeResult['warnings'],
             ];
         });
     }
@@ -257,8 +257,8 @@ class PhaseReassignmentService
             }
 
             return [
-                'phase_a'  => $phaseA,
-                'phase_b'  => $phaseB,
+                'phase_a' => $phaseA,
+                'phase_b' => $phaseB,
                 'warnings' => $warnings,
             ];
         });

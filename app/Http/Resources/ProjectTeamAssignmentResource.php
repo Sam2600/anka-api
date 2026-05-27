@@ -15,6 +15,8 @@ class ProjectTeamAssignmentResource extends JsonResource
             'employee_id' => $this->employee_id,
             'employee_name' => optional($this->employee)->name,
             'department_name' => optional(optional($this->employee)->department)->name,
+            'capacity_role' => optional(optional($this->employee)->capacityRole)->name
+                ?? optional($this->employee)->capacity_role,
             'rank_name' => optional(optional($this->employee)->rank)->name,
             'rank_code' => optional(optional($this->employee)->rank)->code,
             'allocated_hours' => $this->allocated_hours,
