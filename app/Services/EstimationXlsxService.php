@@ -26,29 +26,29 @@ use Throwable;
 class EstimationXlsxService
 {
     private const PHASES = [
-        ['E', 'コードレビュー(h)\nCode Review', 0.10],
-        ['F', 'Prototype(h)\nRequirement', 0.15],
-        ['G', 'Prototypeレビュー(h)\nRequirement Review', 0.03],
-        ['H', '業務フロー(h)\nWorkflow', 0.05],
-        ['I', '業務フローレビュー(h)\nWorkflow Review', 0.08],
-        ['J', 'ER図(h)\nER Diagram', 0.05],
-        ['K', 'ER図レビュー(h)\nER Review', 0.04],
-        ['L', 'DFD(h)\nDFD', 0.05],
-        ['M', 'DFDレビュー(h)\nDFD Review', 0.30],
-        ['N', 'DB設計(h)\nDB Design', 0.05],
-        ['O', 'DB設計レビュー(h)\nDB Review', 0.10],
-        ['P', '基本設計書(h)\nBasic Document', 0.20],
-        ['Q', '基本設計レビュー(h)\nBasic Review', 0],
-        ['R', '詳細設計(h)\nDetail Design', 0],
-        ['S', '詳細設計レビュー(h)\nDetail Review', 0.50],
-        ['T', '単体テスト仕様書(h)\nUnit Test Spec', 0.03],
-        ['U', '単体テスト実施(h)\nUnit Test', 0.50],
-        ['V', '結合テスト仕様書(h)\nIntegration Test Spec', 0.10],
-        ['W', '結合テストレビュー(h)\nIntegration Review', 0.03],
-        ['X', '結合テスト実施(h)\nIntegration Test', 0.30],
-        ['Y', '総合テスト(h)\nSystem Test', 0.15],
-        ['Z', 'テストデータ(h)\nTest Data', 0.10],
-        ['AA', 'マニュアル(h)\nManual', 0.08],
+        ['E', "コードレビュー(h)\nCode Review", 0.10],
+        ['F', "Prototype(h)\nRequirement", 0.15],
+        ['G', "Prototypeレビュー(h)\nRequirement Review", 0.03],
+        ['H', "業務フロー(h)\nWorkflow", 0.05],
+        ['I', "業務フローレビュー(h)\nWorkflow Review", 0.08],
+        ['J', "ER図(h)\nER Diagram", 0.05],
+        ['K', "ER図レビュー(h)\nER Review", 0.04],
+        ['L', "DFD(h)\nDFD", 0.05],
+        ['M', "DFDレビュー(h)\nDFD Review", 0.30],
+        ['N', "DB設計(h)\nDB Design", 0.05],
+        ['O', "DB設計レビュー(h)\nDB Review", 0.10],
+        ['P', "基本設計書(h)\nBasic Document", 0.20],
+        ['Q', "基本設計レビュー(h)\nBasic Review", 0],
+        ['R', "詳細設計(h)\nDetail Design", 0],
+        ['S', "詳細設計レビュー(h)\nDetail Review", 0.50],
+        ['T', "単体テスト仕様書(h)\nUnit Test Spec", 0.03],
+        ['U', "単体テスト実施(h)\nUnit Test", 0.50],
+        ['V', "結合テスト仕様書(h)\nIntegration Test Spec", 0.10],
+        ['W', "結合テストレビュー(h)\nIntegration Review", 0.03],
+        ['X', "結合テスト実施(h)\nIntegration Test", 0.30],
+        ['Y', "総合テスト(h)\nSystem Test", 0.15],
+        ['Z', "テストデータ(h)\nTest Data", 0.10],
+        ['AA', "マニュアル(h)\nManual", 0.08],
     ];
 
     private const PHASE_GROUPS = [
@@ -64,25 +64,37 @@ class EstimationXlsxService
         ['AA', 'AA', 'マニュアル'],
     ];
 
+    private const PHASE_CATEGORIES = [
+        ['F', 'G', "要件定義\nRequirement", 'FFE699'],
+        ['H', 'O', "基本全体設計\nSystem Architecture", 'FFE699'],
+        ['P', 'Q', "基本設計\nBasic Doc", 'FFE699'],
+        ['R', 'S', "詳細設計\nDetail Doc", 'FFE699'],
+        ['T', 'U', "単体テスト\nUnit Test", 'DFEBF7'],
+        ['V', 'X', "結合テスト\nCombine Test", 'DFEBF7'],
+        ['Y', 'Y', "総合テスト\nSystem Test", 'DFEBF7'],
+    ];
+
     private const MILESTONE_PHASES = [
         '要件定義/Prototype',
-        '基本全体設計',
-        '基本設計書（各画面）',
-        '実装(Web)',
-        'テストデータ作成',
-        '単体テスト',
-        '結合テスト',
-        '総合テスト',
-        'マニュアル作成',
+        "基本全体設計\nSystem Architecture",
+        "基本設計書（各画面）\nBasic Document",
+        "実装(Web)\nDevelop",
+        "テストデータ作成\nTest Document",
+        "単体テスト\nUnit Test",
+        "結合テスト\nCombine Test",
+        "総合テスト\nSystem Test",
+        "マニュアル作成\nUser Manual",
     ];
 
     private const S2_GROUP_ROW = 1;
 
     private const S2_MULT_ROW = 2;
 
-    private const S2_HEADER_ROW = 3;
+    private const S2_CATEGORY_ROW = 3;
 
-    private const S2_FIRST_DATA = 4;
+    private const S2_HEADER_ROW = 4;
+
+    private const S2_FIRST_DATA = 5;
 
     // Dev-parallel columns split across developers (not leader-owned)
     private const DEV_PARALLEL_COLS = ['D', 'S', 'U', 'X', 'Y'];
@@ -246,6 +258,7 @@ class EstimationXlsxService
 
         $this->writeManhourGroupLabels($ws);
         $this->writeManhourMultipliers($ws);
+        $this->writeManhourCategoryRow($ws);
         $this->writeManhourHeaders($ws);
         $this->writeManhourDataRows($ws, $features, $lastDataRow);
         $this->writeManhourSummary($ws, $featureCount, $lastDataRow);
@@ -254,6 +267,13 @@ class EstimationXlsxService
 
     private function writeManhourGroupLabels(Worksheet $ws): void
     {
+        $yellowFill = [
+            'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => 'FFE699']],
+        ];
+        $blueFill = [
+            'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => 'DFEBF7']],
+        ];
+
         foreach (self::PHASE_GROUPS as [$startCol, $endCol, $label]) {
             $ws->setCellValue($startCol.self::S2_GROUP_ROW, $label);
             if ($startCol !== $endCol) {
@@ -263,18 +283,38 @@ class EstimationXlsxService
         $ws->getStyle('E'.self::S2_GROUP_ROW.':AA'.self::S2_GROUP_ROW)->getAlignment()
             ->setHorizontal(Alignment::HORIZONTAL_CENTER);
         $ws->getStyle('E'.self::S2_GROUP_ROW.':AA'.self::S2_GROUP_ROW)->getFont()->setBold(true);
+
+        // Color zones matching template: yellow for design phases, blue for test phases
+        $ws->getStyle('E'.self::S2_GROUP_ROW.':S'.self::S2_GROUP_ROW)->applyFromArray($yellowFill);
+        $ws->getStyle('T'.self::S2_GROUP_ROW.':AA'.self::S2_GROUP_ROW)->applyFromArray($blueFill);
     }
 
     private function writeManhourMultipliers(Worksheet $ws): void
     {
-        $ws->setCellValue('D'.self::S2_MULT_ROW, 'Base Dev(h)');
-        $blueFont = ['font' => ['color' => ['rgb' => '0000FF']]];
-
         foreach (self::PHASES as [$col, $label, $mult]) {
             $ws->setCellValue($col.self::S2_MULT_ROW, $mult);
-            $ws->getStyle($col.self::S2_MULT_ROW)->applyFromArray($blueFont);
         }
-        $ws->getStyle('D'.self::S2_MULT_ROW)->applyFromArray($blueFont);
+        $ws->getStyle('E'.self::S2_MULT_ROW.':AA'.self::S2_MULT_ROW)
+            ->getNumberFormat()->setFormatCode('0%');
+    }
+
+    private function writeManhourCategoryRow(Worksheet $ws): void
+    {
+        $row = self::S2_CATEGORY_ROW;
+
+        foreach (self::PHASE_CATEGORIES as [$startCol, $endCol, $label, $color]) {
+            $ws->setCellValue($startCol.$row, $label);
+            if ($startCol !== $endCol) {
+                $ws->mergeCells("{$startCol}{$row}:{$endCol}{$row}");
+            }
+            $ws->getStyle("{$startCol}{$row}:{$endCol}{$row}")->applyFromArray([
+                'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => $color]],
+            ]);
+        }
+
+        $ws->getStyle("E{$row}:AA{$row}")->getAlignment()
+            ->setHorizontal(Alignment::HORIZONTAL_CENTER);
+        $ws->getStyle("E{$row}:AA{$row}")->getAlignment()->setWrapText(true);
     }
 
     private function writeManhourHeaders(Worksheet $ws): void
@@ -301,50 +341,48 @@ class EstimationXlsxService
         $ws->setCellValue('AF'.$row, '進捗%');
         $ws->setCellValue('AG'.$row, 'Progress Bar');
 
-        // Header styling: orange background for A-C, yellow for D onwards
-        $orangeFill = [
+        $thinBorder = [
+            'borders' => [
+                'allBorders' => [
+                    'borderStyle' => Border::BORDER_THIN,
+                    'color' => ['rgb' => 'B0B0B0'],
+                ],
+            ],
+        ];
+        $orangeFill = array_merge($thinBorder, [
             'font' => ['bold' => true],
-            'fill' => [
-                'fillType' => Fill::FILL_SOLID,
-                'startColor' => ['rgb' => 'FBE5D6'],
-            ],
-            'borders' => [
-                'allBorders' => [
-                    'borderStyle' => Border::BORDER_THIN,
-                    'color' => ['rgb' => 'B0B0B0'],
-                ],
-            ],
-        ];
-        $yellowFill = [
-            'fill' => [
-                'fillType' => Fill::FILL_SOLID,
-                'startColor' => ['rgb' => 'FFE699'],
-            ],
-            'borders' => [
-                'allBorders' => [
-                    'borderStyle' => Border::BORDER_THIN,
-                    'color' => ['rgb' => 'B0B0B0'],
-                ],
-            ],
-        ];
+            'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => 'FBE5D6']],
+        ]);
+        $yellowFill = array_merge($thinBorder, [
+            'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => 'FFE699']],
+        ]);
+        $blueFill = array_merge($thinBorder, [
+            'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => 'DFEBF7']],
+        ]);
+        $greenFill = array_merge($thinBorder, [
+            'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => 'A9D18E']],
+        ]);
+        $lavenderFill = array_merge($thinBorder, [
+            'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => 'DAE3F3']],
+        ]);
 
-        $ws->getStyle('A'.$row.':C'.$row)->applyFromArray($orangeFill);
-        $ws->getStyle('D'.$row.':AG'.$row)->applyFromArray($yellowFill);
-        $ws->getStyle('A'.$row.':AG'.$row)->getAlignment()->setWrapText(true);
+        // Color zones matching template: orange → yellow → blue → green → lavender
+        $ws->getStyle("A{$row}:B{$row}")->applyFromArray($orangeFill);
+        $ws->getStyle("D{$row}:S{$row}")->applyFromArray($yellowFill);
+        $ws->getStyle("T{$row}:AA{$row}")->applyFromArray($blueFill);
+        $ws->getStyle("AB{$row}:AC{$row}")->applyFromArray($greenFill);
+        $ws->getStyle("AD{$row}")->applyFromArray($lavenderFill);
+        $ws->getStyle("A{$row}:AG{$row}")->getAlignment()->setWrapText(true);
     }
 
     private function writeManhourDataRows(Worksheet $ws, array $features, int $lastDataRow): void
     {
-        $greenFont = ['font' => ['color' => ['rgb' => '00B050']]];
-
         foreach ($features as $i => $f) {
             $row = self::S2_FIRST_DATA + $i;
             $flRow = $i + 2; // Function List data starts at row 2
 
-            // Cross-sheet links (green text) - updated for new column layout
             $ws->setCellValue("A{$row}", $f['function_id']);
             $ws->setCellValue("B{$row}", "='Web_Function List'!D{$flRow}");
-            $ws->getStyle("B{$row}")->applyFromArray($greenFont);
             // Status derived from difficulty
             $ws->setCellValue("C{$row}", $f['difficulty']);
 
@@ -536,8 +574,8 @@ class EstimationXlsxService
         $ws->getColumnDimension('AF')->setWidth(8);
         $ws->getColumnDimension('AG')->setWidth(22);
 
-        // Freeze panes: rows 1-3 and column A
-        $ws->freezePane('B'.self::S2_FIRST_DATA);
+        // Freeze panes: rows 1-3 and columns A-E (template freezes up to E)
+        $ws->freezePane('F'.self::S2_FIRST_DATA);
 
         if ($featureCount === 0) {
             return;
@@ -580,6 +618,8 @@ class EstimationXlsxService
     // Sheet 3: Milestone
     // =========================================================================
 
+    private array $milestoneArrows = [];
+
     private function buildMilestoneSheet(Spreadsheet $ss, Deal $deal): void
     {
         $ws = new Worksheet($ss, 'Milestone');
@@ -598,12 +638,12 @@ class EstimationXlsxService
         $ws->getStyle('A2')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
         $ws->getStyle('A2')->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
 
-        // Row 2: Month headers
+        // Row 2: Month headers (short name like template: Oct, Nov, ...)
         $weekCol = 'B';
         $monthStartCols = [];
 
         for ($m = 0; $m < $timeline; $m++) {
-            $monthLabel = $start->copy()->addMonths($m)->format('Y/m (M)');
+            $monthLabel = $start->copy()->addMonths($m)->format('M');
             $startCol = $weekCol;
             $monthStartCols[] = $startCol;
 
@@ -631,44 +671,33 @@ class EstimationXlsxService
         $ws->getStyle('B3:'.$lastWeekCol.'3')->getAlignment()
             ->setHorizontal(Alignment::HORIZONTAL_CENTER);
 
-        // Phase rows
-        $scheduleFill = [
-            'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => '2196F3']],
-            'font' => ['color' => ['rgb' => 'FFFFFF']],
-        ];
-
-        // Default schedule distribution (approximate)
+        // Phase rows — bilingual labels, centered, wrap text
         $phaseSchedule = $this->distributePhaseSchedule(count(self::MILESTONE_PHASES), $timeline);
 
+        $this->milestoneArrows = [];
         foreach (self::MILESTONE_PHASES as $pi => $phase) {
             $row = $pi + 4;
             $ws->setCellValue("A{$row}", $phase);
+            $ws->getStyle("A{$row}")->getAlignment()->setWrapText(true);
+            $ws->getStyle("A{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+            $ws->getStyle("A{$row}")->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
+            $ws->getRowDimension($row)->setRowHeight(30);
 
             if (isset($phaseSchedule[$pi])) {
                 [$startWeek, $endWeek] = $phaseSchedule[$pi];
-                $col = 'B';
-                for ($w = 0; $w < $startWeek; $w++) {
-                    $col = $this->nextCol($col);
-                }
-                for ($w = $startWeek; $w <= $endWeek && $w < ($timeline * 4); $w++) {
-                    $ws->getStyle($col.$row)->applyFromArray($scheduleFill);
-                    $col = $this->nextCol($col);
-                }
+                // Column index: B=1 (0-indexed), week 0 → col 1, week 1 → col 2, etc.
+                $fromCol = $startWeek + 1;
+                $toCol = $endWeek + 1;
+                $this->milestoneArrows[] = [
+                    'row' => $row - 1, // 0-indexed for OOXML
+                    'fromCol' => $fromCol,
+                    'toCol' => $toCol,
+                ];
             }
         }
 
         $ws->getColumnDimension('A')->setWidth(25);
         $ws->freezePane('B4');
-
-        // Alternate row shading
-        foreach (self::MILESTONE_PHASES as $pi => $phase) {
-            $row = $pi + 4;
-            if ($pi % 2 === 0) {
-                $ws->getStyle("A{$row}:{$lastWeekCol}{$row}")->getFill()
-                    ->setFillType(Fill::FILL_SOLID)
-                    ->getStartColor()->setRGB('F2F2F2');
-            }
-        }
     }
 
     private function distributePhaseSchedule(int $phaseCount, int $months): array
@@ -718,16 +747,16 @@ class EstimationXlsxService
         $timeline = max(1, (int) ($deal->timeline_months ?: 4));
         $visibleMonths = min(12, $timeline);
 
-        // Row 3-4: Headers (matching template layout)
         $headerFill = [
             'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => 'DFEBF7']],
         ];
 
-        $ws->mergeCells('B3:B4');
+        // Row 3-4: B:C merged for "Assignee"
+        $ws->mergeCells('B3:C4');
         $ws->setCellValue('B3', 'Assignee');
-        $ws->getStyle('B3:B4')->applyFromArray($headerFill);
+        $ws->getStyle('B3:C4')->applyFromArray($headerFill);
 
-        // Year header spanning month columns
+        // Year header spanning month columns (D onwards)
         $yearLabel = $start->format('Y');
         $monthCols = [];
         $col = 'D';
@@ -742,7 +771,7 @@ class EstimationXlsxService
         $ws->setCellValue('D3', $yearLabel);
         $ws->getStyle("D3:{$lastMonthCol}3")->applyFromArray($headerFill);
 
-        // Row 4: Month numbers under the year
+        // Row 4: Month numbers
         foreach ($monthCols as $mci => $mc) {
             $monthNum = (int) $start->copy()->addMonths($mci)->format('n');
             $ws->setCellValue("{$mc}4", $monthNum);
@@ -755,43 +784,36 @@ class EstimationXlsxService
         $ws->setCellValue("{$subtotalCol}3", 'SubTotal');
         $ws->getStyle("{$subtotalCol}3:{$subtotalCol}4")->applyFromArray($headerFill);
 
-        // Monthly Salary column
-        $salaryCol = $this->nextCol($subtotalCol);
-        $ws->mergeCells("{$salaryCol}3:{$salaryCol}4");
-        $ws->setCellValue("{$salaryCol}3", 'Monthly Salary');
-        $ws->getStyle("{$salaryCol}3:{$salaryCol}4")->applyFromArray($headerFill);
+        $this->applyHeaderStyle($ws, "B3:{$subtotalCol}4");
 
-        // Apply header style
-        $this->applyHeaderStyle($ws, "B3:{$salaryCol}4");
-
-        // Data rows
+        // Identify leader row(s) and member row(s) for rate-based pricing
         $firstMemberRow = 5;
-        $blueFont = ['font' => ['color' => ['rgb' => '0000FF']]];
+        $leaderRows = [];
+        $memberRows = [];
 
         foreach ($members as $mi => $m) {
             $row = $firstMemberRow + $mi;
+            $ws->mergeCells("B{$row}:C{$row}");
             $ws->setCellValue("B{$row}", $m['name']);
 
             $firstMonthCol = $monthCols[0];
-            $lastMonthCol = $monthCols[count($monthCols) - 1];
 
             $alloc = $m['monthly_allocation'] ?? [];
             foreach ($monthCols as $mci => $mc) {
                 $val = (float) ($alloc[$mci] ?? 0);
                 if ($val > 0) {
                     $ws->setCellValue("{$mc}{$row}", round($val, 1));
-                    $ws->getStyle("{$mc}{$row}")->applyFromArray($blueFont);
                 }
             }
 
             // SubTotal
             $ws->setCellValue("{$subtotalCol}{$row}", "=SUM({$firstMonthCol}{$row}:{$lastMonthCol}{$row})");
 
-            // Monthly Salary from system data
-            $salary = (float) ($m['monthly_salary'] ?? 0);
-            if ($salary > 0) {
-                $ws->setCellValue("{$salaryCol}{$row}", $salary);
-                $ws->getStyle("{$salaryCol}{$row}")->getNumberFormat()->setFormatCode('#,##0');
+            $roleType = $m['role_type'] ?? 'S Member';
+            if ($roleType === 'Leader') {
+                $leaderRows[] = $row;
+            } else {
+                $memberRows[] = $row;
             }
         }
 
@@ -800,9 +822,10 @@ class EstimationXlsxService
             $lastMemberRow = $firstMemberRow;
         }
 
-        // Total (H) row - yellow background
+        // Total (H) row — yellow, B:C merged
         $totRow = $lastMemberRow + 1;
         $yellowFill = ['fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => 'FFFF00']]];
+        $ws->mergeCells("B{$totRow}:C{$totRow}");
         $ws->setCellValue("B{$totRow}", 'Total (H)');
         $ws->getStyle("B{$totRow}")->getFont()->setBold(true);
 
@@ -816,44 +839,90 @@ class EstimationXlsxService
         $ws->getStyle("B{$totRow}:{$subtotalCol}{$totRow}")->applyFromArray($yellowFill);
         $ws->getStyle("B{$totRow}:{$subtotalCol}{$totRow}")->getFont()->setBold(true);
 
-        // Total Price row - green background
+        // Rate constants — hidden column after SubTotal (template uses $M$4/$M$5)
+        $rateCol = $this->nextCol($this->nextCol($subtotalCol));
+        $leaderRateRow = 4;
+        $memberRateRow = 5;
+
+        // Resolve rates from team member data
+        $leaderSalary = 0;
+        $memberSalary = 0;
+        foreach ($members as $m) {
+            $salary = (float) ($m['monthly_salary'] ?? 0);
+            if (($m['role_type'] ?? '') === 'Leader' && $salary > 0) {
+                $leaderSalary = $salary;
+            } elseif ($salary > 0 && $memberSalary === 0) {
+                $memberSalary = $salary;
+            }
+        }
+        $ws->setCellValue("{$rateCol}{$leaderRateRow}", $leaderSalary);
+        $ws->setCellValue("{$rateCol}{$memberRateRow}", $memberSalary);
+        $ws->getStyle("{$rateCol}{$leaderRateRow}")->getNumberFormat()->setFormatCode('#,##0');
+        $ws->getStyle("{$rateCol}{$memberRateRow}")->getNumberFormat()->setFormatCode('#,##0');
+
+        // Total Price label — green, in SubTotal column
         $priceRow = $totRow + 2;
         $greenFill = ['fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['rgb' => 'A9D18E']]];
-        $ws->setCellValue("H{$priceRow}", 'Total Price');
-        $ws->getStyle("H{$priceRow}")->applyFromArray($greenFill);
-        $ws->getStyle("H{$priceRow}")->getFont()->setBold(true);
+        $ws->setCellValue("{$subtotalCol}{$priceRow}", 'Total Price');
+        $ws->getStyle("{$subtotalCol}{$priceRow}")->applyFromArray($greenFill);
+        $ws->getStyle("{$subtotalCol}{$priceRow}")->getFont()->setBold(true);
 
-        // Price Per Month row - green background
+        // Price Per Month row — green, B:C merged
         $pricePerMonthRow = $priceRow + 1;
+        $ws->mergeCells("B{$pricePerMonthRow}:C{$pricePerMonthRow}");
         $ws->setCellValue("B{$pricePerMonthRow}", 'Price Per Month');
-        $ws->getStyle("B{$pricePerMonthRow}")->applyFromArray($greenFill);
+        $ws->getStyle("B{$pricePerMonthRow}:C{$pricePerMonthRow}")->applyFromArray($greenFill);
 
-        // Build formula for each month: Σ(allocation × monthly_salary)
+        // Price formula: =(leaderAlloc*$Rate$LeaderRow)+(SUM(memberAllocs)*$Rate$MemberRow)
+        $absLeader = "\${$rateCol}\${$leaderRateRow}";
+        $absMember = "\${$rateCol}\${$memberRateRow}";
+
         foreach ($monthCols as $mc) {
-            $terms = [];
-            for ($r = $firstMemberRow; $r <= $lastMemberRow; $r++) {
-                $terms[] = "{$mc}{$r}*{$salaryCol}{$r}";
+            $leaderTerms = [];
+            $memberTerms = [];
+            foreach ($leaderRows as $lr) {
+                $leaderTerms[] = "{$mc}{$lr}";
             }
-            $formula = '='.implode('+', $terms);
+            foreach ($memberRows as $mr) {
+                $memberTerms[] = "{$mc}{$mr}";
+            }
+
+            if (! empty($leaderTerms) && ! empty($memberTerms)) {
+                $leaderSum = count($leaderTerms) === 1 ? $leaderTerms[0] : 'SUM('.implode(',', $leaderTerms).')';
+                $memberSum = count($memberTerms) === 1 ? $memberTerms[0] : 'SUM('.implode(':', [$memberTerms[0], end($memberTerms)]).')';
+                $formula = "=({$leaderSum}*{$absLeader})+({$memberSum}*{$absMember})";
+            } else {
+                // All same rate
+                $terms = [];
+                for ($r = $firstMemberRow; $r <= $lastMemberRow; $r++) {
+                    $terms[] = "{$mc}{$r}";
+                }
+                $allSum = 'SUM('.implode(',', $terms).')';
+                $rate = ! empty($leaderTerms) ? $absLeader : $absMember;
+                $formula = "={$allSum}*{$rate}";
+            }
+
             $ws->setCellValue("{$mc}{$pricePerMonthRow}", $formula);
             $ws->getStyle("{$mc}{$pricePerMonthRow}")->getNumberFormat()->setFormatCode('#,##0');
         }
+
+        // SubTotal for Price Per Month
         $ws->setCellValue(
             "{$subtotalCol}{$pricePerMonthRow}",
             "=SUM({$monthCols[0]}{$pricePerMonthRow}:{$lastMonthCol}{$pricePerMonthRow})"
         );
         $ws->getStyle("{$subtotalCol}{$pricePerMonthRow}")->getNumberFormat()->setFormatCode('#,##0');
-        $ws->getStyle("H{$priceRow}:{$subtotalCol}{$pricePerMonthRow}")->applyFromArray($greenFill);
+        $ws->getStyle("{$subtotalCol}{$priceRow}:{$subtotalCol}{$pricePerMonthRow}")->applyFromArray($greenFill);
 
         // Column widths
         $ws->getColumnDimension('A')->setWidth(3);
-        $ws->getColumnDimension('B')->setWidth(20);
-        $ws->getColumnDimension('C')->setWidth(3);
+        $ws->getColumnDimension('B')->setWidth(14);
+        $ws->getColumnDimension('C')->setWidth(8);
         foreach ($monthCols as $mc) {
             $ws->getColumnDimension($mc)->setWidth(11);
         }
         $ws->getColumnDimension($subtotalCol)->setWidth(13);
-        $ws->getColumnDimension($salaryCol)->setWidth(15);
+        $ws->getColumnDimension($rateCol)->setVisible(false);
 
         $ws->freezePane('D5');
     }
@@ -1151,6 +1220,10 @@ class EstimationXlsxService
         $tmp = tempnam(sys_get_temp_dir(), 'estimation_');
         $writer->save($tmp);
 
+        if (! empty($this->milestoneArrows)) {
+            $this->injectMilestoneArrows($tmp, $ss);
+        }
+
         $dir = dirname($relativePath);
         if (! Storage::disk('local')->exists($dir)) {
             Storage::disk('local')->makeDirectory($dir);
@@ -1158,5 +1231,148 @@ class EstimationXlsxService
         Storage::disk('local')->put($relativePath, file_get_contents($tmp));
 
         @unlink($tmp);
+    }
+
+    private function injectMilestoneArrows(string $xlsxPath, Spreadsheet $ss): void
+    {
+        $milestoneIndex = null;
+        for ($i = 0; $i < $ss->getSheetCount(); $i++) {
+            if ($ss->getSheet($i)->getTitle() === 'Milestone') {
+                $milestoneIndex = $i;
+                break;
+            }
+        }
+        if ($milestoneIndex === null) {
+            return;
+        }
+
+        $sheetFile = 'sheet'.($milestoneIndex + 1).'.xml';
+        $drawingFile = 'drawing'.($milestoneIndex + 1).'.xml';
+
+        $drawingXml = $this->buildArrowDrawingXml($this->milestoneArrows);
+
+        $zip = new \ZipArchive;
+        if ($zip->open($xlsxPath) !== true) {
+            return;
+        }
+
+        // Add drawing XML
+        $zip->addFromString("xl/drawings/{$drawingFile}", $drawingXml);
+
+        // Add drawing rels (empty — no images)
+        $drawingRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            .'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>';
+        $zip->addFromString("xl/drawings/_rels/{$drawingFile}.rels", $drawingRels);
+
+        // Add relationship from sheet to drawing
+        $drawingRel = '<Relationship Id="rIdDraw1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/'.$drawingFile.'"/>';
+        $sheetRelsPath = "xl/worksheets/_rels/{$sheetFile}.rels";
+        $existingRels = $zip->getFromName($sheetRelsPath);
+        if ($existingRels === false || ! str_contains($existingRels, '</Relationships>')) {
+            // No rels file or self-closing — create fresh
+            $sheetRelsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                .'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                .$drawingRel
+                .'</Relationships>';
+        } else {
+            $sheetRelsXml = str_replace('</Relationships>', $drawingRel.'</Relationships>', $existingRels);
+        }
+        $zip->addFromString($sheetRelsPath, $sheetRelsXml);
+
+        // Add <drawing> element to the sheet XML
+        $sheetXml = $zip->getFromName("xl/worksheets/{$sheetFile}");
+        if ($sheetXml !== false && ! str_contains($sheetXml, '<drawing')) {
+            $sheetXml = str_replace(
+                '</worksheet>',
+                '<drawing r:id="rIdDraw1"/></worksheet>',
+                $sheetXml
+            );
+            // Ensure r: namespace is declared
+            if (! str_contains($sheetXml, 'xmlns:r=')) {
+                $sheetXml = str_replace(
+                    '<worksheet',
+                    '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"',
+                    $sheetXml
+                );
+            }
+            $zip->addFromString("xl/worksheets/{$sheetFile}", $sheetXml);
+        }
+
+        // Register drawing content type
+        $contentTypes = $zip->getFromName('[Content_Types].xml');
+        if ($contentTypes !== false && ! str_contains($contentTypes, $drawingFile)) {
+            $contentTypes = str_replace(
+                '</Types>',
+                '<Override PartName="/xl/drawings/'.$drawingFile.'" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>',
+                $contentTypes
+            );
+            $zip->addFromString('[Content_Types].xml', $contentTypes);
+        }
+
+        $zip->close();
+    }
+
+    private function buildArrowDrawingXml(array $arrows): string
+    {
+        $ns = 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing';
+        $aNs = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+
+        $xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+        $xml .= '<xdr:wsDr xmlns:xdr="'.$ns.'" xmlns:a="'.$aNs.'">';
+
+        foreach ($arrows as $i => $arrow) {
+            $row = $arrow['row'];
+            $fromCol = $arrow['fromCol'];
+            $toCol = $arrow['toCol'];
+            $id = $i + 2;
+
+            // Vertical centering offsets within the row (EMU)
+            $topOffset = 120000;
+            $bottomOffset = 330000;
+            // Horizontal: start near left edge of fromCol, end near right edge of toCol
+            $fromColOff = 30000;
+            $toColOff = 500000;
+
+            $xml .= '<xdr:twoCellAnchor>';
+            $xml .= '<xdr:from>';
+            $xml .= "<xdr:col>{$fromCol}</xdr:col><xdr:colOff>{$fromColOff}</xdr:colOff>";
+            $xml .= "<xdr:row>{$row}</xdr:row><xdr:rowOff>{$topOffset}</xdr:rowOff>";
+            $xml .= '</xdr:from>';
+            $xml .= '<xdr:to>';
+            $xml .= '<xdr:col>'.($toCol + 1).'</xdr:col><xdr:colOff>0</xdr:colOff>';
+            $xml .= "<xdr:row>{$row}</xdr:row><xdr:rowOff>{$bottomOffset}</xdr:rowOff>";
+            $xml .= '</xdr:to>';
+
+            $xml .= '<xdr:sp macro="" textlink="">';
+            $xml .= '<xdr:nvSpPr>';
+            $xml .= '<xdr:cNvPr id="'.$id.'" name="Right Arrow '.$i.'"/>';
+            $xml .= '<xdr:cNvSpPr/>';
+            $xml .= '</xdr:nvSpPr>';
+            $xml .= '<xdr:spPr>';
+            $xml .= '<a:prstGeom prst="rightArrow"><a:avLst/></a:prstGeom>';
+            $xml .= '</xdr:spPr>';
+
+            // Style: accent1 blue fill matching template
+            $xml .= '<xdr:style>';
+            $xml .= '<a:lnRef idx="2"><a:schemeClr val="accent1"><a:shade val="50000"/></a:schemeClr></a:lnRef>';
+            $xml .= '<a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>';
+            $xml .= '<a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef>';
+            $xml .= '<a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef>';
+            $xml .= '</xdr:style>';
+
+            $xml .= '<xdr:txBody>';
+            $xml .= '<a:bodyPr vertOverflow="clip" horzOverflow="clip" rtlCol="0" anchor="t"/>';
+            $xml .= '<a:lstStyle/>';
+            $xml .= '<a:p><a:pPr algn="l"/><a:endParaRPr lang="en-US" sz="1100"/></a:p>';
+            $xml .= '</xdr:txBody>';
+
+            $xml .= '</xdr:sp>';
+            $xml .= '<xdr:clientData/>';
+            $xml .= '</xdr:twoCellAnchor>';
+        }
+
+        $xml .= '</xdr:wsDr>';
+
+        return $xml;
     }
 }

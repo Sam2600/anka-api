@@ -76,8 +76,8 @@ class EstimationVersionController extends Controller
     public function store(Request $request, Deal $deal): JsonResponse
     {
         $request->validate([
-            'resources' => 'required|array',
-            'overheads' => 'required|array',
+            'resources' => 'present|array',
+            'overheads' => 'present|array',
             'target_margin' => 'required|numeric|min:0|max:100',
             'notes' => 'nullable|string|max:500',
             // Customer meeting minutes / chat snippet that produced this
