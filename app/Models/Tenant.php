@@ -30,6 +30,8 @@ class Tenant extends Model
         'logo_path',
         'signatory_name',
         'signatory_title',
+        'address',
+        'phone',
         'currency',
         'tax_rate',
         'avg_delivery_lag_months',
@@ -124,5 +126,10 @@ class Tenant extends Model
     public function exchangeRates()
     {
         return $this->hasMany(ExchangeRate::class);
+    }
+
+    public function bankAccounts()
+    {
+        return $this->hasMany(TenantBankAccount::class)->orderBy('sort_order');
     }
 }

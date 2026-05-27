@@ -55,6 +55,8 @@ class DealController extends Controller
             'contact_name' => 'required|string|max:255',
             'contact_email' => 'required|email|max:255',
             'contact_phone' => 'required|string|max:50',
+            // Optional postal address shown in the Invoice XLSX "To," block.
+            'customer_address' => 'nullable|string|max:1000',
             'status' => 'nullable|in:lead,qualified,negotiation,won',
             'expected_close_date' => 'required|date',
             'lead_source' => 'nullable|in:inbound,referral,cold_outreach,social,event,partner,other',
@@ -174,6 +176,7 @@ class DealController extends Controller
             'contact_name' => 'sometimes|required|string|max:255',
             'contact_email' => 'sometimes|required|email|max:255',
             'contact_phone' => 'sometimes|required|string|max:50',
+            'customer_address' => 'sometimes|nullable|string|max:1000',
             'status' => 'sometimes|in:lead,qualified,negotiation,won',
             'expected_close_date' => 'sometimes|required|date',
             'lead_source' => 'sometimes|nullable|in:inbound,referral,cold_outreach,social,event,partner,other',
