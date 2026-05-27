@@ -17,11 +17,10 @@ use App\Models\EstimationVersion;
 use App\Models\Holiday;
 use App\Models\InitialBudget;
 use App\Models\Invoice;
-use App\Models\Milestone;
 use App\Models\PhaseProgressLog;
+use App\Models\Project;
 use App\Models\ProjectTaskAssignment;
 use App\Models\ProjectTaskPhaseAssignment;
-use App\Models\Project;
 use App\Models\ProjectTeamAssignment;
 use App\Models\Rank;
 use App\Models\Role;
@@ -36,26 +35,31 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 
 /**
- * Hackathon demo seeder — mirrors the "Sample Test Data-2" sheet of
- * the System Flow workbook the team prepared for judging.
+ * Hackathon V2 demo seeder — built from Demo_DataSeed_Anka.xlsx.
  *
- * Budget Year 2026/1–12, MMK, 15 employees, 4 projects (2× S-rank
- * won, 1× A-rank in negotiation, 1× B-rank qualified). S-Project1
- * runs over budget with 200h of OT spread across Apr–Jul to
- * demonstrate the OT / over-budget flow; S-Project2 stays on plan.
+ * Budget Year 2026, MMK, 15 employees, 4 projects:
+ *   S1: Wayne Enterprise chatbot sys         Jan–Aug (1L+2M core, +1M Feb–Jun)
+ *   S2: Lux Luthor corporation ticket mgmt   Mar–Dec (1L+2M)
+ *   A1: Manchester United project             Jul–Oct (negotiation, deal only)
+ *   B1: Arsenal Fc project                   Oct–Dec (qualified, deal only)
  *
- * Idempotent — wipes prior "hackthon-demo" rows and recreates them.
- * Run with:
+ * Full schedule history seeded with on-track pattern (zero late hours).
  *
- *   php artisan db:seed --class=HackthonSeeder
+ * Idempotent — wipes both 'brycen-myanmar-v2' AND 'brycen-myanmar' (V1)
+ * because they share the same email addresses.
+ *
+ *   php artisan db:seed --class=HackthonSeederV2
  */
-class HackthonSeeder extends Seeder
+class HackthonSeederV2 extends Seeder
 {
-    private const SLUG = 'brycen-myanmar';
+    private const SLUG = 'brycen-myanmar-v2';
     private const PASSWORD = 'Demo@1234';
     private const EMAIL_DOMAIN = 'brycenmyanmar.com.mm';
     private const OVERHEAD_PCT = 15;
     private const SELL_MULTIPLIER = 2;
+
+    // Sheet Q16: =SUM(L18:L26)/9 — average of all 9 IT members.
+    private const MEMBER_COST_DIVISOR = 9;
 
     public function run(): void
     {
@@ -63,7 +67,7 @@ class HackthonSeeder extends Seeder
             $this->wipeExisting();
 
             $tenant = Tenant::create([
-                'name' => 'Brycen Myanmar',
+                'name' => 'Brycen Myanmar V2',
                 'slug' => self::SLUG,
                 'plan' => 'pro',
                 'currency' => 'MMK',
@@ -86,16 +90,15 @@ class HackthonSeeder extends Seeder
             $this->createCompanySettings($tenant);
             $this->seedJapanHolidays($tenant);
 
-            // 2026/01/01 anchors the demo so re-seeding yields the same
-            // project windows regardless of when run.
             $yearStart = Carbon::create(2026, 1, 1);
+            $rankAvg = $this->computeRankAverages($employees);
 
-            $this->createSProject1($tenant, $employees, $roles, $admin, $yearStart);
-            $this->createSProject2($tenant, $employees, $roles, $admin, $yearStart);
-            $this->createAProject1($tenant, $employees, $roles, $admin, $yearStart);
-            $this->createBProject1($tenant, $employees, $roles, $admin, $yearStart);
+            $this->createWayneEnterprise($tenant, $employees, $roles, $admin, $yearStart, $rankAvg);
+            $this->createLuxLuthor($tenant, $employees, $roles, $admin, $yearStart, $rankAvg);
+            $this->createManchesterUnited($tenant, $employees, $roles, $admin, $yearStart, $rankAvg);
+            $this->createArsenalFc($tenant, $employees, $roles, $admin, $yearStart, $rankAvg);
 
-            $this->command->info('Brycen Myanmar tenant seeded.');
+            $this->command->info('Brycen Myanmar V2 tenant seeded.');
             $this->command->info('  Tenant ID: '.$tenant->id);
             $this->command->info('  Logins (password = '.self::PASSWORD.'):');
             foreach ($users as $u) {
@@ -104,11 +107,11 @@ class HackthonSeeder extends Seeder
         });
     }
 
+    // ── Wipe ──────────────────────────────────────────────────────────
+
     private function wipeExisting(): void
     {
-        // Match the current slug and any legacy slugs this seeder used
-        // before, so re-running cleans up everything it ever created.
-        $tenants = Tenant::whereIn('slug', [self::SLUG, 'hackthon-demo'])->get();
+        $tenants = Tenant::whereIn('slug', [self::SLUG, 'brycen-myanmar'])->get();
         foreach ($tenants as $tenant) {
             $this->wipeTenant($tenant->id);
         }
@@ -160,6 +163,8 @@ class HackthonSeeder extends Seeder
         DB::table('tenants')->where('id', $tenantId)->delete();
     }
 
+    // ── Tenant infrastructure ─────────────────────────────────────────
+
     private function createCapacityRoles(Tenant $tenant): array
     {
         $roles = [];
@@ -206,22 +211,22 @@ class HackthonSeeder extends Seeder
     private function createDepartments(Tenant $tenant): array
     {
         $deps = [];
-        foreach (['IT', 'Sales', 'HR'] as $name) {
-            $deps[$name] = Department::create([
+        foreach ([
+            ['name' => 'IT',    'delivery' => true],
+            ['name' => 'Sales', 'delivery' => false],
+            ['name' => 'HR',    'delivery' => false],
+        ] as $row) {
+            $deps[$row['name']] = Department::create([
                 'tenant_id' => $tenant->id,
-                'name' => $name,
+                'name' => $row['name'],
                 'headcount' => 0,
+                'is_delivery_eligible' => $row['delivery'],
             ]);
         }
 
         return $deps;
     }
 
-    /**
-     * Rate is the billable hourly rate used by Estimation when an
-     * employee can't be matched directly. Set to roughly leader/member
-     * sell-price per hour in the workbook.
-     */
     private function createRoles(Tenant $tenant, array $departments): array
     {
         $rows = [
@@ -246,12 +251,6 @@ class HackthonSeeder extends Seeder
         return $out;
     }
 
-    /**
-     * 15 employees keyed for downstream lookup. Salary numbers come
-     * straight from the "Sample Test Data-2" sheet (basic / allowance
-     * split). Workable hours = 160 (JP convention; matches sheet's
-     * "Hour 1 to 160" note).
-     */
     private function createEmployees(
         Tenant $tenant,
         array $departments,
@@ -260,9 +259,9 @@ class HackthonSeeder extends Seeder
         array $ranks,
     ): array {
         $rows = [
-            ['key' => 'leader1', 'name' => 'Leader1', 'role' => 'IT Leader', 'dep' => 'IT', 'cap' => 'pm',      'rank' => 'Lead',   'basic' => 4_000_000, 'allow' => 50_000],
-            ['key' => 'leader2', 'name' => 'Leader2', 'role' => 'IT Leader', 'dep' => 'IT', 'cap' => 'pm',      'rank' => 'Lead',   'basic' => 4_000_000, 'allow' => 30_000],
-            ['key' => 'leader3', 'name' => 'Leader3', 'role' => 'IT Leader', 'dep' => 'IT', 'cap' => 'pm',      'rank' => 'Lead',   'basic' => 4_000_000, 'allow' => 0],
+            ['key' => 'leader1', 'name' => 'Leader1', 'role' => 'IT Leader', 'dep' => 'IT', 'cap' => 'pm',       'rank' => 'Lead',   'basic' => 4_000_000, 'allow' => 50_000],
+            ['key' => 'leader2', 'name' => 'Leader2', 'role' => 'IT Leader', 'dep' => 'IT', 'cap' => 'pm',       'rank' => 'Lead',   'basic' => 4_000_000, 'allow' => 30_000],
+            ['key' => 'leader3', 'name' => 'Leader3', 'role' => 'IT Leader', 'dep' => 'IT', 'cap' => 'pm',       'rank' => 'Lead',   'basic' => 4_000_000, 'allow' => 0],
             ['key' => 'member1', 'name' => 'Member1', 'role' => 'IT Member', 'dep' => 'IT', 'cap' => 'backend',  'rank' => 'Senior', 'basic' => 2_000_000, 'allow' => 50_000],
             ['key' => 'member2', 'name' => 'Member2', 'role' => 'IT Member', 'dep' => 'IT', 'cap' => 'backend',  'rank' => 'Senior', 'basic' => 2_000_000, 'allow' => 30_000],
             ['key' => 'member3', 'name' => 'Member3', 'role' => 'IT Member', 'dep' => 'IT', 'cap' => 'frontend', 'rank' => 'Senior', 'basic' => 2_000_000, 'allow' => 20_000],
@@ -272,9 +271,9 @@ class HackthonSeeder extends Seeder
             ['key' => 'member7', 'name' => 'Member7', 'role' => 'IT Member', 'dep' => 'IT', 'cap' => 'qa',       'rank' => 'Senior', 'basic' => 2_000_000, 'allow' => 0],
             ['key' => 'member8', 'name' => 'Member8', 'role' => 'IT Member', 'dep' => 'IT', 'cap' => 'backend',  'rank' => 'Senior', 'basic' => 2_000_000, 'allow' => 0],
             ['key' => 'member9', 'name' => 'Member9', 'role' => 'IT Member', 'dep' => 'IT', 'cap' => 'frontend', 'rank' => 'Senior', 'basic' => 2_000_000, 'allow' => 0],
-            ['key' => 'member10','name' => 'Member10','role' => 'Sales',     'dep' => 'Sales','cap' => 'pm',    'rank' => 'Mid',    'basic' => 1_000_000, 'allow' => 0],
-            ['key' => 'member11','name' => 'Member11','role' => 'HR',        'dep' => 'HR',   'cap' => 'pm',    'rank' => 'Mid',    'basic' => 1_000_000, 'allow' => 0],
-            ['key' => 'member12','name' => 'Member12','role' => 'HR',        'dep' => 'HR',   'cap' => 'pm',    'rank' => 'Junior', 'basic' => 700_000,   'allow' => 0],
+            ['key' => 'member10','name' => 'Member10','role' => 'Sales',     'dep' => 'Sales','cap' => 'pm',     'rank' => 'Mid',    'basic' => 1_000_000, 'allow' => 0],
+            ['key' => 'member11','name' => 'Member11','role' => 'HR',        'dep' => 'HR',   'cap' => 'pm',     'rank' => 'Mid',    'basic' => 1_000_000, 'allow' => 0],
+            ['key' => 'member12','name' => 'Member12','role' => 'HR',        'dep' => 'HR',   'cap' => 'pm',     'rank' => 'Junior', 'basic' => 700_000,   'allow' => 0],
         ];
 
         $employees = [];
@@ -300,18 +299,6 @@ class HackthonSeeder extends Seeder
         return $employees;
     }
 
-    /**
-     * One User per employee. app_role mapping:
-     *   - leader1            → Admin (the demo's "owner" account)
-     *   - leader2, leader3   → Executive (IT department leadership)
-     *   - IT Members         → Delivery (time-tracking / schedule pages)
-     *   - Sales member       → Sales
-     *   - HR members         → HR
-     * Email format: <employee_key>@brycenmyanmar.com.mm
-     * Password   : Demo@1234 for every account.
-     *
-     * @return array<string, User>  keyed by employee key for re-lookup
-     */
     private function createUsers(Tenant $tenant, array $employees): array
     {
         $appRoleByDept = [
@@ -373,17 +360,13 @@ class HackthonSeeder extends Seeder
 
     private function createCompanySettings(Tenant $tenant): void
     {
-        // Workbook constants:
-        //   - overhead 15% on salary
-        //   - sell = cost × 2  →  cost_to_bill_ratio = 0.50
-        //   - yearly target profit 120,000,000 MMK
         CompanySetting::create([
             'id' => $tenant->id,
             'tenant_id' => $tenant->id,
             'overhead_percentage' => self::OVERHEAD_PCT,
             'buffer_percentage' => 0,
             'yearly_fixed_cost' => 0,
-            'annual_initial_budget' => 120_000_000,
+            'annual_initial_budget' => 100_000_000,
             'employer_tax_percentage' => 0,
             'benefits_percentage' => 0,
             'cost_to_bill_ratio' => 1 / self::SELL_MULTIPLIER,
@@ -394,14 +377,10 @@ class HackthonSeeder extends Seeder
         InitialBudget::create([
             'tenant_id' => $tenant->id,
             'fiscal_year' => 2026,
-            'amount' => 120_000_000,
+            'amount' => 100_000_000,
         ]);
     }
 
-    /**
-     * Common skills used by the AI Team Builder + Estimation flow.
-     * Categories: Technical / Management.
-     */
     private function createSkills(Tenant $tenant): array
     {
         $rows = [
@@ -429,11 +408,6 @@ class HackthonSeeder extends Seeder
         return $out;
     }
 
-    /**
-     * Attach skill rows per employee. IT engineers get a stack-y
-     * mix; leaders get management skills; Sales/HR get a token
-     * "Client Relations" skill so they aren't empty.
-     */
     private function attachEmployeeSkills(Tenant $tenant, array $employees, array $skills): void
     {
         $matrix = [
@@ -470,13 +444,6 @@ class HackthonSeeder extends Seeder
         }
     }
 
-    /**
-     * Seed JP public holidays (元日, 建国記念の日, Happy Mondays,
-     * equinoxes) for the current year and the next two. Mirrors
-     * what JapanPublicHolidaysSeeder produces but scoped to this
-     * tenant only, so re-running the standalone seeder doesn't
-     * matter.
-     */
     private function seedJapanHolidays(Tenant $tenant): void
     {
         $currentYear = (int) date('Y');
@@ -511,7 +478,6 @@ class HackthonSeeder extends Seeder
                 );
             }
 
-            // Happy Monday national holidays.
             $monday = fn (int $month, int $occurrence) => Carbon::create($y, $month, 1)
                 ->modify(($occurrence).' monday')
                 ->toDateString();
@@ -527,7 +493,6 @@ class HackthonSeeder extends Seeder
                 );
             }
 
-            // Equinoxes (NAOJ table, 2024-2030 hardcoded).
             if (isset($equinox[$y])) {
                 Holiday::firstOrCreate(
                     ['tenant_id' => $tenant->id, 'date' => $y.'-'.$equinox[$y][0]],
@@ -544,102 +509,141 @@ class HackthonSeeder extends Seeder
     // ── Projects ───────────────────────────────────────────────────────
 
     /**
-     * S-Project1 — Jan–Jun 2026, 1 Leader + 3 Members. Sequential
-     * with S-Project2 (Jul–Dec) so no employee can be on both at
-     * once. Demonstrates the OT / over-budget scenario:
-     *   - ~150 OT hours spread Mar–Jun.
-     *   - OT absorbed by provider → ⑦ Profit Calculate subtracts cost.
+     * S-Project1: Wayne Enterprise chatbot sys — Jan–Aug 2026.
+     * Variable team: Jan 1L+2M, Feb–Jun 1L+3M, Jul–Aug 1L+2M.
+     * member3 (frontend) only works Feb–Jun (5 months, 800h).
      */
-    private function createSProject1(Tenant $tenant, array $employees, array $roles, User $admin, Carbon $yearStart): void
+    private function createWayneEnterprise(Tenant $tenant, array $employees, array $roles, User $admin, Carbon $yearStart, array $rankAvg): void
     {
-        $team = [
-            ['emp' => $employees['leader1'],  'role_code' => 'pm',      'feature' => 'Tech lead + delivery oversight', 'hours_per_month' => 160],
-            ['emp' => $employees['member1'],  'role_code' => 'backend', 'feature' => 'Core service implementation',     'hours_per_month' => 160],
-            ['emp' => $employees['member2'],  'role_code' => 'backend', 'feature' => 'Integration layer',               'hours_per_month' => 160],
-            ['emp' => $employees['member3'],  'role_code' => 'backend', 'feature' => 'QA + smoke testing',              'hours_per_month' => 160],
+        $coreTeam = [
+            ['emp' => $employees['leader1'], 'role_code' => 'pm',      'feature' => 'Tech lead + delivery oversight', 'hours_per_month' => 160, 'months' => 8],
+            ['emp' => $employees['member1'], 'role_code' => 'backend', 'feature' => 'Core backend services',          'hours_per_month' => 160, 'months' => 8],
+            ['emp' => $employees['member2'], 'role_code' => 'backend', 'feature' => 'Integration layer',              'hours_per_month' => 160, 'months' => 8],
         ];
-        $start = $yearStart->copy();
-        $end = $yearStart->copy()->addMonths(5)->endOfMonth(); // Jun 30
-        $months = 6;
-        $totalHours = $months * 4 * 160; // 3840 baseline hours
+        $extraMember = [
+            'emp' => $employees['member3'], 'role_code' => 'frontend', 'feature' => 'Frontend UI + chatbot interface', 'hours_per_month' => 160, 'months' => 5,
+        ];
+        $fullTeam = array_merge($coreTeam, [$extraMember]);
+
+        $start = $yearStart->copy(); // Jan 1
+        $end = $yearStart->copy()->addMonths(7)->endOfMonth(); // Aug 31
+        $months = 8;
+        $totalHours = (3 * 160 * 8) + (1 * 160 * 5); // 4640h
+
+        // Monthly team composition from sheet: Jan 1L+2M, Feb–Jun 1L+3M, Jul–Aug 1L+2M
+        $monthlyTeam = [
+            ['leaders' => 1, 'members' => 2], // Jan
+            ['leaders' => 1, 'members' => 3], // Feb
+            ['leaders' => 1, 'members' => 3], // Mar
+            ['leaders' => 1, 'members' => 3], // Apr
+            ['leaders' => 1, 'members' => 3], // May
+            ['leaders' => 1, 'members' => 3], // Jun
+            ['leaders' => 1, 'members' => 2], // Jul
+            ['leaders' => 1, 'members' => 2], // Aug
+        ];
+        $costs = $this->projectCosts($monthlyTeam, $rankAvg);
 
         $deal = $this->createWonDeal($tenant, [
-            'name' => 'S-Project1 (over-budget OT case)',
-            'client' => 'Customer Alpha',
-            'budget' => 162_616_572, // monthly_fee × 6
-            'monthly_fee' => 27_102_762,
+            'name' => 'Wayne Enterprise chatbot sys',
+            'client' => 'Wayne Enterprise',
+            'costs' => $costs,
+            'monthly_fee' => round($costs['total_income'] / $months, 0),
             'months' => $months,
             'workload_hours' => $totalHours,
-            'team' => $team,
+            'team' => $fullTeam,
             'start' => $start,
             'end' => $end,
-            'overheads' => [
-                ['name' => 'Cloud infra', 'cost' => 3_000_000],
-            ],
+            'overheads' => [],
             'ghost_roles' => [
-                ['role_type' => 'pm',      'quantity' => 1, 'months' => $months],
-                ['role_type' => 'backend', 'quantity' => 3, 'months' => $months],
+                ['role_type' => 'pm',       'quantity' => 1, 'months' => 8],
+                ['role_type' => 'backend',  'quantity' => 2, 'months' => 8],
+                ['role_type' => 'frontend', 'quantity' => 1, 'months' => 5],
             ],
-            'ot_policy' => 'absorbed_by_provider',
-            'ot_rate' => 35_000,
-            'ot_notes' => 'Provider absorbs all OT — profit takes the hit.',
+            'ot_policy' => 'no_overtime_allowed',
+            'ot_rate' => 0,
+            'ot_notes' => 'No OT planned.',
             'admin' => $admin,
         ]);
 
         [$contract, $project] = $this->createContractAndProject($tenant, $deal, $admin, [
-            'contract_number' => 'HACK-CON-2026-001',
-            'project_number' => 'HACK-PRJ-2026-101',
+            'contract_number' => 'V2-CON-2026-001',
+            'project_number' => 'V2-PRJ-2026-101',
             'budget_hours' => $totalHours,
         ]);
 
-        // Jan-Apr paid, May pending. (Today is 2026-05-18, project
-        // ends Jun so one invoice remains beyond today.)
-        $this->createMonthlyInvoices($tenant, $contract, $start, [
-            ['offset' => 0, 'amount' => 27_102_762, 'status' => 'Paid'],
-            ['offset' => 1, 'amount' => 27_102_762, 'status' => 'Paid'],
-            ['offset' => 2, 'amount' => 27_102_762, 'status' => 'Paid'],
-            ['offset' => 3, 'amount' => 27_102_762, 'status' => 'Paid'],
-            ['offset' => 4, 'amount' => 27_102_762, 'status' => 'Pending'],
+        foreach ($coreTeam as $member) {
+            ProjectTeamAssignment::create([
+                'tenant_id' => $tenant->id,
+                'project_id' => $project->id,
+                'employee_id' => $member['emp']->id,
+                'allocated_hours' => 160 * 8,
+                'assignment_source' => 'deal_transfer',
+            ]);
+        }
+        ProjectTeamAssignment::create([
+            'tenant_id' => $tenant->id,
+            'project_id' => $project->id,
+            'employee_id' => $extraMember['emp']->id,
+            'allocated_hours' => 160 * 5,
+            'assignment_source' => 'deal_transfer',
         ]);
 
-        // Team / time-entry / task-phase / progress-log seeding all
-        // rolled back per request — demoers walk through the AI
-        // Assign Team → AI Task Assignment → time-logging flows live.
+        // Invoice amounts derived from per-month income (cost × SELL_MULTIPLIER)
+        $today = Carbon::now()->startOfDay();
+        $invoiceRows = [];
+        foreach ($costs['monthly_costs'] as $m => $monthlyCost) {
+            $monthDate = $start->copy()->addMonths($m);
+            $isPast = $monthDate->copy()->endOfMonth()->lte($today);
+            $invoiceRows[] = [
+                'offset' => $m,
+                'amount' => round($monthlyCost * self::SELL_MULTIPLIER, 0),
+                'status' => $isPast ? 'Paid' : 'Pending',
+            ];
+        }
+        $this->createMonthlyInvoices($tenant, $contract, $start, $invoiceRows);
+
+        $this->createMonthlyTimeEntriesForTeam($tenant, $project, $admin, $fullTeam, $start, $months);
+
+        $this->seedScheduleHistory($tenant, $project, $coreTeam, $start, 8);
+        $extraStart = Carbon::create(2026, 2, 1);
+        $this->seedScheduleHistory($tenant, $project, [$extraMember], $extraStart, 5);
     }
 
     /**
-     * S-Project2 — Jul–Dec 2026, 1 Leader + 2 Members. Starts
-     * after S-Project1 ends so no team-overlap is possible.
-     * On plan, no OT, hasn't started yet as of today (May 18).
+     * S-Project2: Lux Luthor corporation ticket management sys — Mar–Dec 2026.
+     * Constant team: 1L + 2M for 10 months.
      */
-    private function createSProject2(Tenant $tenant, array $employees, array $roles, User $admin, Carbon $yearStart): void
+    private function createLuxLuthor(Tenant $tenant, array $employees, array $roles, User $admin, Carbon $yearStart, array $rankAvg): void
     {
         $team = [
-            ['emp' => $employees['leader2'], 'role_code' => 'pm',      'feature' => 'Tech lead', 'hours_per_month' => 160],
-            ['emp' => $employees['member4'], 'role_code' => 'backend', 'feature' => 'Backend services', 'hours_per_month' => 160],
-            ['emp' => $employees['member5'], 'role_code' => 'backend', 'feature' => 'Frontend + integration', 'hours_per_month' => 160],
+            ['emp' => $employees['leader2'], 'role_code' => 'pm',      'feature' => 'Tech lead + client governance', 'hours_per_month' => 160, 'months' => 10],
+            ['emp' => $employees['member4'], 'role_code' => 'backend', 'feature' => 'Ticket engine + API',           'hours_per_month' => 160, 'months' => 10],
+            ['emp' => $employees['member5'], 'role_code' => 'frontend','feature' => 'Dashboard + workflow UI',       'hours_per_month' => 160, 'months' => 10],
         ];
-        $start = $yearStart->copy()->addMonths(6); // July 1
-        $end = $yearStart->copy()->addMonths(11)->endOfMonth(); // Dec 31
-        $months = 6;
-        $totalHours = $months * 3 * 160; // 2880
+        $start = Carbon::create(2026, 3, 1);
+        $end = Carbon::create(2026, 12, 31);
+        $months = 10;
+        $totalHours = $months * 3 * 160; // 4800h
+
+        // 1L+2M constant for 10 months
+        $monthlyTeam = array_fill(0, $months, ['leaders' => 1, 'members' => 2]);
+        $costs = $this->projectCosts($monthlyTeam, $rankAvg);
 
         $deal = $this->createWonDeal($tenant, [
-            'name' => 'S-Project2 (on-plan)',
-            'client' => 'Customer Beta',
-            'budget' => 126_933_714, // monthly_fee × 6
-            'monthly_fee' => 21_155_619,
+            'name' => 'Lux Luthor corporation ticket management sys',
+            'client' => 'Lux Luthor Corporation',
+            'costs' => $costs,
+            'monthly_fee' => round($costs['total_income'] / $months, 0),
             'months' => $months,
             'workload_hours' => $totalHours,
             'team' => $team,
             'start' => $start,
             'end' => $end,
-            'overheads' => [
-                ['name' => 'Cloud infra', 'cost' => 2_000_000],
-            ],
+            'overheads' => [],
             'ghost_roles' => [
-                ['role_type' => 'pm',      'quantity' => 1, 'months' => $months],
-                ['role_type' => 'backend', 'quantity' => 2, 'months' => $months],
+                ['role_type' => 'pm',       'quantity' => 1, 'months' => $months],
+                ['role_type' => 'backend',  'quantity' => 1, 'months' => $months],
+                ['role_type' => 'frontend', 'quantity' => 1, 'months' => $months],
             ],
             'ot_policy' => 'no_overtime_allowed',
             'ot_rate' => 0,
@@ -648,55 +652,65 @@ class HackthonSeeder extends Seeder
         ]);
 
         [$contract, $project] = $this->createContractAndProject($tenant, $deal, $admin, [
-            'contract_number' => 'HACK-CON-2026-002',
-            'project_number' => 'HACK-PRJ-2026-102',
+            'contract_number' => 'V2-CON-2026-002',
+            'project_number' => 'V2-PRJ-2026-102',
             'budget_hours' => $totalHours,
         ]);
 
-        // Project starts Jul 1 — no invoices issued yet as of today
-        // (May 18). Contract status set to Signed, not Active, since
-        // the start_date is still in the future.
-        $contract->update(['status' => 'Signed']);
+        $this->createTeamAssignments($project, $team, $months);
 
-        // Team / task-phase / progress-log seeding all rolled back.
+        $today = Carbon::now()->startOfDay();
+        $invoiceRows = [];
+        foreach ($costs['monthly_costs'] as $m => $monthlyCost) {
+            $monthDate = $start->copy()->addMonths($m);
+            $isPast = $monthDate->copy()->endOfMonth()->lte($today);
+            $invoiceRows[] = [
+                'offset' => $m,
+                'amount' => round($monthlyCost * self::SELL_MULTIPLIER, 0),
+                'status' => $isPast ? 'Paid' : 'Pending',
+            ];
+        }
+        $this->createMonthlyInvoices($tenant, $contract, $start, $invoiceRows);
+
+        $this->createMonthlyTimeEntriesForTeam($tenant, $project, $admin, $team, $start, $months);
+        $this->seedScheduleHistory($tenant, $project, $team, $start, $months);
     }
 
     /**
-     * A-Project1 — Jul–Oct 2026, in negotiation. Has full
-     * estimation lock-in but no contract or project yet (the
-     * win_deal stored procedure would create those on win).
+     * A-Project1: Manchester United project — Jul–Oct 2026.
+     * Negotiation stage: deal + estimation only, no contract/project.
      */
-    private function createAProject1(Tenant $tenant, array $employees, array $roles, User $admin, Carbon $yearStart): void
+    private function createManchesterUnited(Tenant $tenant, array $employees, array $roles, User $admin, Carbon $yearStart, array $rankAvg): void
     {
         $team = [
-            ['emp' => $employees['leader3'], 'role_code' => 'pm',      'feature' => 'Tech lead', 'hours_per_month' => 160],
-            ['emp' => $employees['member6'], 'role_code' => 'backend', 'feature' => 'Backend services', 'hours_per_month' => 160],
-            ['emp' => $employees['member7'], 'role_code' => 'backend', 'feature' => 'API + testing', 'hours_per_month' => 160],
+            ['emp' => $employees['leader3'], 'role_code' => 'pm',      'feature' => 'Tech lead',       'hours_per_month' => 160, 'months' => 4],
+            ['emp' => $employees['member6'], 'role_code' => 'backend', 'feature' => 'Backend services', 'hours_per_month' => 160, 'months' => 4],
+            ['emp' => $employees['member7'], 'role_code' => 'qa',      'feature' => 'QA + testing',    'hours_per_month' => 160, 'months' => 4],
         ];
         $months = 4;
-        // Project window: 2026/7/1 → 2026/10/31. Anchor the deal's
-        // expected_close_date to 2026/6/30 so the implied kick-off
-        // date reads as "starts July 2026" on the detail page.
         $start = Carbon::create(2026, 7, 1);
-        $end = Carbon::create(2026, 10, 31);
+
+        // 1L+2M for 4 months
+        $monthlyTeam = array_fill(0, $months, ['leaders' => 1, 'members' => 2]);
+        $costs = $this->projectCosts($monthlyTeam, $rankAvg);
 
         $deal = Deal::create([
             'tenant_id' => $tenant->id,
-            'name' => 'A-Project1 (negotiation)',
-            'client' => 'Customer Gamma',
-            'contact_name' => 'Mr. Watanabe',
-            'contact_email' => 'watanabe@gamma.example.jp',
-            'contact_phone' => '+81 90 0000 0000',
-            'estimated_value' => 84_622_476,
+            'name' => 'Manchester United project',
+            'client' => 'Manchester United FC',
+            'contact_name' => 'Mr. Ferguson',
+            'contact_email' => 'ferguson@manutd.example.com',
+            'contact_phone' => '+44 161 000 0000',
+            'estimated_value' => $costs['total_income'],
             'win_probability' => 80,
             'status' => 'negotiation',
             'lifecycle_status' => 'active',
             'expected_close_date' => $start->copy()->subDay()->toDateString(),
             'lead_source' => 'inbound',
-            'client_budget' => 84_622_476,
+            'client_budget' => $costs['total_income'],
             'timeline_months' => $months,
             'workload_hours' => $months * 3 * 160,
-            'workload_description' => 'A-rank deal in negotiation. Project window: 2026/07 – 2026/10. Full estimation lock-in; ready to draft contract.',
+            'workload_description' => 'Fan engagement platform with match-day analytics, membership portal, and real-time notifications. Project window: 2026/07 – 2026/10.',
             'ot_policy_model' => 'customer_pays_per_hour',
             'ot_rate_per_hour' => 35_000,
             'ot_included_hours_per_month' => 0,
@@ -704,8 +718,13 @@ class HackthonSeeder extends Seeder
             'customer_support_obligations' => 'Customer provides test environment + sample data.',
             'out_of_scope_policy' => 'Hardware procurement out of scope.',
             'working_hours' => '09:00 – 18:00 Mon–Fri JST',
-            'testing_range' => 'Browser: Chrome + Edge latest. Mobile: not in scope.',
+            'testing_range' => 'Browser: Chrome + Edge latest.',
             'target_margin' => 50,
+            'base_labor_cost' => $costs['base_labor'],
+            'overhead_cost' => $costs['overhead'],
+            'buffer_cost' => 0,
+            'total_estimated_cost' => $costs['total_cost'],
+            'estimated_gross_profit' => $costs['profit'],
             'final_monthly_fee' => 21_155_619,
             'final_installation_fee' => 0,
             'final_contract_months' => $months,
@@ -719,126 +738,110 @@ class HackthonSeeder extends Seeder
 
         $this->seedDealChildren($tenant, $deal, $team, $roles, [
             ['role_type' => 'pm',      'quantity' => 1, 'months' => $months],
-            ['role_type' => 'backend', 'quantity' => 2, 'months' => $months],
-        ], [
-            ['name' => 'Cloud infra reserve', 'cost' => 1_500_000],
-        ], $admin);
+            ['role_type' => 'backend', 'quantity' => 1, 'months' => $months],
+            ['role_type' => 'qa',      'quantity' => 1, 'months' => $months],
+        ], [], $admin);
     }
 
     /**
-     * B-Project1 — Oct–Dec 2026, qualified. Estimation rows
-     * + ghost roles present but no final_* lock-in yet.
+     * B-Project1: Arsenal Fc project — Oct–Dec 2026.
+     * Qualified stage: deal + estimation only.
      */
-    private function createBProject1(Tenant $tenant, array $employees, array $roles, User $admin, Carbon $yearStart): void
+    private function createArsenalFc(Tenant $tenant, array $employees, array $roles, User $admin, Carbon $yearStart, array $rankAvg): void
     {
         $team = [
-            ['emp' => $employees['leader3'], 'role_code' => 'pm',      'feature' => 'Tech lead', 'hours_per_month' => 160],
-            ['emp' => $employees['member8'], 'role_code' => 'backend', 'feature' => 'Backend services', 'hours_per_month' => 160],
-            ['emp' => $employees['member9'], 'role_code' => 'backend', 'feature' => 'API + integration', 'hours_per_month' => 160],
+            ['emp' => $employees['leader3'], 'role_code' => 'pm',       'feature' => 'Tech lead',         'hours_per_month' => 160, 'months' => 3],
+            ['emp' => $employees['member8'], 'role_code' => 'backend',  'feature' => 'Backend services',   'hours_per_month' => 160, 'months' => 3],
+            ['emp' => $employees['member9'], 'role_code' => 'frontend', 'feature' => 'Frontend + mobile',  'hours_per_month' => 160, 'months' => 3],
         ];
         $months = 3;
-        // Project window: 2026/10/1 → 2026/12/31. Close window is
-        // roughly mid-Sept so it reads as "starts October 2026".
         $start = Carbon::create(2026, 10, 1);
-        $end = Carbon::create(2026, 12, 31);
+
+        // 1L+2M for 3 months
+        $monthlyTeam = array_fill(0, $months, ['leaders' => 1, 'members' => 2]);
+        $costs = $this->projectCosts($monthlyTeam, $rankAvg);
 
         $deal = Deal::create([
             'tenant_id' => $tenant->id,
-            'name' => 'B-Project1 (qualified)',
-            'client' => 'Customer Delta',
-            'contact_name' => 'Ms. Tanaka',
-            'contact_email' => 'tanaka@delta.example.jp',
-            'contact_phone' => '+81 90 1111 1111',
-            'estimated_value' => 63_466_857,
+            'name' => 'Arsenal Fc project',
+            'client' => 'Arsenal Football Club',
+            'contact_name' => 'Ms. Wenger',
+            'contact_email' => 'wenger@arsenal.example.com',
+            'contact_phone' => '+44 20 0000 0000',
+            'estimated_value' => $costs['total_income'],
             'win_probability' => 50,
             'status' => 'qualified',
             'lifecycle_status' => 'active',
-            'expected_close_date' => $start->copy()->subDays(15)->toDateString(),
+            'expected_close_date' => $start->copy()->subDay()->toDateString(),
             'lead_source' => 'referral',
-            'client_budget' => 63_466_857,
+            'client_budget' => $costs['total_income'],
             'timeline_months' => $months,
             'workload_hours' => $months * 3 * 160,
-            'workload_description' => 'B-rank deal — qualified. Project window: 2026/10 – 2026/12. Initial estimation done; final terms TBD.',
+            'workload_description' => 'Training analytics dashboard and scouting database. Project window: 2026/10 – 2026/12.',
             'ot_policy_model' => 'customer_pays_per_hour',
             'ot_rate_per_hour' => 35_000,
             'ot_included_hours_per_month' => 0,
             'ot_notes' => 'All OT billable.',
             'working_hours' => '09:00 – 18:00 Mon–Fri JST',
             'target_margin' => 50,
+            'base_labor_cost' => $costs['base_labor'],
+            'overhead_cost' => $costs['overhead'],
+            'buffer_cost' => 0,
+            'total_estimated_cost' => $costs['total_cost'],
+            'estimated_gross_profit' => $costs['profit'],
             'wizard_step' => 'complete',
         ]);
 
         $this->seedDealChildren($tenant, $deal, $team, $roles, [
-            ['role_type' => 'pm',      'quantity' => 1, 'months' => $months],
-            ['role_type' => 'backend', 'quantity' => 2, 'months' => $months],
-        ], [
-            ['name' => 'Cloud infra reserve', 'cost' => 1_000_000],
-        ], $admin);
+            ['role_type' => 'pm',       'quantity' => 1, 'months' => $months],
+            ['role_type' => 'backend',  'quantity' => 1, 'months' => $months],
+            ['role_type' => 'frontend', 'quantity' => 1, 'months' => $months],
+        ], [], $admin);
     }
 
+    // ── Schedule history (on-track pattern) ───────────────────────────
+
     /**
-     * Seed task + phase assignments + progress logs so the Schedule
-     * Tracking page renders realistic history for each won project.
-     *
-     * Key invariants:
-     *   - Weekly progress hours are pinned to the PLANNED weekly
-     *     rate (phaseHours / plannedWeeks). This keeps "Progress
-     *     Status" (= progress − expected) near 0 instead of running
-     *     1000+ hours ahead because we'd been front-loading the
-     *     whole phase across the elapsed period.
-     *   - OT is injected as `used_hours > progress_hours` excess on
-     *     the Implementation phase, divided across the most recent
-     *     ~6 weekly logs. So Extra Hours == Σ max(0, used - progress)
-     *     surfaces the project-level OT total on the rollup card.
-     *
-     * @param  float  $otHoursPerMember  total OT hours each team member
-     *                                   should accumulate via excess
-     *                                   `used_hours`. For S-Project1
-     *                                   pass 50 (= 200h ÷ 4 members).
+     * Seed task → phase → progress log hierarchy for a set of team members.
+     * All progress is on-track: used_hours = progress_hours, zero late_hours.
      */
-    private function seedScheduleHistory(
-        Tenant $tenant,
-        Project $project,
-        array $team,
-        Carbon $start,
-        int $months,
-        float $otHoursPerMember = 0,
-    ): void {
+    private function seedScheduleHistory(Tenant $tenant, Project $project, array $team, Carbon $start, int $months): void
+    {
         $today = Carbon::now()->startOfDay();
         $totalWorkdays = max(1, (int) round($months * 20));
 
         $phaseTemplate = [
-            // phase_code must match Postgres CHECK constraint check_ptpa_phase_code:
-            // development | requirement | system_arch | basic_doc | detail_doc |
-            // unit_test | combine_test | system_test
-            ['code' => 'basic_doc',   'name' => '設計 (Design)',          'pct' => 0.10],
-            ['code' => 'development', 'name' => '実装 (Implementation)',  'pct' => 0.70],
-            ['code' => 'system_test', 'name' => 'テスト (Testing)',       'pct' => 0.20],
+            ['code' => 'basic_doc',   'name' => '設計 (Design)',         'pct' => 0.10],
+            ['code' => 'development', 'name' => '実装',                  'pct' => 0.70],
+            ['code' => 'system_test', 'name' => 'テスト (Testing)',      'pct' => 0.20],
         ];
+
+        $existingTaskCount = ProjectTaskAssignment::where('project_id', $project->id)->count();
 
         foreach ($team as $idx => $member) {
             $employee = $member['emp'];
-            $allocated = $member['hours_per_month'] * $months;
+            $memberMonths = $member['months'] ?? $months;
+            $allocated = $member['hours_per_month'] * $memberMonths;
 
             $task = ProjectTaskAssignment::create([
                 'tenant_id' => $tenant->id,
                 'project_id' => $project->id,
-                'row_no' => $idx + 1,
-                'function_id' => 'F'.str_pad((string) ($idx + 1), 3, '0', STR_PAD_LEFT),
+                'row_no' => $existingTaskCount + $idx + 1,
+                'function_id' => 'F'.str_pad((string) ($existingTaskCount + $idx + 1), 3, '0', STR_PAD_LEFT),
                 'function_name' => $member['feature'],
                 'category' => 'Implementation',
                 'offshore' => false,
-                // CHECK constraint on Postgres requires Japanese values:
-                // '簡単' (easy), '普通' (normal), '難しい' (hard).
                 'difficulty' => '普通',
                 'total_hours' => $allocated,
             ]);
 
+            $memberWorkdays = max(1, (int) round($memberMonths * 20));
             $cursor = $start->copy();
+
             foreach ($phaseTemplate as $order => $phase) {
                 $phaseHours = round($allocated * $phase['pct'], 1);
-                $phaseWorkdays = max(1, (int) round($totalWorkdays * $phase['pct']));
-                $phaseCalendarDays = (int) ceil($phaseWorkdays * 7 / 5); // 5 workdays → 7 cal-days
+                $phaseWorkdays = max(1, (int) round($memberWorkdays * $phase['pct']));
+                $phaseCalendarDays = (int) ceil($phaseWorkdays * 7 / 5);
                 $phaseStart = $cursor->copy();
                 $phaseEnd = $cursor->copy()->addDays($phaseCalendarDays)->subDay();
 
@@ -859,7 +862,6 @@ class HackthonSeeder extends Seeder
                     'estimated_hours' => $phaseHours,
                     'start_day_hours' => 8,
                     'assignee_id' => $employee->id,
-                    // CHECK constraint check_ptpa_source allows only 'ai' | 'manual'.
                     'assignment_source' => 'manual',
                     'planned_start' => $phaseStart->toDateString(),
                     'planned_end' => $phaseEnd->toDateString(),
@@ -873,59 +875,35 @@ class HackthonSeeder extends Seeder
                     continue;
                 }
 
-                // Distribute progress at the PLANNED weekly rate so an
-                // in-progress phase shows progress matching elapsed time.
                 $plannedWeeks = max(1, (int) ceil($phaseStart->diffInDays($phaseEnd) / 7));
                 $weeklyPlanned = round($phaseHours / $plannedWeeks, 2);
 
                 $endLog = $actualEnd ?? $today;
                 $loggedHours = 0;
                 $logCursor = $phaseStart->copy();
-                $createdLogs = [];
 
                 while ($logCursor->lte($endLog) && $loggedHours < $phaseHours) {
-                    $logDate = $logCursor->copy()->addDays(4); // Fri
+                    $logDate = $logCursor->copy()->addDays(4); // Friday
                     if ($logDate->gt($endLog)) {
                         $logDate = $endLog->copy();
                     }
-                    $hours = min($weeklyPlanned, $phaseHours - $loggedHours);
+                    $hours = min($weeklyPlanned, round($phaseHours - $loggedHours, 2));
                     if ($hours <= 0) {
                         break;
                     }
-                    $createdLogs[] = PhaseProgressLog::create([
+
+                    PhaseProgressLog::create([
                         'tenant_id' => $tenant->id,
                         'phase_assignment_id' => $phaseAssignment->id,
                         'employee_id' => $employee->id,
                         'log_date' => $logDate->toDateString(),
                         'progress_hours' => $hours,
                         'used_hours' => $hours,
+                        'late_hours' => 0,
                         'note' => 'Weekly progress',
                     ]);
                     $loggedHours += $hours;
                     $logCursor->addDays(7);
-                }
-
-                // Inject OT as excess `used_hours` on the Implementation
-                // phase. Spread over the most recent few weekly logs so
-                // it lines up with the Apr/May OT bursts.
-                if ($otHoursPerMember > 0 && $phase['code'] === 'IMPL' && count($createdLogs) > 0) {
-                    $applyToLast = min(count($createdLogs), 6);
-                    $perLog = round($otHoursPerMember / $applyToLast, 2);
-                    $remaining = $otHoursPerMember;
-                    for ($i = count($createdLogs) - $applyToLast; $i < count($createdLogs); $i++) {
-                        if ($i < 0) {
-                            continue;
-                        }
-                        $share = $i === count($createdLogs) - 1
-                            ? round($remaining, 2) // last log absorbs any rounding drift
-                            : $perLog;
-                        $log = $createdLogs[$i];
-                        $log->update([
-                            'used_hours' => round($log->used_hours + $share, 2),
-                            'note' => 'Weekly progress + OT',
-                        ]);
-                        $remaining -= $share;
-                    }
                 }
 
                 $cursor = $phaseEnd->copy()->addDay();
@@ -935,33 +913,28 @@ class HackthonSeeder extends Seeder
 
     // ── Helpers ────────────────────────────────────────────────────────
 
-    /**
-     * Build a won deal with its ghost roles, hard assignments,
-     * estimation resources, deal overheads, and a snapshot
-     * EstimationVersion. Contract + Project are created separately.
-     */
     private function createWonDeal(Tenant $tenant, array $opts): Deal
     {
         $team = $opts['team'];
-        $rollup = $this->rollupCosts($team, $opts['months'], $opts['budget']);
+        $costs = $opts['costs'];
 
         $deal = Deal::create([
             'tenant_id' => $tenant->id,
             'name' => $opts['name'],
             'client' => $opts['client'],
             'contact_name' => 'Demo Contact',
-            'contact_email' => 'contact@'.\Illuminate\Support\Str::slug($opts['client']).'.example.jp',
+            'contact_email' => 'contact@'.\Illuminate\Support\Str::slug($opts['client']).'.example.com',
             'contact_phone' => '+81 90 0000 0000',
-            'estimated_value' => $opts['budget'],
+            'estimated_value' => $costs['total_income'],
             'win_probability' => 100,
             'status' => 'won',
             'lifecycle_status' => 'active',
             'expected_close_date' => $opts['start']->copy()->subDays(7)->toDateString(),
             'lead_source' => 'partner',
-            'client_budget' => $opts['budget'],
+            'client_budget' => $costs['total_income'],
             'timeline_months' => $opts['months'],
             'workload_hours' => $opts['workload_hours'],
-            'workload_description' => $opts['name'].' — won-deal demo for the hackathon system flow.',
+            'workload_description' => $opts['name'].' — won-deal demo (V2 seeder).',
             'ot_policy_model' => $opts['ot_policy'],
             'ot_rate_per_hour' => $opts['ot_rate'],
             'ot_included_hours_per_month' => 0,
@@ -971,11 +944,11 @@ class HackthonSeeder extends Seeder
             'working_hours' => '09:00 – 18:00 Mon–Fri JST',
             'testing_range' => 'Browser: Chrome + Edge latest.',
             'target_margin' => 50,
-            'base_labor_cost' => $rollup['labor'],
-            'overhead_cost' => $rollup['overhead'],
+            'base_labor_cost' => $costs['base_labor'],
+            'overhead_cost' => $costs['overhead'],
             'buffer_cost' => 0,
-            'total_estimated_cost' => $rollup['total'],
-            'estimated_gross_profit' => $rollup['profit'],
+            'total_estimated_cost' => $costs['total_cost'],
+            'estimated_gross_profit' => $costs['profit'],
             'final_monthly_fee' => $opts['monthly_fee'],
             'final_installation_fee' => 0,
             'final_contract_months' => $opts['months'],
@@ -1000,9 +973,6 @@ class HackthonSeeder extends Seeder
     private function createContractAndProject(Tenant $tenant, Deal $deal, User $admin, array $opts): array
     {
         $start = Carbon::parse($deal->expected_close_date)->addDays(7);
-        // Span exactly N months — last day is endOfMonth of the
-        // Nth month (so a 6-month project starting Jan 1 ends Jun 30,
-        // not Jul 31 from a naive addMonths(N)).
         $end = $start->copy()->addMonths($deal->timeline_months - 1)->endOfMonth();
 
         $contract = Contract::create([
@@ -1018,7 +988,7 @@ class HackthonSeeder extends Seeder
             'signed_at' => $start->copy()->subDay(),
             'payment_terms_days' => 7,
             'currency' => 'MMK',
-            'notes' => 'Hackathon demo contract.',
+            'notes' => 'V2 demo contract.',
         ]);
 
         $project = Project::create([
@@ -1041,11 +1011,12 @@ class HackthonSeeder extends Seeder
     private function createTeamAssignments(Project $project, array $team, int $months): void
     {
         foreach ($team as $member) {
+            $memberMonths = $member['months'] ?? $months;
             ProjectTeamAssignment::create([
                 'tenant_id' => $project->tenant_id,
                 'project_id' => $project->id,
                 'employee_id' => $member['emp']->id,
-                'allocated_hours' => $member['hours_per_month'] * $months,
+                'allocated_hours' => $member['hours_per_month'] * $memberMonths,
                 'assignment_source' => 'deal_transfer',
             ]);
         }
@@ -1068,6 +1039,7 @@ class HackthonSeeder extends Seeder
                 'due_date' => $due->toDateString(),
                 'amount' => $row['amount'],
                 'tax' => 0,
+                'paid_amount' => $row['status'] === 'Paid' ? $row['amount'] : 0,
                 'status' => $row['status'],
                 'paid_at' => $paid,
                 'notes' => 'Monthly fee — '.$issue->format('Y/m'),
@@ -1081,58 +1053,65 @@ class HackthonSeeder extends Seeder
     }
 
     /**
-     * Approved time entries for each member per month. Each row in
-     * $months is { month_offset, percent (0..1), ot_hours_per_member }.
-     * One time entry per (member, month) summarising hours, plus a
-     * separate row for OT when present.
+     * Create monthly time entries for each team member for elapsed months.
+     * Each member gets one Approved entry per elapsed month at 160h.
      */
-    private function createMonthlyTimeEntries(Tenant $tenant, Project $project, User $admin, array $team, array $months, Carbon $start): void
+    private function createMonthlyTimeEntriesForTeam(Tenant $tenant, Project $project, User $admin, array $team, Carbon $start, int $projectMonths): void
     {
+        $today = Carbon::now()->startOfDay();
         $totalApproved = 0;
-        foreach ($months as $row) {
-            $monthDate = $start->copy()->addMonths($row['month_offset']);
-            $logDate = $monthDate->copy()->endOfMonth();
-            if ($logDate->isFuture()) {
-                $logDate = Carbon::now();
+
+        foreach ($team as $member) {
+            $memberMonths = $member['months'] ?? $projectMonths;
+            $memberStart = $start->copy();
+
+            // For Wayne Enterprise extra member (5 months starting Feb)
+            if ($memberMonths < $projectMonths) {
+                $offset = $projectMonths - $memberMonths;
+                // member3 starts from Feb if project starts Jan and they have 5 months
+                // Find the offset: total 8 months, member has 5, starts at month index 1 (Feb)
+                $memberStart = $start->copy()->addMonths(1); // Feb for the 5-month member
             }
-            $normalHours = round(160 * $row['percent'], 1);
-            foreach ($team as $member) {
-                if ($normalHours > 0) {
-                    TimeEntry::create([
-                        'tenant_id' => $tenant->id,
-                        'project_id' => $project->id,
-                        'employee_id' => $member['emp']->id,
-                        'approved_by' => $admin->id,
-                        'task' => $monthDate->format('Y/m').' — '.$member['feature'],
-                        'date' => $logDate->toDateString(),
-                        'hours' => $normalHours,
-                        'billable' => true,
-                        'status' => 'Approved',
-                        'approved_at' => $logDate->copy()->addDay(),
-                    ]);
-                    $totalApproved += $normalHours;
+
+            for ($m = 0; $m < $memberMonths; $m++) {
+                $monthDate = $memberStart->copy()->addMonths($m);
+                $logDate = $monthDate->copy()->endOfMonth();
+
+                if ($logDate->gt($today)) {
+                    if ($monthDate->month === $today->month && $monthDate->year === $today->year) {
+                        $logDate = $today->copy();
+                        $dayOfMonth = $today->day;
+                        $daysInMonth = $today->daysInMonth;
+                        $hours = round(160 * ($dayOfMonth / $daysInMonth), 1);
+                    } else {
+                        break;
+                    }
+                } else {
+                    $hours = 160;
                 }
-                if ($row['ot_hours_per_member'] > 0) {
-                    TimeEntry::create([
-                        'tenant_id' => $tenant->id,
-                        'project_id' => $project->id,
-                        'employee_id' => $member['emp']->id,
-                        'approved_by' => $admin->id,
-                        'task' => $monthDate->format('Y/m').' — OT: '.$member['feature'],
-                        'date' => $logDate->toDateString(),
-                        'hours' => $row['ot_hours_per_member'],
-                        'billable' => true,
-                        'status' => 'Approved',
-                        'approved_at' => $logDate->copy()->addDay(),
-                        'notes' => 'Overtime — absorbed by provider.',
-                    ]);
-                    $totalApproved += $row['ot_hours_per_member'];
+
+                if ($hours <= 0) {
+                    continue;
                 }
+
+                TimeEntry::create([
+                    'tenant_id' => $tenant->id,
+                    'project_id' => $project->id,
+                    'employee_id' => $member['emp']->id,
+                    'approved_by' => $admin->id,
+                    'task' => $monthDate->format('Y/m').' — '.$member['feature'],
+                    'date' => $logDate->toDateString(),
+                    'hours' => $hours,
+                    'billable' => true,
+                    'status' => 'Approved',
+                    'approved_at' => $logDate->copy()->addDay(),
+                ]);
+                $totalApproved += $hours;
             }
         }
+
         $project->update(['consumed_hours' => $totalApproved]);
 
-        // Re-derive project status from consumed vs budget.
         $contract = $project->contract;
         $newStatus = $project->computeAutoStatus(
             (float) $project->budget_hours,
@@ -1144,29 +1123,55 @@ class HackthonSeeder extends Seeder
         }
     }
 
-    private function rollupCosts(array $team, int $months, float $clientBudget): array
+    /**
+     * Compute rank-average monthly costPrices from all employees.
+     * Matches the spreadsheet formula:
+     *   Leader avg = SUM(leader costPrices) / leader_count
+     *   Member avg = SUM(IT-member costPrices) / MEMBER_COST_DIVISOR
+     * where costPrice = monthly_salary × (1 + overhead%).
+     */
+    private function computeRankAverages(array $employees): array
     {
-        $labor = 0.0;
-        foreach ($team as $member) {
-            $emp = $member['emp'];
-            $monthly = (float) $emp->monthly_salary;
-            $labor += $monthly * $months * 1.0; // one full month per member per month
-        }
-        $overhead = $labor * (self::OVERHEAD_PCT / 100);
-        $total = $labor + $overhead;
+        $overhead = 1 + self::OVERHEAD_PCT / 100;
+
+        $leaders = collect($employees)->filter(fn ($e) => str_contains($e->role_name ?? '', 'Leader'));
+        $members = collect($employees)->filter(fn ($e) => ($e->role_name ?? '') === 'IT Member');
 
         return [
-            'labor' => round($labor, 2),
-            'overhead' => round($overhead, 2),
-            'total' => round($total, 2),
-            'profit' => round($clientBudget - $total, 2),
+            'leader' => $leaders->avg(fn ($e) => $e->monthly_salary * $overhead),
+            'member' => $members->sum(fn ($e) => $e->monthly_salary * $overhead) / self::MEMBER_COST_DIVISOR,
         ];
     }
 
     /**
-     * Writes ghost roles, hard assignments, estimation resources,
-     * deal overheads, and a baseline EstimationVersion snapshot.
+     * Compute project financials from a monthly team composition array.
+     * Each entry: ['leaders' => N, 'members' => M].
+     * Returns the full cost breakdown for the deal fields.
      */
+    private function projectCosts(array $monthlyTeam, array $rankAvg): array
+    {
+        $totalCost = 0;
+        foreach ($monthlyTeam as $month) {
+            $totalCost += ($month['leaders'] * $rankAvg['leader'])
+                        + ($month['members'] * $rankAvg['member']);
+        }
+        $totalIncome = $totalCost * self::SELL_MULTIPLIER;
+        $baseLaborCost = $totalCost / (1 + self::OVERHEAD_PCT / 100);
+        $overhead = $totalCost - $baseLaborCost;
+
+        return [
+            'total_cost'   => round($totalCost, 2),
+            'total_income'  => round($totalIncome, 2),
+            'base_labor'    => round($baseLaborCost, 2),
+            'overhead'      => round($overhead, 2),
+            'profit'        => round($totalIncome - $totalCost, 2),
+            'monthly_costs' => array_map(fn ($m) => round(
+                ($m['leaders'] * $rankAvg['leader']) + ($m['members'] * $rankAvg['member']),
+                2
+            ), $monthlyTeam),
+        ];
+    }
+
     private function seedDealChildren(
         Tenant $tenant,
         Deal $deal,
@@ -1191,26 +1196,24 @@ class HackthonSeeder extends Seeder
         }
 
         foreach ($team as $member) {
+            $memberMonths = $member['months'] ?? $deal->timeline_months;
             DealHardAssignment::create([
                 'tenant_id' => $tenant->id,
                 'deal_id' => $deal->id,
                 'employee_id' => $member['emp']->id,
-                'allocated_hours' => $member['hours_per_month'] * $deal->timeline_months,
+                'allocated_hours' => $member['hours_per_month'] * $memberMonths,
             ]);
         }
 
         foreach ($team as $member) {
-            // Both columns hold the Role UUID — the frontend's estimation
-            // simulator resolves `role_id` against the /roles list, so a
-            // capacity code (e.g. 'pm'/'backend') here would render as
-            // 'Unknown Role'.
+            $memberMonths = $member['months'] ?? $deal->timeline_months;
             EstimationResource::create([
                 'tenant_id' => $tenant->id,
                 'deal_id' => $deal->id,
                 'job_role_id' => $member['emp']->job_role_id,
                 'role_id' => $member['emp']->job_role_id,
                 'feature_name' => $member['feature'],
-                'hours' => $member['hours_per_month'] * $deal->timeline_months,
+                'hours' => $member['hours_per_month'] * $memberMonths,
                 'employee_id' => $member['emp']->id,
             ]);
         }
@@ -1231,7 +1234,7 @@ class HackthonSeeder extends Seeder
             'resources' => array_map(fn ($m) => [
                 'roleId' => $m['emp']->job_role_id,
                 'featureName' => $m['feature'],
-                'hours' => $m['hours_per_month'] * $deal->timeline_months,
+                'hours' => $m['hours_per_month'] * ($m['months'] ?? $deal->timeline_months),
                 'employeeId' => $m['emp']->id,
             ], $team),
             'overheads' => array_map(fn ($o) => [
@@ -1239,7 +1242,7 @@ class HackthonSeeder extends Seeder
                 'cost' => $o['cost'],
             ], $overheads),
             'target_margin' => $deal->target_margin,
-            'notes' => 'Seeded estimate — Hackathon demo.',
+            'notes' => 'Seeded estimate — V2 demo.',
             'created_by' => $admin->id,
             'created_at' => $deal->created_at?->copy()->subDays(7) ?? Carbon::now()->subDays(7),
         ]);

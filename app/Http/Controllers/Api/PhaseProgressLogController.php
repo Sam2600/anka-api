@@ -26,7 +26,7 @@ class PhaseProgressLogController extends Controller
         $tenantId = app('tenant_id');
 
         $validated = $request->validate([
-            'log_date'       => 'sometimes|date',
+            'log_date'       => 'sometimes|date|before_or_equal:today',
             'progress_hours' => 'required|numeric|min:0',
             'used_hours'     => 'required|numeric|min:0',
             'note'           => 'nullable|string|max:2000',
@@ -91,7 +91,7 @@ class PhaseProgressLogController extends Controller
         }
 
         $validated = $request->validate([
-            'log_date'       => 'sometimes|date',
+            'log_date'       => 'sometimes|date|before_or_equal:today',
             'progress_hours' => 'sometimes|numeric|min:0',
             'used_hours'     => 'sometimes|numeric|min:0',
             'note'           => 'nullable|string|max:2000',
