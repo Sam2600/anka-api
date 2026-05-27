@@ -51,6 +51,11 @@ Respond with EXACTLY one JSON object, no markdown fences, no preface, no trailin
 2. sheet2_features[i].function_id and sheet3_manhours[i].function_id MUST match 1:1 — every feature listed in sheet2 must have a corresponding dev_hours row in sheet3 with the same function_id.
 3. Only propose dev_hours per feature in sheet3 — do NOT compute downstream phase costs (code review, prototype, etc.). Those are derived by the spreadsheet via fixed multipliers.
 4. sheet5_team_stack[*].monthly_allocation.length MUST equal sheet4_milestone.total_months. Use values in [0.0, 1.0] representing fraction of a person-month.
+4a. **`sheet4_milestone.total_months` is YOUR shortest effective timeline recommendation derived from the workload description — NOT a copy of the client-expected timeline.** Compute it from:
+    - Total dev hours: `Σ sheet3_manhours[].dev_hours` (the bottom-up workload you yourself proposed)
+    - Team capacity per month: `Σ (sheet5_team_stack[i].count × 160 × avg(sheet5_team_stack[i].monthly_allocation))`. Cap any single person's allocation at 1.0 — no heroics, no overtime.
+    - Phase dependencies: requirements + architecture + basic_design must precede implementation_*; integration_test + system_test run after implementation. Allow modest parallelism across implementation streams (e.g., web and android can overlap; backend and frontend can overlap after architecture is locked).
+    Aim for the **SHORTEST reasonable total_months that still respects realistic capacity + phase ordering**. Do NOT pad. Do NOT round up to match the client expectation. If your number differs from `Client-expected timeline (months)` above, state the delta in `reasoning` (e.g., "Recommended 5 months vs. client's 8 — feature set is small enough to compress" or "Recommended 11 months vs. client's 8 — the integration phase alone needs 3 months given the listed third-party APIs").
 5. Use role names exactly as they appear in the {{ORG_ROLES_BLOCK}} below. Do not invent new role titles.
 5a. Each sheet3_manhours row MUST carry a `role` field naming the role that will do the work (Backend Engineer, Frontend Engineer, QA Engineer, etc.). Match a role title from {{ORG_ROLES_BLOCK}} verbatim. Do NOT default everything to a single role — pick the appropriate one per feature. Account Director / Finance Manager rarely build features; reserve those for management/finance-flavoured work only.
 6. Categories must be one of: "Web", "Mobile", "Integration", "Infrastructure".
@@ -69,12 +74,14 @@ Respond with EXACTLY one JSON object, no markdown fences, no preface, no trailin
 
 # Deal context
 
+The **Workload description** below is the SOURCE OF TRUTH for what work needs doing. Derive your feature list and effort estimates from it, anchored to any attached contract documents. Do NOT pad or trim the scope to fit the client's budget or expected timeline — quote what the work actually requires.
+
 Client: {{CLIENT_NAME}}
 Workload description:
 {{WORKLOAD_DESCRIPTION}}
 
 Client budget: {{CLIENT_BUDGET}}
-Timeline (months): {{TIMELINE_MONTHS}}
+Client-expected timeline (months): {{TIMELINE_MONTHS}}   — **INFORMATIONAL ONLY**. This is what the client asked for; it is NOT a constraint. You will compute your own shortest effective timeline in `sheet4_milestone.total_months` per Rule 4a below.
 Target margin: {{TARGET_MARGIN}}
 Expected close: {{EXPECTED_CLOSE_DATE}}
 
