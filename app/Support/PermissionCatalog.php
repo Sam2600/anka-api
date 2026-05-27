@@ -40,6 +40,8 @@ class PermissionCatalog
             ['key' => 'manage_projects',    'group' => 'Projects',      'label' => 'Manage Projects',         'description' => 'Edit project metadata, kickoff dates, and team assignments.'],
             ['key' => 'view_schedule_tracking', 'group' => 'Projects',  'label' => 'View Schedule Tracking',  'description' => 'See per-phase progress vs plan and the schedule-tracking dashboards.'],
             ['key' => 'track_time',         'group' => 'Projects',      'label' => 'Track Time',              'description' => 'Log time entries against active projects.'],
+            ['key' => 'approve_time',       'group' => 'Projects',      'label' => 'Approve Time',            'description' => 'Approve, reject, or unlock submitted time entries.'],
+            ['key' => 'log_progress',       'group' => 'Projects',      'label' => 'Log Phase Progress',      'description' => 'Record daily phase progress against assigned work.'],
 
             // Organization
             ['key' => 'manage_organization','group' => 'Organization',  'label' => 'Manage Organization',     'description' => 'Edit departments, capacity roles, and global overheads.'],
