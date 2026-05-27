@@ -16,6 +16,9 @@ class DealResource extends JsonResource
             'contact_name' => $this->contact_name,
             'contact_email' => $this->contact_email,
             'contact_phone' => $this->contact_phone,
+            // Captured at deal entry; rendered in the Invoice XLSX "To,"
+            // block below the customer name. Free-text, multi-line.
+            'customer_address' => $this->customer_address,
             'estimated_value' => $this->estimated_value,
             'win_probability' => $this->win_probability,
             'status' => $this->status,

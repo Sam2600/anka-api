@@ -34,6 +34,9 @@ class TenantController extends Controller
             'name' => 'sometimes|required|string|max:255',
             'signatory_name' => 'sometimes|nullable|string|max:255',
             'signatory_title' => 'sometimes|nullable|string|max:255',
+            // Invoice XLSX export reads these for the company block.
+            'address' => 'sometimes|nullable|string|max:1000',
+            'phone' => 'sometimes|nullable|string|max:50',
             'tax_rate' => 'sometimes|numeric|min:0|max:1',
             'avg_delivery_lag_months' => 'sometimes|integer|min:0|max:24',
             'avg_payment_days_late' => 'sometimes|integer|min:0|max:365',
@@ -349,6 +352,10 @@ class TenantController extends Controller
             'logo_url' => $tenant->logo_url,
             'signatory_name' => $tenant->signatory_name,
             'signatory_title' => $tenant->signatory_title,
+            // Invoice export reads these for the company block (template
+            // rows 2-5). Nullable until ops fills them in.
+            'address' => $tenant->address,
+            'phone' => $tenant->phone,
             'currency' => $tenant->currency ?? 'MMK',
             'tax_rate' => (float) ($tenant->tax_rate ?? 0.20),
             'avg_delivery_lag_months' => (int) ($tenant->avg_delivery_lag_months ?? 1),
@@ -360,6 +367,19 @@ class TenantController extends Controller
                 ->get(['from_currency', 'rate'])
                 ->keyBy('from_currency')
                 ->map(fn ($r) => (float) $r->rate),
+            // Rendered at the bottom of the Invoice XLSX. Ordered by
+            // sort_order asc via the relationship.
+            'bank_accounts' => $tenant->bankAccounts()->get()->map(fn ($b) => [
+                'id' => $b->id,
+                'label' => $b->label,
+                'account_name' => $b->account_name,
+                'account_no' => $b->account_no,
+                'branch_name' => $b->branch_name,
+                'branch_address' => $b->branch_address,
+                'branch_no' => $b->branch_no,
+                'swift_code' => $b->swift_code,
+                'sort_order' => $b->sort_order,
+            ]),
         ];
     }
 

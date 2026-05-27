@@ -21,6 +21,7 @@ use App\Http\Controllers\Api\RankController;
 use App\Http\Controllers\Api\ScheduleTrackingController;
 use App\Http\Controllers\Api\TeamCapacityController;
 use App\Http\Controllers\Api\TenantAppRoleController;
+use App\Http\Controllers\Api\TenantBankAccountController;
 use App\Http\Controllers\Api\TenantController;
 use App\Http\Controllers\Api\TimeEntryController;
 use Illuminate\Support\Facades\Route;
@@ -152,6 +153,10 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     Route::patch('/invoices/{invoice}', [InvoiceController::class, 'update']);
     Route::patch('/invoices/{invoice}/pay', [InvoiceController::class, 'pay']);
     Route::post('/invoices/{invoice}/send', [InvoiceController::class, 'send']);
+    // New Invoice menu: preview line items before save + XLSX export of a
+    // saved invoice matching the template layout.
+    Route::post('/contracts/{contract}/invoices/preview', [InvoiceController::class, 'preview']);
+    Route::get('/invoices/{invoice}/export.xlsx', [InvoiceController::class, 'export']);
 
     // Projects (created only via win_deal; no store route)
     Route::apiResource('projects', ProjectController::class)->only(['index', 'show', 'update', 'destroy']);
@@ -256,6 +261,13 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     // Multipart logo upload + remove. Used by the Organization → Company tab.
     Route::post('/tenant/logo', [TenantController::class, 'uploadLogo']);
     Route::delete('/tenant/logo', [TenantController::class, 'deleteLogo']);
+
+    // Tenant bank accounts — rendered at the bottom of the Invoice XLSX
+    // export. CRUD endpoints back the Org → Company → Bank Accounts panel.
+    Route::get('/tenant/bank-accounts', [TenantBankAccountController::class, 'index']);
+    Route::post('/tenant/bank-accounts', [TenantBankAccountController::class, 'store']);
+    Route::put('/tenant/bank-accounts/{bankAccount}', [TenantBankAccountController::class, 'update']);
+    Route::delete('/tenant/bank-accounts/{bankAccount}', [TenantBankAccountController::class, 'destroy']);
 
     // Tenant-managed app roles + admin-editable permissions. List/catalog
     // are readable by anyone in the tenant (sidebar + role pickers); writes
