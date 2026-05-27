@@ -80,6 +80,12 @@ class InvoiceController extends Controller
             $validated['tax'] = round($subTotal * 0.05, 2);
         }
 
+        // Billing period is locked to the current month per spec. Server
+        // overwrites whatever the client sent so the frontend's read-only
+        // UI can't be bypassed (curl, Postman, etc.). Format matches the
+        // template: "Fee for Aug 2024".
+        $validated['billing_period_label'] = 'Fee for '.now()->format('M Y');
+
         // PostgreSQL fills invoice_number from a sequence default (INV-0001, …).
         // On SQLite / other drivers there's no default, so we generate one in
         // PHP. This keeps dev environments working without touching the prod
