@@ -2307,7 +2307,7 @@ PROMPT;
         if (stripos($devHeader, 'Develop') !== false || str_contains($devHeader, '開発工数')) {
             $phaseDefs[] = [
                 'code' => 'development',
-                'name' => 'Development',
+                'name' => '実装',
                 'cols' => [4, 5],
                 'order' => 5,
                 'is_execution' => true,
