@@ -85,6 +85,7 @@ class Deal extends Model
         'contact_name',
         'contact_email',
         'contact_phone',
+        'customer_address',
         'estimated_value',
         'win_probability',
         'status',

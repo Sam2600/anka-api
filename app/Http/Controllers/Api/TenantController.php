@@ -34,6 +34,9 @@ class TenantController extends Controller
             'name' => 'sometimes|required|string|max:255',
             'signatory_name' => 'sometimes|nullable|string|max:255',
             'signatory_title' => 'sometimes|nullable|string|max:255',
+            // Invoice XLSX export reads these for the company block.
+            'address' => 'sometimes|nullable|string|max:1000',
+            'phone' => 'sometimes|nullable|string|max:50',
             'tax_rate' => 'sometimes|numeric|min:0|max:1',
             'avg_delivery_lag_months' => 'sometimes|integer|min:0|max:24',
             'avg_payment_days_late' => 'sometimes|integer|min:0|max:365',
@@ -222,7 +225,9 @@ class TenantController extends Controller
         // Generate a secure random 8-character password.
         $plainPassword = Str::random(8);
 
-        // 1. Create auth user
+        // 1. Create auth user. app_role_id resolves the name to the FK
+        // immediately so the user's permission lookup uses the resilient
+        // join path from the very first request.
         $user = User::create([
             'tenant_id' => $tenant->id,
             'first_name' => $validated['first_name'],
@@ -230,6 +235,7 @@ class TenantController extends Controller
             'email' => $validated['email'],
             'password' => Hash::make($plainPassword),
             'app_role' => $validated['app_role'],
+            'app_role_id' => $this->resolveAppRoleId($tenant->id, $validated['app_role']),
             'system_role' => 'member',
             'is_super_admin' => false,
         ]);
@@ -266,6 +272,12 @@ class TenantController extends Controller
             'email' => 'sometimes|required|email|unique:users,email,'.$user->id,
             'app_role' => 'sometimes|required|in:Admin,Executive,Sales,Delivery,HR',
         ]);
+
+        // Re-resolve the FK when app_role changes so permission lookups follow
+        // the user's new role immediately.
+        if (isset($validated['app_role'])) {
+            $validated['app_role_id'] = $this->resolveAppRoleId($user->tenant_id, $validated['app_role']);
+        }
 
         $user->update($validated);
 
@@ -309,6 +321,20 @@ class TenantController extends Controller
     }
 
     /**
+     * Resolve a role name to its tenant_app_roles.id for users.app_role_id.
+     * Returns null if no matching row exists — the caller stores the name
+     * in app_role anyway and CheckPermission falls back to the name lookup.
+     */
+    private function resolveAppRoleId(string $tenantId, string $roleName): ?string
+    {
+        return \Illuminate\Support\Facades\DB::table('tenant_app_roles')
+            ->where('tenant_id', $tenantId)
+            ->where('name', $roleName)
+            ->whereNull('deleted_at')
+            ->value('id');
+    }
+
+    /**
      * Auto-create an employee record for a newly created tenant user.
      * Maps the user's app_role to a sensible employee role_name.
      */
@@ -349,6 +375,10 @@ class TenantController extends Controller
             'logo_url' => $tenant->logo_url,
             'signatory_name' => $tenant->signatory_name,
             'signatory_title' => $tenant->signatory_title,
+            // Invoice export reads these for the company block (template
+            // rows 2-5). Nullable until ops fills them in.
+            'address' => $tenant->address,
+            'phone' => $tenant->phone,
             'currency' => $tenant->currency ?? 'MMK',
             'tax_rate' => (float) ($tenant->tax_rate ?? 0.20),
             'avg_delivery_lag_months' => (int) ($tenant->avg_delivery_lag_months ?? 1),
@@ -360,6 +390,19 @@ class TenantController extends Controller
                 ->get(['from_currency', 'rate'])
                 ->keyBy('from_currency')
                 ->map(fn ($r) => (float) $r->rate),
+            // Rendered at the bottom of the Invoice XLSX. Ordered by
+            // sort_order asc via the relationship.
+            'bank_accounts' => $tenant->bankAccounts()->get()->map(fn ($b) => [
+                'id' => $b->id,
+                'label' => $b->label,
+                'account_name' => $b->account_name,
+                'account_no' => $b->account_no,
+                'branch_name' => $b->branch_name,
+                'branch_address' => $b->branch_address,
+                'branch_no' => $b->branch_no,
+                'swift_code' => $b->swift_code,
+                'sort_order' => $b->sort_order,
+            ]),
         ];
     }
 

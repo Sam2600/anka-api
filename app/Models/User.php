@@ -23,6 +23,7 @@ class User extends Authenticatable
         'password',
         'system_role',
         'app_role',
+        'app_role_id',
         'is_super_admin',
     ];
 

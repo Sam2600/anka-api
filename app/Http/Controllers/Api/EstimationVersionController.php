@@ -245,7 +245,7 @@ class EstimationVersionController extends Controller
     {
         $request->validate([
             'to_email' => 'required|email|max:255',
-            'message'  => 'sometimes|nullable|string|max:2000',
+            'message' => 'sometimes|nullable|string|max:2000',
         ]);
 
         $version = EstimationVersion::findOrFail($id);
@@ -308,6 +308,7 @@ class EstimationVersionController extends Controller
     private function buildAttachmentFilename(Deal $deal, EstimationVersion $version): string
     {
         $dealSlug = Str::slug($deal->name ?: 'estimate', '_') ?: 'estimate';
+
         return sprintf('%s_estimate_v%d.xlsx', $dealSlug, $version->version_number);
     }
 
@@ -390,6 +391,7 @@ class EstimationVersionController extends Controller
             'context_notes' => 'required|string|min:5|max:20000',
             'current_resources' => 'nullable|array',
             'current_overheads' => 'nullable|array',
+            'current_roles' => 'nullable|array',
         ]);
 
         $startedAt = microtime(true);
@@ -398,6 +400,7 @@ class EstimationVersionController extends Controller
             'notes_chars' => mb_strlen($request->input('context_notes', '')),
             'resources_count' => count($request->input('current_resources', [])),
             'overheads_count' => count($request->input('current_overheads', [])),
+            'roles_count' => count($request->input('current_roles', [])),
         ]);
 
         try {
@@ -406,6 +409,7 @@ class EstimationVersionController extends Controller
                 (string) $request->input('context_notes'),
                 $request->input('current_resources', []),
                 $request->input('current_overheads', []),
+                $request->input('current_roles', []),
             );
         } catch (Throwable $e) {
             Log::error('EstimationVersion: AI delta generation failed', [
