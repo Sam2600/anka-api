@@ -108,12 +108,18 @@ class EstimationXlsxService
             ->whereHas('contract', fn ($q) => $q->where('deal_id', $deal->id))
             ->first();
 
-        $spreadsheet = $this->buildSpreadsheet($deal, $version);
+        [$spreadsheet, $snapshots] = $this->buildSpreadsheet($deal, $version);
 
         $path = $this->storagePathFor($deal, $project, $version);
         $this->writeSpreadsheet($spreadsheet, $path);
 
-        DB::table('estimation_versions')->where('id', $version->id)->update(['xlsx_path' => $path]);
+        DB::table('estimation_versions')->where('id', $version->id)->update([
+            'xlsx_path' => $path,
+            'sheet_function_list' => json_encode($snapshots['function_list']),
+            'sheet_manhour_detail' => json_encode($snapshots['manhour_detail']),
+            'sheet_milestone' => json_encode($snapshots['milestone']),
+            'sheet_team_structure' => json_encode($snapshots['team_structure']),
+        ]);
         $version->xlsx_path = $path;
 
         return $path;
@@ -155,7 +161,10 @@ class EstimationXlsxService
         }
     }
 
-    private function buildSpreadsheet(Deal $deal, EstimationVersion $version): Spreadsheet
+    /**
+     * @return array{0: Spreadsheet, 1: array}
+     */
+    private function buildSpreadsheet(Deal $deal, EstimationVersion $version): array
     {
         $ss = new Spreadsheet;
         $ss->removeSheetByIndex(0);
@@ -170,7 +179,14 @@ class EstimationXlsxService
 
         $ss->setActiveSheetIndex(0);
 
-        return $ss;
+        $snapshots = [
+            'function_list' => $features,
+            'manhour_detail' => $this->buildManhourSnapshot($features),
+            'milestone' => $this->buildMilestoneSnapshot($deal),
+            'team_structure' => $this->buildTeamStructureSnapshot($deal, $members),
+        ];
+
+        return [$ss, $snapshots];
     }
 
     // =========================================================================
@@ -925,6 +941,165 @@ class EstimationXlsxService
         $ws->getColumnDimension($rateCol)->setVisible(false);
 
         $ws->freezePane('D5');
+    }
+
+    // =========================================================================
+    // Snapshot builders — mirror the Excel formulas in pure PHP
+    // =========================================================================
+
+    private function buildManhourSnapshot(array $features): array
+    {
+        $phases = array_map(fn ($p) => [
+            'col' => $p[0],
+            'label' => $p[1],
+            'multiplier' => $p[2],
+        ], self::PHASES);
+
+        $rows = [];
+        $totals = ['dev_hours' => 0, 'risk_hours' => 0, 'management_hours' => 0, 'total_hours' => 0];
+        $phaseTotals = array_fill_keys(array_column($phases, 'col'), 0.0);
+
+        foreach ($features as $f) {
+            $devH = (float) $f['dev_hours'];
+            $phaseHours = [];
+            $phaseSum = 0;
+            foreach ($phases as $p) {
+                $h = round($devH * $p['multiplier'], 2);
+                $phaseHours[$p['col']] = $h;
+                $phaseSum += $h;
+                $phaseTotals[$p['col']] += $h;
+            }
+            $risk = round($phaseSum * 0.03, 2);
+            $mgmt = round($phaseSum * 0.10, 2);
+            $total = round($devH + $phaseSum + $risk + $mgmt, 2);
+
+            $rows[] = [
+                'function_id' => $f['function_id'],
+                'name' => $f['name'],
+                'difficulty' => $f['difficulty'],
+                'dev_hours' => $devH,
+                'phase_hours' => $phaseHours,
+                'risk_hours' => $risk,
+                'management_hours' => $mgmt,
+                'total_hours' => $total,
+            ];
+
+            $totals['dev_hours'] += $devH;
+            $totals['risk_hours'] += $risk;
+            $totals['management_hours'] += $mgmt;
+            $totals['total_hours'] += $total;
+        }
+
+        $totalAllPhases = array_sum($phaseTotals);
+
+        return [
+            'phases' => $phases,
+            'rows' => $rows,
+            'phase_totals' => $phaseTotals,
+            'summary' => [
+                'total_dev_hours' => round($totals['dev_hours'], 2),
+                'total_risk_hours' => round($totals['risk_hours'], 2),
+                'total_management_hours' => round($totals['management_hours'], 2),
+                'total_hours' => round($totals['total_hours'], 2),
+                'total_days' => round($totals['total_hours'] / 8, 2),
+                'total_months' => round($totals['total_hours'] / 160, 2),
+                'leader_count' => 1,
+                'developer_count' => 3,
+            ],
+        ];
+    }
+
+    private function buildMilestoneSnapshot(Deal $deal): array
+    {
+        $start = $deal->expected_close_date
+            ? Carbon::parse($deal->expected_close_date)->startOfMonth()
+            : now()->startOfMonth();
+
+        $timeline = max(4, (int) ($deal->timeline_months ?: 5));
+        $phaseSchedule = $this->distributePhaseSchedule(count(self::MILESTONE_PHASES), $timeline);
+
+        $phases = [];
+        foreach (self::MILESTONE_PHASES as $pi => $label) {
+            $phases[] = [
+                'name' => $label,
+                'start_week' => $phaseSchedule[$pi][0] ?? 0,
+                'end_week' => $phaseSchedule[$pi][1] ?? 0,
+            ];
+        }
+
+        return [
+            'start_date' => $start->toDateString(),
+            'timeline_months' => $timeline,
+            'total_weeks' => $timeline * 4,
+            'phases' => $phases,
+        ];
+    }
+
+    private function buildTeamStructureSnapshot(Deal $deal, array $members): array
+    {
+        $start = $deal->expected_close_date
+            ? Carbon::parse($deal->expected_close_date)->startOfMonth()
+            : now()->startOfMonth();
+
+        $timeline = max(1, (int) ($deal->timeline_months ?: 4));
+        $visibleMonths = min(12, $timeline);
+
+        $leaderRate = 0.0;
+        $memberRate = 0.0;
+        $memberList = [];
+        $monthlyTotals = array_fill(0, $visibleMonths, 0.0);
+
+        foreach ($members as $m) {
+            $alloc = $m['monthly_allocation'] ?? [];
+            $salary = (float) ($m['monthly_salary'] ?? 0);
+            $roleType = $m['role_type'] ?? 'S Member';
+
+            if ($roleType === 'Leader' && $salary > 0) {
+                $leaderRate = $salary;
+            } elseif ($salary > 0 && $memberRate === 0) {
+                $memberRate = $salary;
+            }
+
+            $memberAlloc = [];
+            for ($i = 0; $i < $visibleMonths; $i++) {
+                $val = round((float) ($alloc[$i] ?? 0), 1);
+                $memberAlloc[] = $val;
+                $monthlyTotals[$i] += $val;
+            }
+
+            $memberList[] = [
+                'name' => $m['name'],
+                'role_type' => $roleType,
+                'monthly_allocation' => $memberAlloc,
+                'monthly_salary' => $salary,
+                'subtotal' => round(array_sum($memberAlloc), 1),
+            ];
+        }
+
+        $monthlyPrices = [];
+        foreach (range(0, $visibleMonths - 1) as $i) {
+            $leaderAlloc = 0;
+            $memberAlloc = 0;
+            foreach ($memberList as $m) {
+                if ($m['role_type'] === 'Leader') {
+                    $leaderAlloc += $m['monthly_allocation'][$i];
+                } else {
+                    $memberAlloc += $m['monthly_allocation'][$i];
+                }
+            }
+            $monthlyPrices[] = round($leaderAlloc * $leaderRate + $memberAlloc * $memberRate);
+        }
+
+        return [
+            'start_date' => $start->toDateString(),
+            'visible_months' => $visibleMonths,
+            'members' => $memberList,
+            'monthly_totals' => array_map(fn ($v) => round($v, 1), $monthlyTotals),
+            'leader_rate' => $leaderRate,
+            'member_rate' => $memberRate,
+            'monthly_prices' => $monthlyPrices,
+            'total_price' => array_sum($monthlyPrices),
+        ];
     }
 
     // =========================================================================

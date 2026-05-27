@@ -38,6 +38,7 @@ class EstimationVersionController extends Controller
                 'created_at' => $v->created_at?->toISOString(),
                 'xlsx_path' => $v->xlsx_path,
                 'xlsx_available' => $this->xlsxAvailable($v),
+                'has_sheet_snapshots' => $v->sheet_function_list !== null,
             ]);
 
         return response()->json(['data' => $versions]);
@@ -175,6 +176,7 @@ class EstimationVersionController extends Controller
                 'created_at' => $version->created_at?->toISOString(),
                 'xlsx_path' => $version->xlsx_path,
                 'xlsx_available' => $this->xlsxAvailable($version),
+                'has_sheet_snapshots' => $version->sheet_function_list !== null,
             ],
         ]);
     }
@@ -196,6 +198,11 @@ class EstimationVersionController extends Controller
                 'created_at' => $version->created_at?->toISOString(),
                 'xlsx_path' => $version->xlsx_path,
                 'xlsx_available' => $this->xlsxAvailable($version),
+                'has_sheet_snapshots' => $version->sheet_function_list !== null,
+                'sheet_function_list' => $version->sheet_function_list,
+                'sheet_manhour_detail' => $version->sheet_manhour_detail,
+                'sheet_milestone' => $version->sheet_milestone,
+                'sheet_team_structure' => $version->sheet_team_structure,
             ],
         ]);
     }
