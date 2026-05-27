@@ -26,6 +26,10 @@ class EstimationVersion extends Model
         'created_by',
         'created_at',
         'xlsx_path',
+        'sheet_function_list',
+        'sheet_manhour_detail',
+        'sheet_milestone',
+        'sheet_team_structure',
     ];
 
     protected $casts = [
@@ -35,6 +39,10 @@ class EstimationVersion extends Model
         'overheads' => 'array',
         'target_margin' => 'float',
         'created_at' => 'datetime',
+        'sheet_function_list' => 'array',
+        'sheet_manhour_detail' => 'array',
+        'sheet_milestone' => 'array',
+        'sheet_team_structure' => 'array',
     ];
 
     public function deal()
