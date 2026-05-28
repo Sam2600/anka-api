@@ -986,17 +986,19 @@ TXT;
             return;
         }
 
-        // SQLite test fallback — minimal version that flips the deal to won
-        // and creates a Contract + Project so downstream lookups don't 404.
+        // SQLite test fallback — flips the deal to won and creates a Contract
+        // + Project (+ project_team_assignments from deal_hard_assignments).
+        // Mirrors the latest win_deal() Postgres stored procedure so local
+        // SQLite runs behave the same as production.
         DB::transaction(function () use ($deal) {
-            $existingContract = \App\Models\Contract::where('deal_id', $deal->id)->first();
-            if (! $existingContract) {
+            $contract = \App\Models\Contract::where('deal_id', $deal->id)->first();
+            if (! $contract) {
                 $lastNumber = (int) (\App\Models\Contract::withoutGlobalScope('tenant')->max(
                     DB::raw('CAST(SUBSTR(contract_number, 5) AS INTEGER)')
                 ) ?? 0);
                 $nextNumber = 'CON-'.str_pad((string) ($lastNumber + 1), 4, '0', STR_PAD_LEFT);
 
-                \App\Models\Contract::create([
+                $contract = \App\Models\Contract::create([
                     'id' => Str::orderedUuid(),
                     'tenant_id' => $deal->tenant_id,
                     'deal_id' => $deal->id,
@@ -1008,6 +1010,35 @@ TXT;
                     'status' => 'Draft',
                     'start_date' => now()->toDateString(),
                 ]);
+            }
+
+            $project = \App\Models\Project::where('contract_id', $contract->id)->first();
+            if (! $project) {
+                $project = \App\Models\Project::create([
+                    'id' => Str::orderedUuid(),
+                    'tenant_id' => $deal->tenant_id,
+                    'contract_id' => $contract->id,
+                    'name' => $deal->name ?? '',
+                    'client' => $deal->client ?? '',
+                    'budget_hours' => (float) ($deal->workload_hours ?? 0),
+                    'consumed_hours' => 0,
+                    'status' => \App\Models\Project::STATUS_NOT_STARTED,
+                    'start_date' => now()->toDateString(),
+                ]);
+
+                $hardAssignments = \App\Models\DealHardAssignment::query()
+                    ->where('deal_id', $deal->id)
+                    ->get();
+                foreach ($hardAssignments as $hard) {
+                    \App\Models\ProjectTeamAssignment::create([
+                        'id' => Str::orderedUuid(),
+                        'tenant_id' => $deal->tenant_id,
+                        'project_id' => $project->id,
+                        'employee_id' => $hard->employee_id,
+                        'allocated_hours' => $hard->allocated_hours,
+                        'assignment_source' => 'deal_transfer',
+                    ]);
+                }
             }
 
             $deal->update([
