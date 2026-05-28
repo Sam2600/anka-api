@@ -25,6 +25,7 @@ use App\Services\Scheduling\AiScheduleValidator;
 use App\Services\Scheduling\CalendarFactory;
 use App\Services\Scheduling\PhaseReassignmentService;
 use App\Services\Scheduling\WorkingDayCalendar;
+use App\Support\EngagementWindow;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -117,7 +118,9 @@ class AiAutoAssignController extends Controller
                 return $this->demoAutoAssign($project, $deal, $employees, $tenantId);
             }
 
-            DB::transaction(function () use ($assignments, $project, $tenantId) {
+            $teamEndDate = EngagementWindow::computeEndDate(null, null, $project->loadMissing('contract.deal'));
+
+            DB::transaction(function () use ($assignments, $project, $tenantId, $teamEndDate) {
                 ProjectTeamAssignment::where('project_id', $project->id)->delete();
 
                 foreach ($assignments as $item) {
@@ -130,6 +133,7 @@ class AiAutoAssignController extends Controller
                         'project_id' => $project->id,
                         'employee_id' => $item['employee_id'],
                         'allocated_hours' => $item['allocated_hours'],
+                        'team_end_date' => $teamEndDate?->toDateString(),
                         'assignment_source' => 'ai',
                     ]);
                 }
@@ -212,7 +216,9 @@ class AiAutoAssignController extends Controller
             }
         }
 
-        DB::transaction(function () use ($assignments, $project, $tenantId) {
+        $teamEndDate = EngagementWindow::computeEndDate(null, null, $project->loadMissing('contract.deal'));
+
+        DB::transaction(function () use ($assignments, $project, $tenantId, $teamEndDate) {
             ProjectTeamAssignment::where('project_id', $project->id)->delete();
 
             foreach ($assignments as $item) {
@@ -221,6 +227,7 @@ class AiAutoAssignController extends Controller
                     'project_id' => $project->id,
                     'employee_id' => $item['employee_id'],
                     'allocated_hours' => $item['allocated_hours'],
+                    'team_end_date' => $teamEndDate?->toDateString(),
                     'assignment_source' => 'ai',
                 ]);
             }
@@ -255,11 +262,14 @@ class AiAutoAssignController extends Controller
             return response()->json(['error' => 'Employee already assigned to this project'], 409);
         }
 
+        $teamEndDate = EngagementWindow::computeEndDate(null, null, $project->loadMissing('contract.deal'));
+
         $assignment = ProjectTeamAssignment::create([
             'tenant_id' => $tenantId,
             'project_id' => $project->id,
             'employee_id' => $request->input('employee_id'),
             'allocated_hours' => $request->input('allocated_hours'),
+            'team_end_date' => $teamEndDate?->toDateString(),
             'assignment_source' => 'manual',
         ]);
 
@@ -289,8 +299,18 @@ class AiAutoAssignController extends Controller
      */
     public function availableEmployees(Project $project)
     {
+        $project->loadMissing('contract.deal');
+
+        // Mirror planTeamPreview's window source: explicit team_start_date
+        // from the latest estimation version's sheet_team_structure wins if
+        // present, otherwise fall back to the project's own dates.
+        $deal = $project->contract?->deal;
+        $teamStructure = $deal ? $this->resolveSheetTeamStructure($deal) : null;
+        $explicitStart = $teamStructure['start_date'] ?? null;
+        [$start, $end] = EngagementWindow::windowFor($project, $explicitStart);
+
         $employees = Employee::with(['rank', 'capacityRole'])
-            ->idleAndFullTime()
+            ->idleForRange($start, $end)
             ->orderBy('name')
             ->get();
 
@@ -367,6 +387,22 @@ PROMPT;
     private function jsonEncode(array $data): string
     {
         return json_encode($data, JSON_PRETTY_PRINT);
+    }
+
+    /**
+     * Number of distinct calendar months touched by [start, end], inclusive.
+     * Used to size monthly_allocation arrays to a project window.
+     * Example: 2026-06-15 to 2026-08-03 → 3 (Jun, Jul, Aug).
+     */
+    private function monthsBetweenInclusive(Carbon $start, Carbon $end): int
+    {
+        if ($end->lessThan($start)) {
+            return 0;
+        }
+        $startIndex = $start->year * 12 + ($start->month - 1);
+        $endIndex = $end->year * 12 + ($end->month - 1);
+
+        return $endIndex - $startIndex + 1;
     }
 
     // ── Team build preview + confirm (new business flow) ──────────────────────
@@ -485,8 +521,10 @@ PROMPT;
             ]);
         }
 
+        [$windowStart, $windowEnd] = EngagementWindow::windowFor($project, $teamStartDate);
+
         $eligible = Employee::with(['rank', 'capacityRole'])
-            ->idleAndFullTime()
+            ->idleForRange($windowStart, $windowEnd)
             ->whereNotIn('id', $keptEmployeeIds)
             ->get();
 
@@ -846,17 +884,43 @@ PROMPT;
         // the kept rows need slot pairing.
         $project->load(['contract.deal.ghost_roles', 'teamAssignments.employee']);
 
+        // Resolve the target project's engagement window up front — both the
+        // race guard below AND the idle-pool scope at preview time use the
+        // same window, so they stay consistent: an employee blocked here is
+        // an employee the preview hid.
+        $raceGuardDeal = $project->contract?->deal;
+        $raceGuardStructure = $raceGuardDeal ? $this->resolveSheetTeamStructure($raceGuardDeal) : null;
+        $raceGuardExplicitStart = $validated['team_start_date']
+            ?? ($raceGuardStructure['start_date'] ?? null);
+        [$raceStart, $raceEnd] = EngagementWindow::windowFor($project, $raceGuardExplicitStart);
+
         // Race guard — between preview render and confirm submit, another
         // tab or user could have staffed one of the picked employees on a
-        // different project. The dialog is otherwise unaware. Reject with
-        // 422 listing the conflicting names so the user knows what changed.
-        // Employees already on *this* project's team are exempt (they're
-        // the "kept" set whose allocated_hours we rewrite, not new picks).
+        // different project whose window OVERLAPS ours. The dialog is
+        // otherwise unaware. Reject with 422 listing the conflicting names
+        // so the user knows what changed. Employees already on *this*
+        // project's team are exempt (they're the "kept" set whose
+        // allocated_hours we rewrite, not new picks).
         $pickedIds = collect($validated['picks'])->pluck('employee_id')->unique();
         $keptIds = $project->teamAssignments->pluck('employee_id');
+        $raceStartStr = $raceStart->toDateString();
+        $raceEndStr = $raceEnd->toDateString();
         $conflicts = Employee::whereIn('id', $pickedIds)
             ->whereNotIn('id', $keptIds)
-            ->whereHas('teamAssignments')
+            ->whereHas('teamAssignments', function ($q) use ($raceStartStr, $raceEndStr, $project) {
+                // Mirror scopeIdleForRange's overlap clause, but exclude any
+                // assignment to THIS project — those are stale rows from a
+                // prior confirm in the same project's lifecycle and would
+                // false-positive against themselves.
+                $q->where('project_id', '!=', $project->id)
+                    ->where(function ($qq) use ($raceEndStr) {
+                        $qq->whereNull('team_start_date')
+                            ->orWhere('team_start_date', '<=', $raceEndStr);
+                    })->where(function ($qq) use ($raceStartStr) {
+                        $qq->whereNull('team_end_date')
+                            ->orWhere('team_end_date', '>=', $raceStartStr);
+                    });
+            })
             ->pluck('name', 'id');
         if ($conflicts->isNotEmpty()) {
             return response()->json([
@@ -984,6 +1048,12 @@ PROMPT;
                             ? $this->engagementAvailableHours($emp, $project, $months)
                             : ($emp ? (float) ($emp->workable_hours ?? 160) : 160)));
 
+                $teamEndDate = EngagementWindow::computeEndDate(
+                    $confirmStartDate ? Carbon::parse($confirmStartDate)->startOfDay() : null,
+                    $monthlyAlloc,
+                    $project,
+                );
+
                 ProjectTeamAssignment::create([
                     'tenant_id' => $tenantId,
                     'project_id' => $project->id,
@@ -991,6 +1061,7 @@ PROMPT;
                     'allocated_hours' => $allocated,
                     'monthly_allocation' => $monthlyAlloc,
                     'team_start_date' => $confirmStartDate,
+                    'team_end_date' => $teamEndDate?->toDateString(),
                     'assignment_source' => 'ai',
                 ]);
                 $inserted++;
@@ -1028,6 +1099,11 @@ PROMPT;
                     $row->allocated_hours = $newAllocated;
                     $row->monthly_allocation = $monthlyAlloc;
                     $row->team_start_date = $confirmStartDate;
+                    $row->team_end_date = EngagementWindow::computeEndDate(
+                        $confirmStartDate ? Carbon::parse($confirmStartDate)->startOfDay() : null,
+                        $monthlyAlloc,
+                        $project,
+                    )?->toDateString();
                     $row->save();
                     $updated++;
                 }
@@ -1391,10 +1467,34 @@ PROMPT;
             return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $fallbackCalendar);
         }
 
-        $teamMembers = $teamAssignments->map(function ($a) {
+        $teamMembers = $teamAssignments->map(function ($a) use ($windowStart, $effectiveEnd) {
             $workable = (float) (optional($a->employee)->workable_hours ?? 160);
             $allocated = (float) $a->allocated_hours;
             $monthlyAlloc = $a->monthly_allocation;
+
+            // Pad / truncate monthly_allocation to the project's month span
+            // counted from team_start_date (or windowStart if missing). Short
+            // arrays get 0.0 entries appended — making "absent" months explicit
+            // so the AI's HARD zero-month rule and the validator have something
+            // to bite on. Longer arrays are clipped with a warning.
+            $teamStart = $a->team_start_date
+                ? Carbon::parse($a->team_start_date)->startOfDay()
+                : $windowStart->copy();
+            $expectedMonths = $this->monthsBetweenInclusive($teamStart, $effectiveEnd);
+
+            if (is_array($monthlyAlloc) && $expectedMonths > 0) {
+                if (count($monthlyAlloc) < $expectedMonths) {
+                    $monthlyAlloc = array_pad($monthlyAlloc, $expectedMonths, 0.0);
+                } elseif (count($monthlyAlloc) > $expectedMonths) {
+                    Log::warning('AI Schedule: truncating overlong monthly_allocation', [
+                        'employee_id' => $a->employee_id,
+                        'received' => count($monthlyAlloc),
+                        'expected' => $expectedMonths,
+                    ]);
+                    $monthlyAlloc = array_slice($monthlyAlloc, 0, $expectedMonths);
+                }
+                $monthlyAlloc = array_map('floatval', $monthlyAlloc);
+            }
 
             // When monthly_allocation is present, engagement_months = count of
             // non-zero months (the calendar span). Without it, derive from hours.
@@ -1452,6 +1552,34 @@ PROMPT;
                 $a->employee_id => (int) (optional(optional($a->employee)->rank)->level ?? 20),
             ])
             ->all();
+
+        // Monthly-allocation inputs for the new HARD validator rules
+        // (zero-month + monthly hour budget). Mirror the padding done above
+        // for $teamMembers so prompt and validator see the same arrays.
+        $monthlyAllocationByAssignee = [];
+        $teamStartByAssignee = [];
+        $workableHoursByAssignee = [];
+        foreach ($teamAssignments as $a) {
+            $alloc = $a->monthly_allocation;
+            if (! is_array($alloc) || empty($alloc)) {
+                continue;
+            }
+            $teamStart = $a->team_start_date
+                ? Carbon::parse($a->team_start_date)->startOfDay()
+                : $windowStart->copy();
+            $expectedMonths = $this->monthsBetweenInclusive($teamStart, $effectiveEnd);
+            if ($expectedMonths > 0) {
+                if (count($alloc) < $expectedMonths) {
+                    $alloc = array_pad($alloc, $expectedMonths, 0.0);
+                } elseif (count($alloc) > $expectedMonths) {
+                    $alloc = array_slice($alloc, 0, $expectedMonths);
+                }
+            }
+            $monthlyAllocationByAssignee[$a->employee_id] = array_map('floatval', $alloc);
+            $teamStartByAssignee[$a->employee_id] = $teamStart->toDateString();
+            $workableHoursByAssignee[$a->employee_id] =
+                (float) (optional($a->employee)->workable_hours ?? 160);
+        }
 
         $dbHolidays = $this->dbHolidaysForPrompt($tenantId, $windowStart, $effectiveEnd);
         $prompt = $this->buildAssignTasksPrompt($project, $tasks, $activePhases, $teamMembers, $windowStart, $effectiveEnd, $dbHolidays, $rawSheet);
@@ -1549,6 +1677,9 @@ PROMPT;
                     $engagementMonthsByAssignee,
                     $capacityRoleByAssignee,
                     $rankLevelByAssignee,
+                    $monthlyAllocationByAssignee,
+                    $teamStartByAssignee,
+                    $workableHoursByAssignee,
                 );
 
                 if (empty($violations)) {
@@ -2929,19 +3060,17 @@ PROMPT;
         $hasMonthlyAlloc = collect($teamMembers)->contains(fn ($m) => ! empty($m['monthly_allocation']));
         $monthlyAllocBlock = '';
         if ($hasMonthlyAlloc) {
-            $monthlyAllocBlock = "MONTHLY ALLOCATION (per-member availability by calendar month):\n".
+            $monthlyAllocBlock = "MONTHLY ALLOCATION (per-member monthly HOUR BUDGET):\n".
                 "Some team members include a `monthly_allocation` array and `team_start_date`.\n".
-                "- monthly_allocation[0] is for the month starting at team_start_date, [1] is the next month, etc.\n".
-                "- 1.0 = full capacity (8h/day), 0.8 = 6.4h/day, 0.5 = 4h/day, 0 = unavailable that month.\n".
-                "- HARD: NEVER schedule work for a member in a calendar month where their allocation = 0.\n".
-                "- SOFT: In partial-allocation months (e.g. 0.5), schedule lighter phases or review work.\n".
-                "  effective_hours_per_day = allocation_fraction × {$defaultHpd}.\n".
-                "  Phase duration in a partial month: ceil(estimated_hours / effective_hours_per_day) working days.\n".
-                "- Use the `capacity` array in your output to set reduced hours_per_day for partial-allocation months.\n".
-                "  Example: member with allocation [1, 0.5, 1] on a project starting 2026-01-01:\n".
-                "    Month 1 (Jan) = 8h/day, Month 2 (Feb) = 4h/day, Month 3 (Mar) = 8h/day.\n".
-                "    → Add a capacity entry: {\"employee_id\": \"<uuid>\", \"hours_per_day\": 4, \"reason\": \"0.5 allocation in Feb\"}\n".
-                "    OR better: schedule this member's work outside February entirely.\n\n";
+                "- monthly_allocation[i] × workable_hours is that member's TOTAL hour BUDGET for the i-th calendar month, indexed from team_start_date.\n".
+                "  Example: workable_hours=160, allocation=[0.5, 1, 1, 1, 1, 0] starting 2026-06-01 →\n".
+                "    June budget = 80h, July budget = 160h, ..., October budget = 160h, November budget = 0h (off the project).\n".
+                "- HARD: NEVER assign any phase to a member in a calendar month where their allocation = 0. That month is unavailable.\n".
+                "- HARD: For each member, the sum of estimated_hours of their assignments whose [planned_start, planned_end] overlaps a given calendar month must NOT exceed that month's budget.\n".
+                "  (For phases spanning a month boundary, apportion hours by working-day overlap with each month.)\n".
+                "- You may schedule a member at the normal {$defaultHpd}h/day pace on any working day; the MONTHLY BUDGET is what bounds them. A member with an 8h task in a 0.5 month may legitimately finish it in one working day at full pace, then idle waiting for an upstream phase to unblock the next task.\n".
+                "- Reduced-month allocation typically means the member is BLOCKED waiting on upstream work (e.g. devs waiting for the leader's docs), NOT throttled to fewer hours per workday. Phase order within a task already prevents downstream phases from starting before upstream finishes — combine that with the monthly budget to express the dependency-blocked time.\n".
+                "- The `capacity.hours_per_day` output is only for genuine daily throttling (e.g. a member shared with another project who can only spare 4h/day every day). Do NOT use it as a proxy for partial-month availability — use the monthly_allocation array for that.\n\n";
         }
 
         return "Project: {$projectName}\n".
