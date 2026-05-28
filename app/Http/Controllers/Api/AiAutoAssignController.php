@@ -1361,20 +1361,6 @@ PROMPT;
             ], 422);
         }
 
-        // Block when total task hours far exceed team capacity — the AI would
-        // produce a schedule full of double-bookings and waste API credits.
-        $totalTaskHours = collect($tasks)->sum('total_hours');
-        $totalTeamHours = (float) $teamAssignments->sum('allocated_hours');
-        if ($totalTeamHours > 0 && $totalTaskHours > $totalTeamHours * 1.5) {
-            return response()->json([
-                'error' => "Task hours ({$totalTaskHours}h) far exceed team capacity ({$totalTeamHours}h). "
-                    .'Add more team members or reduce scope before assigning tasks.',
-                'task_hours' => $totalTaskHours,
-                'team_hours' => $totalTeamHours,
-                'ratio' => round($totalTaskHours / $totalTeamHours, 2),
-            ], 422);
-        }
-
         if (! $project->start_date) {
             return response()->json([
                 'error' => 'Project is missing start_date. Set it before assigning tasks.',
