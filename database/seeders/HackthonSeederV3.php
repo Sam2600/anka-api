@@ -37,11 +37,11 @@ use Illuminate\Support\Facades\Hash;
 /**
  * Hackathon V3 demo seeder — built from Demo_DataSeed_Anka.xlsx "Sample Test Data" sheet.
  *
- * Budget Year 2026, MMK, 15 employees, 4 projects:
- *   S1: Wayne Enterprise chatbot sys         Jan–Aug (1L+3M core, +1M Mar–Jun)
- *   S2: Lux Luthor corporation ticket mgmt   Mar–Dec (1L+3M)
- *   A1: Manchester United project             Aug–Dec (negotiation, deal only)
- *   B1: Arsenal Fc project                   Oct–Dec (qualified, deal only)
+ * Budget Year 2026, JPY, 15 employees, 4 projects:
+ *   S1: Mahar YarZar Enterprise chatbot sys   Jan–Aug (1L+3M core, +1M Mar–May)
+ *   S2: IMC corporation ticket management sys Mar–Dec (1L+3M)
+ *   A1: A Bank HR Management System           Jul–Nov (negotiation, deal only)
+ *   B1: SIS Burma Profile Web Page            Sep–Nov (qualified, deal only)
  *
  * Full schedule history seeded with on-track pattern (zero late hours).
  *
@@ -74,7 +74,7 @@ class HackthonSeederV3 extends Seeder
                 'name' => 'Brycen Myanmar V3',
                 'slug' => self::SLUG,
                 'plan' => 'pro',
-                'currency' => 'MMK',
+                'currency' => 'JPY',
                 'is_active' => true,
                 'signatory_name' => 'Leader1',
                 'signatory_title' => 'Managing Director',
@@ -531,9 +531,9 @@ class HackthonSeederV3 extends Seeder
     // ── Projects ───────────────────────────────────────────────────────
 
     /**
-     * S-Project1: Wayne Enterprise chatbot sys — Jan–Aug 2026.
-     * Variable team: Jan–Feb 1L+3M, Mar–Jun 1L+4M, Jul–Aug 1L+3M.
-     * member6 (backend) only works Mar–Jun (4 months, 640h).
+     * S-Project1: Mahar YarZar Enterprise chatbot sys — Jan–Aug 2026.
+     * Variable team: Jan–Feb 1L+3M, Mar–May 1L+4M, Jun–Aug 1L+3M.
+     * member6 (backend) only works Mar–May (3 months, 480h).
      */
     private function createWayneEnterprise(Tenant $tenant, array $employees, array $roles, User $admin, Carbon $yearStart, array $rankAvg): void
     {
@@ -544,31 +544,40 @@ class HackthonSeederV3 extends Seeder
             ['emp' => $employees['member3'], 'role_code' => 'frontend', 'feature' => 'Frontend UI + chatbot interface', 'hours_per_month' => 160, 'months' => 8],
         ];
         $extraMember = [
-            'emp' => $employees['member6'], 'role_code' => 'backend', 'feature' => 'API integration + data pipeline', 'hours_per_month' => 160, 'months' => 4, 'start_offset' => 2,
+            'emp' => $employees['member6'], 'role_code' => 'backend', 'feature' => 'API integration + data pipeline', 'hours_per_month' => 160, 'months' => 3, 'start_offset' => 2,
         ];
         $fullTeam = array_merge($coreTeam, [$extraMember]);
 
         $start = $yearStart->copy(); // Jan 1
         $end = $yearStart->copy()->addMonths(7)->endOfMonth(); // Aug 31
         $months = 8;
-        $totalHours = (4 * 160 * 8) + (1 * 160 * 4); // 5760h
+        $totalHours = (4 * 160 * 8) + (1 * 160 * 3); // 5600h
 
-        // Monthly team composition from sheet: Jan–Feb 1L+3M, Mar–Jun 1L+4M, Jul–Aug 1L+3M
+        // Monthly team composition from sheet: Jan–Feb 1L+3M, Mar–May 1L+4M, Jun–Aug 1L+3M
         $monthlyTeam = [
             ['leaders' => 1, 'members' => 3], // Jan
             ['leaders' => 1, 'members' => 3], // Feb
             ['leaders' => 1, 'members' => 4], // Mar
             ['leaders' => 1, 'members' => 4], // Apr
             ['leaders' => 1, 'members' => 4], // May
-            ['leaders' => 1, 'members' => 4], // Jun
+            ['leaders' => 1, 'members' => 3], // Jun
             ['leaders' => 1, 'members' => 3], // Jul
             ['leaders' => 1, 'members' => 3], // Aug
         ];
         $costs = $this->projectCosts($monthlyTeam, $rankAvg);
 
         $deal = $this->createWonDeal($tenant, [
-            'name' => 'Wayne Enterprise chatbot sys',
-            'client' => 'Wayne Enterprise',
+            'name' => 'Mahar YarZar Enterprise chatbot sys',
+            'client' => 'Mahar YarZar Enterprise',
+            'contact_name' => 'U Zaw Min Tun',
+            'contact_email' => 'zaw.min.tun@maharyarzar.example.com',
+            'contact_phone' => '+95 1 555 0301',
+            'workload_description' => 'AI-powered customer support chatbot for Mahar YarZar Enterprise\'s e-commerce platform.'
+                .' Multi-channel (web widget + Viber + Facebook Messenger), Burmese + English, escalation to human agents,'
+                .' CRM ticket sync, FAQ knowledge base, weekly analytics digest. Project window: 2026/01 – 2026/08.'
+                .' Core team is 1 leader + 2 backend + 1 frontend across 8 months; one extra backend engineer joins'
+                .' Mar–May for the messaging-platform integration spike.',
+            'win_reason' => 'Existing vendor relationship — prior backend project landed on time.',
             'costs' => $costs,
             'monthly_fee' => round($costs['total_income'] / $months, 0),
             'months' => $months,
@@ -581,7 +590,7 @@ class HackthonSeederV3 extends Seeder
                 ['role_type' => 'pm',       'quantity' => 1, 'months' => 8],
                 ['role_type' => 'backend',  'quantity' => 2, 'months' => 8],
                 ['role_type' => 'frontend', 'quantity' => 1, 'months' => 8],
-                ['role_type' => 'backend',  'quantity' => 1, 'months' => 4],
+                ['role_type' => 'backend',  'quantity' => 1, 'months' => 3],
             ],
             'ot_policy' => 'no_overtime_allowed',
             'ot_rate' => 0,
@@ -608,19 +617,23 @@ class HackthonSeederV3 extends Seeder
             'tenant_id' => $tenant->id,
             'project_id' => $project->id,
             'employee_id' => $extraMember['emp']->id,
-            'allocated_hours' => 160 * 4,
+            'allocated_hours' => 160 * 3,
             'assignment_source' => 'deal_transfer',
         ]);
 
-        $today = Carbon::now()->startOfDay();
+        // Invoices only for months strictly before the current month.
+        // Current + future months are forecast territory, not billed yet.
+        $currentMonthStart = Carbon::now()->startOfMonth();
         $invoiceRows = [];
         foreach ($costs['monthly_costs'] as $m => $monthlyCost) {
-            $monthDate = $start->copy()->addMonths($m);
-            $isPast = $monthDate->copy()->endOfMonth()->lte($today);
+            $monthDate = $start->copy()->addMonths($m)->startOfMonth();
+            if ($monthDate->gte($currentMonthStart)) {
+                continue;
+            }
             $invoiceRows[] = [
                 'offset' => $m,
                 'amount' => round($monthlyCost * self::SELL_MULTIPLIER, 0),
-                'status' => $isPast ? 'Paid' : 'Pending',
+                'status' => 'Paid',
             ];
         }
         $this->createMonthlyInvoices($tenant, $contract, $start, $invoiceRows, $monthlyTeam, $rankAvg);
@@ -629,11 +642,11 @@ class HackthonSeederV3 extends Seeder
 
         $this->seedScheduleHistory($tenant, $project, $coreTeam, $start, 8);
         $extraStart = Carbon::create(2026, 3, 1);
-        $this->seedScheduleHistory($tenant, $project, [$extraMember], $extraStart, 4);
+        $this->seedScheduleHistory($tenant, $project, [$extraMember], $extraStart, 3);
     }
 
     /**
-     * S-Project2: Lux Luthor corporation ticket management sys — Mar–Dec 2026.
+     * S-Project2: IMC corporation ticket management sys — Mar–Dec 2026.
      * Constant team: 1L + 3M for 10 months.
      */
     private function createLuxLuthor(Tenant $tenant, array $employees, array $roles, User $admin, Carbon $yearStart, array $rankAvg): void
@@ -654,8 +667,16 @@ class HackthonSeederV3 extends Seeder
         $costs = $this->projectCosts($monthlyTeam, $rankAvg);
 
         $deal = $this->createWonDeal($tenant, [
-            'name' => 'Lux Luthor corporation ticket management sys',
-            'client' => 'Lux Luthor Corporation',
+            'name' => 'IMC corporation ticket management sys',
+            'client' => 'IMC Corporation',
+            'contact_name' => 'Daw Su Su Win',
+            'contact_email' => 'su.su.win@imc.example.com',
+            'contact_phone' => '+95 1 555 0402',
+            'workload_description' => 'Internal IT ticket-management system for IMC\'s nationwide branch operations.'
+                .' Workflow engine (new → triaged → assigned → resolved), SLA tracking per priority,'
+                .' branch-level reporting, role-based dashboards, mobile-responsive, audit log on every state change.'
+                .' Project window: 2026/03 – 2026/12. Constant team of 1 leader + 1 backend + 1 frontend + 1 QA across 10 months.',
+            'win_reason' => 'Reference from IMC\'s parent group — competitive pricing closed the deal.',
             'costs' => $costs,
             'monthly_fee' => round($costs['total_income'] / $months, 0),
             'months' => $months,
@@ -684,15 +705,19 @@ class HackthonSeederV3 extends Seeder
 
         $this->createTeamAssignments($project, $team, $months);
 
-        $today = Carbon::now()->startOfDay();
+        // Invoices only for months strictly before the current month.
+        // Current + future months are forecast territory, not billed yet.
+        $currentMonthStart = Carbon::now()->startOfMonth();
         $invoiceRows = [];
         foreach ($costs['monthly_costs'] as $m => $monthlyCost) {
-            $monthDate = $start->copy()->addMonths($m);
-            $isPast = $monthDate->copy()->endOfMonth()->lte($today);
+            $monthDate = $start->copy()->addMonths($m)->startOfMonth();
+            if ($monthDate->gte($currentMonthStart)) {
+                continue;
+            }
             $invoiceRows[] = [
                 'offset' => $m,
                 'amount' => round($monthlyCost * self::SELL_MULTIPLIER, 0),
-                'status' => $isPast ? 'Paid' : 'Pending',
+                'status' => 'Paid',
             ];
         }
         $this->createMonthlyInvoices($tenant, $contract, $start, $invoiceRows, $monthlyTeam, $rankAvg);
@@ -702,7 +727,7 @@ class HackthonSeederV3 extends Seeder
     }
 
     /**
-     * A-Project1: Manchester United project — Aug–Dec 2026.
+     * A-Project1: A Bank HR Management System — Jul–Nov 2026.
      * Negotiation stage: deal + estimation only, no contract/project.
      */
     private function createManchesterUnited(Tenant $tenant, array $employees, array $roles, User $admin, Carbon $yearStart, array $rankAvg): void
@@ -713,7 +738,7 @@ class HackthonSeederV3 extends Seeder
             ['emp' => $employees['member8'], 'role_code' => 'backend', 'feature' => 'Data layer + API', 'hours_per_month' => 160, 'months' => 5],
         ];
         $months = 5;
-        $start = Carbon::create(2026, 8, 1);
+        $start = Carbon::create(2026, 7, 1);
 
         // 1L+2M for 5 months
         $monthlyTeam = array_fill(0, $months, ['leaders' => 1, 'members' => 2]);
@@ -721,11 +746,11 @@ class HackthonSeederV3 extends Seeder
 
         $deal = Deal::create([
             'tenant_id' => $tenant->id,
-            'name' => 'Manchester United project',
-            'client' => 'Manchester United FC',
-            'contact_name' => 'Mr. Ferguson',
-            'contact_email' => 'ferguson@manutd.example.com',
-            'contact_phone' => '+44 161 000 0000',
+            'name' => 'A Bank HR Management System',
+            'client' => 'A Bank',
+            'contact_name' => 'Daw Khin Khin',
+            'contact_email' => 'khin.khin@abank.example.com',
+            'contact_phone' => '+95 1 555 0100',
             'estimated_value' => $costs['total_income'],
             'win_probability' => 80,
             'status' => 'negotiation',
@@ -735,12 +760,15 @@ class HackthonSeederV3 extends Seeder
             'client_budget' => $costs['total_income'],
             'timeline_months' => $months,
             'workload_hours' => $months * 3 * 160,
-            'workload_description' => 'Fan engagement platform with match-day analytics, membership portal, and real-time notifications. Project window: 2026/08 – 2026/12.',
+            'workload_description' => 'Internal HR management platform for A Bank: employee directory with org chart,'
+                .' leave & attendance workflow with branch-manager approvals, payroll-system integration,'
+                .' role-based access for HR + branch managers + employees, exportable reports for the Central Bank'
+                .' quarterly filing. Project window: 2026/07 – 2026/11. Team: 1 leader + 2 backend across 5 months.',
             'ot_policy_model' => 'customer_pays_per_hour',
             'ot_rate_per_hour' => 35_000,
             'ot_included_hours_per_month' => 0,
             'ot_notes' => 'All OT billable to customer.',
-            'customer_support_obligations' => 'Customer provides test environment + sample data.',
+            'customer_support_obligations' => 'Customer provides test environment + sample HR data.',
             'out_of_scope_policy' => 'Hardware procurement out of scope.',
             'working_hours' => '09:00 – 18:00 Mon–Fri JST',
             'testing_range' => 'Browser: Chrome + Edge latest.',
@@ -753,10 +781,10 @@ class HackthonSeederV3 extends Seeder
             'final_monthly_fee' => round($costs['total_income'] / $months, 0),
             'final_installation_fee' => 0,
             'final_contract_months' => $months,
-            'final_ot_policy' => 'Customer pays per hour at MMK 35,000/hr.',
+            'final_ot_policy' => 'Customer pays per hour at JPY 35,000/hr.',
             'final_support_hours_per_month' => 160,
             'final_team_summary' => '1 Leader + 2 Members, 5-month engagement.',
-            'final_currency' => 'MMK',
+            'final_currency' => 'JPY',
             'final_confirmed_at' => Carbon::now()->subDays(2),
             'wizard_step' => 'complete',
         ]);
@@ -768,7 +796,7 @@ class HackthonSeederV3 extends Seeder
     }
 
     /**
-     * B-Project1: Arsenal Fc project — Oct–Dec 2026.
+     * B-Project1: SIS Burma Profile Web Page — Sep–Nov 2026.
      * Qualified stage: deal + estimation only.
      */
     private function createArsenalFc(Tenant $tenant, array $employees, array $roles, User $admin, Carbon $yearStart, array $rankAvg): void
@@ -779,7 +807,7 @@ class HackthonSeederV3 extends Seeder
             ['emp' => $employees['member9'], 'role_code' => 'frontend', 'feature' => 'Frontend + mobile',  'hours_per_month' => 160, 'months' => 3],
         ];
         $months = 3;
-        $start = Carbon::create(2026, 10, 1);
+        $start = Carbon::create(2026, 9, 1);
 
         // 1L+2M for 3 months
         $monthlyTeam = array_fill(0, $months, ['leaders' => 1, 'members' => 2]);
@@ -787,11 +815,11 @@ class HackthonSeederV3 extends Seeder
 
         $deal = Deal::create([
             'tenant_id' => $tenant->id,
-            'name' => 'Arsenal Fc project',
-            'client' => 'Arsenal Football Club',
-            'contact_name' => 'Ms. Wenger',
-            'contact_email' => 'wenger@arsenal.example.com',
-            'contact_phone' => '+44 20 0000 0000',
+            'name' => 'SIS Burma Profile Web Page',
+            'client' => 'SIS Burma',
+            'contact_name' => 'U Tin Maung',
+            'contact_email' => 'tin.maung@sisburma.example.com',
+            'contact_phone' => '+95 1 555 0200',
             'estimated_value' => $costs['total_income'],
             'win_probability' => 50,
             'status' => 'qualified',
@@ -801,7 +829,10 @@ class HackthonSeederV3 extends Seeder
             'client_budget' => $costs['total_income'],
             'timeline_months' => $months,
             'workload_hours' => $months * 3 * 160,
-            'workload_description' => 'Training analytics dashboard and scouting database. Project window: 2026/10 – 2026/12.',
+            'workload_description' => 'Corporate profile site for SIS Burma: services catalogue, leadership bios,'
+                .' case studies, blog/news, contact + inquiry form (CRM email handoff), Google Business + Maps embeds,'
+                .' multilingual EN / MY (Unicode + Zawgyi input). SEO-tuned, mobile-first, < 2s page load on 4G.'
+                .' Project window: 2026/09 – 2026/11. Team: 1 leader + 1 backend + 1 frontend across 3 months.',
             'ot_policy_model' => 'customer_pays_per_hour',
             'ot_rate_per_hour' => 35_000,
             'ot_included_hours_per_month' => 0,
@@ -942,9 +973,10 @@ class HackthonSeederV3 extends Seeder
             'tenant_id' => $tenant->id,
             'name' => $opts['name'],
             'client' => $opts['client'],
-            'contact_name' => 'Demo Contact',
-            'contact_email' => 'contact@'.\Illuminate\Support\Str::slug($opts['client']).'.example.com',
-            'contact_phone' => '+81 90 0000 0000',
+            'contact_name' => $opts['contact_name'] ?? 'Demo Contact',
+            'contact_email' => $opts['contact_email']
+                ?? 'contact@'.\Illuminate\Support\Str::slug($opts['client']).'.example.com',
+            'contact_phone' => $opts['contact_phone'] ?? '+95 1 555 0000',
             'estimated_value' => $costs['total_income'],
             'win_probability' => 100,
             'status' => 'won',
@@ -954,7 +986,8 @@ class HackthonSeederV3 extends Seeder
             'client_budget' => $costs['total_income'],
             'timeline_months' => $opts['months'],
             'workload_hours' => $opts['workload_hours'],
-            'workload_description' => $opts['name'].' — won-deal demo (V3 seeder).',
+            'workload_description' => $opts['workload_description']
+                ?? $opts['name'].' — won-deal demo (V3 seeder).',
             'ot_policy_model' => $opts['ot_policy'],
             'ot_rate_per_hour' => $opts['ot_rate'],
             'ot_included_hours_per_month' => 0,
@@ -975,10 +1008,10 @@ class HackthonSeederV3 extends Seeder
             'final_ot_policy' => $opts['ot_notes'],
             'final_support_hours_per_month' => 160,
             'final_team_summary' => count($team).' team members across '.$opts['months'].' months.',
-            'final_currency' => 'MMK',
+            'final_currency' => 'JPY',
             'final_confirmed_at' => $opts['start']->copy()->subDays(7),
             'won_at' => $opts['start']->copy()->subDays(2),
-            'win_reason' => 'Strong reference + competitive pricing.',
+            'win_reason' => $opts['win_reason'] ?? 'Strong reference + competitive pricing.',
             'wizard_step' => 'complete',
         ]);
 
@@ -1007,7 +1040,7 @@ class HackthonSeederV3 extends Seeder
             'end_date' => $end->toDateString(),
             'signed_at' => $start->copy()->subDay(),
             'payment_terms_days' => 7,
-            'currency' => 'MMK',
+            'currency' => 'JPY',
             'notes' => 'V3 demo contract.',
         ]);
 
