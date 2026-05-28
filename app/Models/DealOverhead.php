@@ -16,11 +16,13 @@ class DealOverhead extends Model
         'deal_id',
         'name',
         'cost',
+        'months',
     ];
 
     protected $casts = [
-        'id'   => 'string',
-        'cost' => 'float',
+        'id'     => 'string',
+        'cost'   => 'float',
+        'months' => 'integer',
     ];
 
     public function deal()

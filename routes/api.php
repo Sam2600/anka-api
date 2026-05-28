@@ -169,7 +169,7 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         Route::patch ('/invoices/{invoice}',        [InvoiceController::class, 'update']);
         Route::delete('/invoices/{invoice}',        [InvoiceController::class, 'destroy']);
         Route::patch ('/invoices/{invoice}/pay',    [InvoiceController::class, 'pay']);
-        Route::post  ('/invoices/{invoice}/send',   [InvoiceController::class, 'send']);
+        Route::post  ('/invoices/{invoice}/mark-issued', [InvoiceController::class, 'markIssued']);
         Route::post  ('/contracts/{contract}/invoices/preview', [InvoiceController::class, 'preview']);
     });
 

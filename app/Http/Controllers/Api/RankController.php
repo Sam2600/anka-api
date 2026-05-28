@@ -39,7 +39,7 @@ class RankController extends Controller
                 Rule::unique('ranks', 'code')
                     ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
             ],
-            'level' => 'required|integer|min:0|max:100',
+            'level' => 'required|integer|min:0|max:9',
         ]);
 
         $rank = Rank::create($data);
@@ -60,7 +60,7 @@ class RankController extends Controller
                     ->ignore($rank->id)
                     ->where(fn ($q) => $q->where('tenant_id', $tenantId)->whereNull('deleted_at')),
             ],
-            'level' => 'sometimes|required|integer|min:0|max:100',
+            'level' => 'sometimes|required|integer|min:0|max:9',
         ]);
 
         $rank->update($data);
