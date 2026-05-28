@@ -410,6 +410,7 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
         // Project Task Assignments (xlsx-driven AI task allocation, per-phase)
         Route::post ('/projects/{project}/assign-tasks',                                                          [AiAutoAssignController::class, 'assignTasks']);
         Route::patch('/projects/{project}/task-phase-assignments/{phaseAssignment}',                              [AiAutoAssignController::class, 'updateTaskPhaseAssignment']);
+        Route::patch('/projects/{project}/task-phase-assignments/{phaseAssignment}/planned-dates',                [AiAutoAssignController::class, 'updatePhasePlannedDates']);
         Route::post ('/projects/{project}/task-phase-assignments/{phaseAssignment}/check-reassignment',           [AiAutoAssignController::class, 'checkReassignment']);
         Route::post ('/projects/{project}/task-phase-assignments/{phaseAssignment}/reassign',                     [AiAutoAssignController::class, 'reassignPhase']);
     });

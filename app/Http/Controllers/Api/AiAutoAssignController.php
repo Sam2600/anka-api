@@ -9,8 +9,8 @@ use App\Http\Resources\ProjectTaskPhaseAssignmentResource;
 use App\Http\Resources\ProjectTeamAssignmentResource;
 use App\Models\AiUsageLog;
 use App\Models\DealGhostRole;
-use App\Models\EstimationVersion;
 use App\Models\Employee;
+use App\Models\EstimationVersion;
 use App\Models\Holiday;
 use App\Models\Project;
 use App\Models\ProjectTaskAssignment;
@@ -2361,6 +2361,246 @@ PROMPT;
             'shifted_phases' => $result['shifted_phases'],
             'warnings' => $result['warnings'],
         ]);
+    }
+
+    /**
+     * Manager-edited planned dates for a single phase. Validates working-day
+     * placement (weekends + tenant holidays), then cascades two ways inside a
+     * single transaction:
+     *   1) same-task — any later phase in this task_assignment_id whose
+     *      planned_start now <= the saved phase's planned_end shifts forward.
+     *   2) same-assignee — the assignee's later phases across all projects
+     *      shift via PhaseReassignmentService::cascadeShift().
+     * Variance is derived on read so nothing to recompute here.
+     */
+    public function updatePhasePlannedDates(Request $request, Project $project, ProjectTaskPhaseAssignment $phaseAssignment)
+    {
+        $phaseAssignment->loadMissing('taskAssignment');
+        if (! $phaseAssignment->taskAssignment || $phaseAssignment->taskAssignment->project_id !== $project->id) {
+            abort(404);
+        }
+
+        $validated = $request->validate([
+            'planned_start' => 'required|date',
+            'planned_end' => 'required|date|after_or_equal:planned_start',
+        ]);
+
+        $newStart = Carbon::parse($validated['planned_start'])->startOfDay();
+        $newEnd = Carbon::parse($validated['planned_end'])->startOfDay();
+
+        $tenantId = app('tenant_id');
+        $project->load('contract.deal');
+        $windowStart = $project->start_date ? Carbon::parse($project->start_date)->startOfDay() : Carbon::today()->subYear();
+        $windowEnd = $project->effectiveEndDate() ?? Carbon::today()->addYear();
+        if ($newEnd->greaterThan($windowEnd)) {
+            $windowEnd = $newEnd->copy()->addMonths(2);
+        }
+        $calendar = CalendarFactory::forTenant($tenantId, $windowStart, $windowEnd);
+
+        $assigneeId = $phaseAssignment->assignee_id;
+
+        if (! $calendar->isWorkingDay($newStart, $assigneeId)) {
+            return response()->json([
+                'message' => 'planned_start falls on a weekend or holiday.',
+                'errors' => ['planned_start' => ['Pick a working day.']],
+            ], 422);
+        }
+        if (! $calendar->isWorkingDay($newEnd, $assigneeId)) {
+            return response()->json([
+                'message' => 'planned_end falls on a weekend or holiday.',
+                'errors' => ['planned_end' => ['Pick a working day.']],
+            ], 422);
+        }
+
+        $priorMaxStart = ProjectTaskPhaseAssignment::where('task_assignment_id', $phaseAssignment->task_assignment_id)
+            ->where('phase_order', '<', $phaseAssignment->phase_order)
+            ->whereNotNull('planned_start')
+            ->max('planned_start');
+        if ($priorMaxStart && $newStart->lessThan(Carbon::parse($priorMaxStart))) {
+            return response()->json([
+                'message' => "planned_start must be on or after the previous phase's start in this task.",
+                'errors' => ['planned_start' => ["Earliest allowed is {$priorMaxStart}."]],
+            ], 422);
+        }
+
+        return DB::transaction(function () use ($phaseAssignment, $project, $newStart, $newEnd, $calendar, $assigneeId) {
+            $phaseAssignment->lockForUpdate();
+            $editedAt = now();
+
+            $phaseAssignment->update([
+                'planned_start' => $newStart->toDateString(),
+                'planned_end' => $newEnd->toDateString(),
+                'planned_dates_edited_at' => $editedAt,
+            ]);
+
+            $cascaded = [];
+            $warnings = [];
+            $visited = [$phaseAssignment->id => true];
+            $projectEnd = $project->effectiveEndDate();
+
+            // Pass 1: same-task cascade triggered by the anchor edit.
+            $this->cascadeWithinTask(
+                $phaseAssignment->task_assignment_id,
+                $phaseAssignment->phase_order,
+                $newEnd,
+                $calendar,
+                $projectEnd,
+                $editedAt,
+                $cascaded,
+                $warnings,
+                $visited,
+            );
+
+            // Pass 2: same-assignee cascade (cascadeShift does its own DB writes).
+            if ($assigneeId) {
+                $service = new PhaseReassignmentService($calendar);
+                $assigneeResult = $service->cascadeShift(
+                    $assigneeId,
+                    $newEnd,
+                    $phaseAssignment->id,
+                    dryRun: false,
+                );
+                $shiftedIds = [];
+                foreach ($assigneeResult['shifted'] as $row) {
+                    $phaseId = $row['phase_assignment_id'];
+                    if (isset($visited[$phaseId])) {
+                        continue;
+                    }
+                    $visited[$phaseId] = true;
+                    $shiftedIds[] = $phaseId;
+                    $cascaded[] = [
+                        'phase_assignment_id' => $phaseId,
+                        'phase_name' => $row['phase_name'],
+                        'phase_code' => null,
+                        'task_assignment_id' => null,
+                        'reason' => 'same_assignee',
+                        'original_start' => $row['original_start'],
+                        'original_end' => $row['original_end'],
+                        'new_start' => $row['new_start'],
+                        'new_end' => $row['new_end'],
+                    ];
+                }
+                // Stamp planned_dates_edited_at on the rows cascadeShift touched
+                // so the frontend banner picks them up too.
+                if (! empty($shiftedIds)) {
+                    ProjectTaskPhaseAssignment::whereIn('id', $shiftedIds)
+                        ->update(['planned_dates_edited_at' => $editedAt]);
+                }
+                $warnings = array_merge($warnings, $assigneeResult['warnings']);
+
+                // Pass 3 (A1 transitivity): each same-assignee shifted row may
+                // belong to a different task whose own later phases now overlap.
+                // Re-run same-task cascade per shifted row; visited prevents loops.
+                foreach ($assigneeResult['shifted'] as $row) {
+                    $shifted = ProjectTaskPhaseAssignment::find($row['phase_assignment_id']);
+                    if (! $shifted) {
+                        continue;
+                    }
+                    $this->cascadeWithinTask(
+                        $shifted->task_assignment_id,
+                        $shifted->phase_order,
+                        Carbon::parse($row['new_end']),
+                        $calendar,
+                        $projectEnd,
+                        $editedAt,
+                        $cascaded,
+                        $warnings,
+                        $visited,
+                    );
+                }
+            }
+
+            $phaseAssignment->load('assignee.rank');
+
+            return response()->json([
+                'phase' => new ProjectTaskPhaseAssignmentResource($phaseAssignment),
+                'cascaded_phases' => $cascaded,
+                'warnings' => $warnings,
+            ]);
+        });
+    }
+
+    /**
+     * Shift later phases of one task forward when they overlap an anchor end.
+     * Idempotent via the $visited set keyed by phase_assignment_id. Stamps
+     * planned_dates_edited_at + nulls start_day_hours when duration changes,
+     * so VarianceCalculator falls back to even-distribution.
+     */
+    private function cascadeWithinTask(
+        string $taskAssignmentId,
+        int $afterPhaseOrder,
+        Carbon $anchorEnd,
+        WorkingDayCalendar $calendar,
+        ?Carbon $projectEnd,
+        Carbon|\DateTimeInterface $editedAt,
+        array &$cascaded,
+        array &$warnings,
+        array &$visited,
+    ): void {
+        $later = ProjectTaskPhaseAssignment::where('task_assignment_id', $taskAssignmentId)
+            ->where('phase_order', '>', $afterPhaseOrder)
+            ->whereNotNull('planned_start')
+            ->whereNotNull('planned_end')
+            ->orderBy('phase_order')
+            ->lockForUpdate()
+            ->get();
+
+        $prevEnd = $anchorEnd->copy();
+        foreach ($later as $phase) {
+            if (isset($visited[$phase->id])) {
+                // Already shifted via a different path — re-read fresh state
+                // to keep this loop's prevEnd consistent with that update.
+                $phase->refresh();
+                $prevEnd = Carbon::parse($phase->planned_end)->greaterThan($prevEnd)
+                    ? Carbon::parse($phase->planned_end)
+                    : $prevEnd;
+
+                continue;
+            }
+
+            $laterStart = Carbon::parse($phase->planned_start);
+            $laterEnd = Carbon::parse($phase->planned_end);
+
+            if ($laterStart->lessThanOrEqualTo($prevEnd)) {
+                $oldDuration = max(1, $calendar->workingDaysBetween($laterStart, $laterEnd, $phase->assignee_id));
+                $shiftStart = $calendar->nextWorkingDay($prevEnd->copy()->addDay(), $phase->assignee_id);
+                $shiftEnd = $oldDuration > 1
+                    ? $calendar->addWorkingDays($shiftStart->copy(), $oldDuration - 1, $phase->assignee_id)
+                    : $shiftStart->copy();
+                $newDuration = max(1, $calendar->workingDaysBetween($shiftStart, $shiftEnd, $phase->assignee_id));
+
+                $updates = [
+                    'planned_start' => $shiftStart->toDateString(),
+                    'planned_end' => $shiftEnd->toDateString(),
+                    'planned_dates_edited_at' => $editedAt,
+                ];
+                if ($oldDuration !== $newDuration) {
+                    $updates['start_day_hours'] = null;
+                }
+                $phase->update($updates);
+                $visited[$phase->id] = true;
+
+                if ($projectEnd && $shiftEnd->greaterThan($projectEnd)) {
+                    $warnings[] = "Phase \"{$phase->phase_name}\" was pushed past project end date ({$projectEnd->toDateString()})";
+                }
+
+                $cascaded[] = [
+                    'phase_assignment_id' => $phase->id,
+                    'phase_name' => $phase->phase_name,
+                    'phase_code' => $phase->phase_code,
+                    'task_assignment_id' => $phase->task_assignment_id,
+                    'reason' => 'same_task',
+                    'original_start' => $laterStart->toDateString(),
+                    'original_end' => $laterEnd->toDateString(),
+                    'new_start' => $shiftStart->toDateString(),
+                    'new_end' => $shiftEnd->toDateString(),
+                ];
+
+                $prevEnd = $shiftEnd->copy();
+            } else {
+                $prevEnd = $laterEnd->copy();
+            }
+        }
     }
 
     private function readEstimateSheet(?string $absolutePath = null): array
