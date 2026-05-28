@@ -18,11 +18,15 @@ class ProjectTeamAssignment extends Model
         'project_id',
         'employee_id',
         'allocated_hours',
+        'monthly_allocation',
+        'team_start_date',
         'assignment_source',
     ];
 
     protected $casts = [
         'allocated_hours' => 'float',
+        'monthly_allocation' => 'array',
+        'team_start_date' => 'date',
     ];
 
     public function project()

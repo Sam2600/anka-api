@@ -25,19 +25,21 @@ class ProjectTaskPhaseAssignment extends Model
         'assignment_source',
         'planned_start',
         'planned_end',
+        'planned_dates_edited_at',
         'actual_start',
         'actual_end',
         'status',
     ];
 
     protected $casts = [
-        'phase_order'     => 'integer',
+        'phase_order' => 'integer',
         'estimated_hours' => 'float',
         'start_day_hours' => 'float',
-        'planned_start'   => 'date',
-        'planned_end'     => 'date',
-        'actual_start'    => 'date',
-        'actual_end'      => 'date',
+        'planned_start' => 'date',
+        'planned_end' => 'date',
+        'planned_dates_edited_at' => 'datetime',
+        'actual_start' => 'date',
+        'actual_end' => 'date',
     ];
 
     public function taskAssignment()
