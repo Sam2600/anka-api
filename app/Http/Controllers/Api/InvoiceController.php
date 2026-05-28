@@ -4,7 +4,6 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Resources\InvoiceResource;
-use App\Mail\InvoiceIssued;
 use App\Models\Contract;
 use App\Models\EstimationVersion;
 use App\Models\Invoice;
@@ -14,7 +13,6 @@ use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Mail;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 
 class InvoiceController extends Controller
@@ -237,32 +235,15 @@ class InvoiceController extends Controller
     }
 
     /**
-     * Email the invoice to the contract's billing email (or an override address).
-     * Marks `issued_at` if not already set, increments `reminder_sent_count` if it
-     * was. The first call is the "issue" event; subsequent calls are reminders.
+     * Mark the invoice as issued. Sets `issued_at` (idempotent — only on first
+     * call) and promotes Draft → Pending. No email is sent — invoices are
+     * delivered to clients out of band (XLSX export, printed copy, etc.).
      */
-    public function send(Request $request, Invoice $invoice)
+    public function markIssued(Invoice $invoice)
     {
-        $validated = $request->validate([
-            'to' => 'sometimes|nullable|email|max:255',
-        ]);
-
-        $invoice->load('contract');
-        $to = $validated['to'] ?? $invoice->sent_to_email ?? $invoice->contract?->billing_email;
-
-        if (! $to) {
-            throw new HttpException(422, 'No recipient email. Set a billing email on the contract or pass `to` in the request.');
-        }
-
-        Mail::to($to)->queue(new InvoiceIssued($invoice));
-
-        $isFirstSend = $invoice->issued_at === null;
         $invoice->update([
-            'issued_at'           => $invoice->issued_at ?? now(),
-            'sent_to_email'       => $to,
-            'reminder_sent_count' => $isFirstSend ? 0 : ($invoice->reminder_sent_count + 1),
-            // Status promotion: Draft invoices become Pending the moment they're issued.
-            'status'              => $invoice->status === 'Draft' ? 'Pending' : $invoice->status,
+            'issued_at' => $invoice->issued_at ?? now(),
+            'status'    => $invoice->status === 'Draft' ? 'Pending' : $invoice->status,
         ]);
 
         return new InvoiceResource($invoice->fresh());
