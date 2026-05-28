@@ -189,15 +189,15 @@ class HackthonSeederV2 extends Seeder
     {
         $ranks = [];
         foreach ([
-            ['code' => 'Junior',    'name' => 'Junior',           'level' => 10],
-            ['code' => 'Mid',       'name' => 'Mid-Level',        'level' => 20],
-            ['code' => 'Senior',    'name' => 'Senior',           'level' => 30],
-            ['code' => 'Lead',      'name' => 'Lead / Tech Lead', 'level' => 40],
-            ['code' => 'Manager',   'name' => 'Manager',          'level' => 50],
-            ['code' => 'Director',  'name' => 'Director',         'level' => 70],
-            ['code' => 'Executive', 'name' => 'Executive',        'level' => 90],
+            ['code' => '001', 'name' => 'Junior',           'level' => 1, 'key' => 'Junior'],
+            ['code' => '002', 'name' => 'Mid-Level',        'level' => 2, 'key' => 'Mid'],
+            ['code' => '003', 'name' => 'Senior',           'level' => 3, 'key' => 'Senior'],
+            ['code' => '004', 'name' => 'Lead / Tech Lead', 'level' => 4, 'key' => 'Lead'],
+            ['code' => '005', 'name' => 'Manager',          'level' => 5, 'key' => 'Manager'],
+            ['code' => '006', 'name' => 'Director',         'level' => 6, 'key' => 'Director'],
+            ['code' => '007', 'name' => 'Executive',        'level' => 7, 'key' => 'Executive'],
         ] as $row) {
-            $ranks[$row['code']] = Rank::create([
+            $ranks[$row['key']] = Rank::create([
                 'tenant_id' => $tenant->id,
                 'code' => $row['code'],
                 'name' => $row['name'],
