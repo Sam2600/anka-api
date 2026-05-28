@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
+use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
 use PhpOffice\PhpSpreadsheet\Style\Border;
@@ -1158,9 +1159,11 @@ class EstimationXlsxService
 
                     for ($m = 0; $m < $count; $m++) {
                         $suffix = $count > 1 ? ' '.($m + 1) : '';
+                        $fullName = $roleName.$suffix;
                         $out[] = [
-                            'name' => $roleName.$suffix,
+                            'name' => $fullName,
                             'role_type' => $entry['role_type'] ?? $this->guessRoleType($roleName),
+                            'preferred_capacity_role' => $entry['preferred_capacity_role'] ?? $this->guessCapacityRole($roleName),
                             'monthly_allocation' => is_array($alloc) ? array_map('floatval', $alloc) : [],
                             'monthly_salary' => $monthlySalary,
                         ];
@@ -1200,6 +1203,7 @@ class EstimationXlsxService
                 $out[] = [
                     'name' => $emp?->name ?? 'Employee',
                     'role_type' => $this->guessEmployeeRoleType($emp),
+                    'preferred_capacity_role' => $emp ? (optional($emp->capacityRole)->code ?? $emp->capacity_role) : null,
                     'monthly_allocation' => $alloc,
                     'monthly_salary' => $emp?->monthly_salary ?? 0,
                 ];
@@ -1221,6 +1225,7 @@ class EstimationXlsxService
                 $out[] = [
                     'name' => $employee?->name ?? 'Employee',
                     'role_type' => $this->guessEmployeeRoleType($employee),
+                    'preferred_capacity_role' => $employee ? (optional($employee->capacityRole)->code ?? $employee->capacity_role) : null,
                     'monthly_allocation' => $alloc,
                     'monthly_salary' => $employee?->monthly_salary ?? 0,
                 ];
@@ -1256,6 +1261,7 @@ class EstimationXlsxService
             $out[] = [
                 'name' => $role?->title ?? 'Role',
                 'role_type' => 'S Member',
+                'preferred_capacity_role' => $this->guessCapacityRole($role?->title ?? ''),
                 'monthly_allocation' => $alloc,
                 'monthly_salary' => $role?->rate ?? 0,
             ];
@@ -1296,6 +1302,28 @@ class EstimationXlsxService
         }
 
         return 'S Member';
+    }
+
+    private function guessCapacityRole(string $name): ?string
+    {
+        $lower = mb_strtolower($name);
+        if (str_contains($lower, 'backend') || str_contains($lower, 'server') || str_contains($lower, 'api')) {
+            return 'backend';
+        }
+        if (str_contains($lower, 'frontend') || str_contains($lower, 'front-end') || str_contains($lower, 'ui dev')) {
+            return 'frontend';
+        }
+        if (str_contains($lower, 'qa') || str_contains($lower, 'test') || str_contains($lower, 'quality')) {
+            return 'qa';
+        }
+        if (str_contains($lower, 'design') || str_contains($lower, 'ui/ux') || str_contains($lower, 'ux')) {
+            return 'design';
+        }
+        if (str_contains($lower, 'pm') || str_contains($lower, 'project manager')) {
+            return 'pm';
+        }
+
+        return null;
     }
 
     private function guessEmployeeRoleType(?Employee $employee): string
@@ -1406,6 +1434,100 @@ class EstimationXlsxService
         Storage::disk('local')->put($relativePath, file_get_contents($tmp));
 
         @unlink($tmp);
+    }
+
+    /**
+     * Replace generic role names ("IT Leader", "IT Member 1") in the Team
+     * Structure sheet's Assignee column with actual employee names after
+     * team confirmation.
+     *
+     * @param  array<string, string>  $slotEmployeeMap  ['slot-0' => 'Tanaka Ichiro', ...]
+     */
+    public function updateTeamStructureNames(Project $project, array $slotEmployeeMap): bool
+    {
+        if (empty($slotEmployeeMap)) {
+            return true;
+        }
+
+        try {
+            $resolver = app(EstimateFileResolver::class);
+            $absolutePath = $resolver->latestForProject($project);
+            if (! $absolutePath) {
+                Log::info('updateTeamStructureNames: no xlsx file found, skipping', [
+                    'project_id' => $project->id,
+                ]);
+
+                return false;
+            }
+
+            $spreadsheet = IOFactory::load($absolutePath);
+            $sheetName = '人的山積(Team Structure)';
+            if (! in_array($sheetName, $spreadsheet->getSheetNames(), true)) {
+                Log::warning('updateTeamStructureNames: sheet not found', [
+                    'sheet_name' => $sheetName,
+                    'available' => $spreadsheet->getSheetNames(),
+                ]);
+
+                return false;
+            }
+
+            $ws = $spreadsheet->getSheetByName($sheetName);
+            $firstMemberRow = 5;
+            $highestRow = (int) $ws->getHighestRow();
+            $updated = 0;
+
+            foreach ($slotEmployeeMap as $slotId => $employeeName) {
+                if (! preg_match('/^slot-(\d+)$/', $slotId, $m)) {
+                    continue;
+                }
+                $row = $firstMemberRow + (int) $m[1];
+                if ($row > $highestRow) {
+                    Log::warning('updateTeamStructureNames: row exceeds sheet bounds', [
+                        'slot_id' => $slotId, 'row' => $row, 'highest' => $highestRow,
+                    ]);
+
+                    continue;
+                }
+                $ws->setCellValue("B{$row}", $employeeName);
+                $updated++;
+            }
+
+            if ($updated === 0) {
+                return true;
+            }
+
+            // Resolve the relative path for Storage::disk('local').
+            $version = EstimationVersion::withoutGlobalScopes()
+                ->where('deal_id', $project->contract?->deal_id)
+                ->whereNotNull('xlsx_path')
+                ->orderByDesc('version_number')
+                ->orderByDesc('created_at')
+                ->first();
+
+            if (! $version) {
+                return false;
+            }
+
+            $writer = new Xlsx($spreadsheet);
+            $tmp = tempnam(sys_get_temp_dir(), 'estimation_');
+            $writer->save($tmp);
+            Storage::disk('local')->put($version->xlsx_path, file_get_contents($tmp));
+            @unlink($tmp);
+
+            Log::info('updateTeamStructureNames: updated xlsx assignee names', [
+                'project_id' => $project->id,
+                'updated_count' => $updated,
+            ]);
+
+            return true;
+        } catch (Throwable $e) {
+            Log::warning('updateTeamStructureNames: failed', [
+                'project_id' => $project->id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return false;
+        }
     }
 
     private function injectMilestoneArrows(string $xlsxPath, Spreadsheet $ss): void

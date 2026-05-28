@@ -19,6 +19,7 @@ use App\Http\Controllers\Api\PhaseProgressLogController;
 use App\Http\Controllers\Api\ProjectController;
 use App\Http\Controllers\Api\RankController;
 use App\Http\Controllers\Api\ScheduleTrackingController;
+use App\Http\Controllers\Api\ResourceAllocationController;
 use App\Http\Controllers\Api\TeamCapacityController;
 use App\Http\Controllers\Api\TenantAppRoleController;
 use App\Http\Controllers\Api\TenantBankAccountController;
@@ -232,8 +233,9 @@ Route::middleware(['auth:sanctum', 'tenant', 'throttle:60,1'])->group(function (
     // Public holidays — drives holiday-aware capacity math everywhere, so
     // reads are broad. Writes are HR/Admin.
     Route::middleware('permission:manage_organization|view_employees|view_projects|view_crm')->group(function () {
-        Route::get('/holidays',      [HolidayController::class, 'index']);
-        Route::get('/team-capacity', [TeamCapacityController::class, 'index']);
+        Route::get('/holidays',              [HolidayController::class, 'index']);
+        Route::get('/team-capacity',         [TeamCapacityController::class, 'index']);
+        Route::get('/resource-allocation',   [ResourceAllocationController::class, 'index']);
     });
     Route::middleware('permission:manage_organization')->group(function () {
         Route::post  ('/holidays',            [HolidayController::class, 'store']);

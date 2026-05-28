@@ -4,6 +4,7 @@ namespace App\Services\Scheduling;
 
 use App\Exceptions\InvalidAiScheduleException;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Typed DTO + parser for the JSON Claude returns from the AI-driven task
@@ -36,9 +37,48 @@ class AiSchedulePayload
             $text = preg_replace('/\s*```$/', '', $text);
         }
 
+        // Strip ALL ASCII control characters (0x00-0x1F, 0x7F) and force
+        // valid UTF-8. Proxies like vibecode-claude.online can inject
+        // invisible chars that cause json_decode "Control character error".
+        $text = preg_replace('/[\x00-\x1F\x7F]/', ' ', $text) ?? $text;
+
         $decoded = json_decode($text, true);
+
+        // If still failing, try progressively more aggressive cleaning.
         if (! is_array($decoded)) {
-            throw new InvalidAiScheduleException('AI response was not valid JSON.');
+            $clean = mb_convert_encoding($text, 'UTF-8', 'UTF-8');
+            $clean = preg_replace('/[^\x20-\x7E\xC0-\xFD][\x80-\xBF]*/u', ' ', $clean) ?? $clean;
+            $decoded = json_decode($clean, true);
+        }
+
+        if (! is_array($decoded)) {
+            $ascii = preg_replace('/[^\x20-\x7E]/', '', $text) ?? $text;
+            $decoded = json_decode($ascii, true);
+        }
+
+        // Attempt 4: truncation repair. Proxies may cut the response body
+        // mid-stream even when stop_reason="end_turn". Find the last complete
+        // JSON object in the assignments array and close the structure.
+        if (! is_array($decoded)) {
+            $decoded = self::repairTruncatedJson($text);
+        }
+
+        if (! is_array($decoded)) {
+            $errMsg = json_last_error_msg();
+            $sample = '';
+            for ($i = 0, $len = strlen($text); $i < $len; $i++) {
+                $ord = ord($text[$i]);
+                if ($ord < 0x20 || $ord === 0x7F) {
+                    $start = max(0, $i - 20);
+                    $sample = 'pos='.$i.' byte=0x'.sprintf('%02X', $ord)
+                        .' context='.json_encode(substr($text, $start, 40));
+                    break;
+                }
+            }
+
+            throw new InvalidAiScheduleException(
+                "AI response was not valid JSON. json_error: {$errMsg}. {$sample} tail: ".substr($text, -100)
+            );
         }
 
         $self = new self;
@@ -130,6 +170,59 @@ class AiSchedulePayload
         }
 
         return $self;
+    }
+
+    /**
+     * Attempt to repair truncated JSON from a proxy that cuts the response body.
+     * Strips control chars, finds the last complete assignment object, and closes
+     * the structure. Returns decoded array on success, null on failure.
+     */
+    private static function repairTruncatedJson(string $text): ?array
+    {
+        $clean = preg_replace('/[\x00-\x1F\x7F]/', ' ', $text) ?? $text;
+
+        // Only attempt repair if the JSON looks like our expected schedule format
+        // and doesn't end with a closing brace (i.e. is actually truncated).
+        $trimmed = rtrim($clean);
+        if (str_ends_with($trimmed, '}')) {
+            return null;
+        }
+
+        // Find the assignments array start.
+        $assignmentsPos = strpos($clean, '"assignments"');
+        if ($assignmentsPos === false) {
+            return null;
+        }
+
+        // Find the last complete assignment object: look for the last
+        // "planned_end":"YYYY-MM-DD"} pattern which closes a full entry.
+        if (! preg_match_all('/\"planned_end\"\s*:\s*\"\\d{4}-\\d{2}-\\d{2}\"\s*\}/', $clean, $matches, PREG_OFFSET_CAPTURE)) {
+            return null;
+        }
+
+        $lastMatch = end($matches[0]);
+        $cutPos = $lastMatch[1] + strlen($lastMatch[0]);
+
+        // Close the assignments array and outer object.
+        $repaired = substr($clean, 0, $cutPos).']}';
+
+        Log::info('AI Schedule: attempting truncation repair', [
+            'original_length' => strlen($text),
+            'cut_at' => $cutPos,
+            'repaired_length' => strlen($repaired),
+            'removed_tail' => substr($clean, $cutPos, 200),
+        ]);
+
+        $decoded = json_decode($repaired, true);
+        if (is_array($decoded) && ! empty($decoded['assignments'] ?? [])) {
+            Log::warning('AI Schedule: truncation repair succeeded — partial assignments used', [
+                'assignment_count' => count($decoded['assignments']),
+            ]);
+
+            return $decoded;
+        }
+
+        return null;
     }
 
     public function hoursPerDayFor(string $employeeId, float $default = 8.0): float
