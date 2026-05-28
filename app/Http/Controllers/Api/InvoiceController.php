@@ -6,9 +6,11 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\InvoiceResource;
 use App\Mail\InvoiceIssued;
 use App\Models\Contract;
+use App\Models\EstimationVersion;
 use App\Models\Invoice;
 use App\Services\InvoiceLineItemBuilder;
 use App\Services\InvoiceXlsxService;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
@@ -43,8 +45,10 @@ class InvoiceController extends Controller
             'contract_id'           => 'required|uuid|exists:contracts,id',
             'milestone_id'          => 'nullable|uuid|exists:milestones,id',
             'invoice_number'        => 'nullable|string|max:100',
-            'issue_date'            => 'required|date',
-            'due_date'              => 'nullable|date|after_or_equal:issue_date',
+            // issue_date and due_date are server-set (see below) — accepted in
+            // the payload for backward compat but overwritten.
+            'issue_date'            => 'nullable|date',
+            'due_date'              => 'nullable|date',
             'amount'                => 'nullable|numeric|min:0',
             'tax'                   => 'nullable|numeric|min:0',
             'status'                => 'nullable|in:Draft,Pending',
@@ -70,6 +74,11 @@ class InvoiceController extends Controller
             throw new HttpException(422, 'Invoices can only be created for won deals.');
         }
 
+        // Window guard: today must fall inside the latest estimation_version's
+        // team_structure window. Outside that window we have no team allocation
+        // data to invoice against, so we refuse rather than emit a zero invoice.
+        $this->assertWithinTeamStructureWindow($contract);
+
         // When line_items are provided, derive amount + tax from them (VAT
         // hardcoded at 5% per spec). The frontend's preview shows the same
         // math, so this keeps the saved invoice consistent with the preview
@@ -79,6 +88,12 @@ class InvoiceController extends Controller
             $validated['amount'] = round($subTotal, 2);
             $validated['tax'] = round($subTotal * 0.05, 2);
         }
+
+        // Issue date is today, due date is end of current month — per spec
+        // these are not user-editable. Server-set regardless of whatever the
+        // client posted so the frontend's read-only UI can't be bypassed.
+        $validated['issue_date'] = now()->toDateString();
+        $validated['due_date'] = now()->endOfMonth()->toDateString();
 
         // Billing period is locked to the current month per spec. Server
         // overwrites whatever the client sent so the frontend's read-only
@@ -111,6 +126,10 @@ class InvoiceController extends Controller
         if ($contract->deal && $contract->deal->status !== 'won') {
             throw new HttpException(422, 'Invoices can only be previewed for won deals.');
         }
+
+        // Same window guard as store() — surface the constraint at preview
+        // time so the user gets feedback before they hit Save.
+        $this->assertWithinTeamStructureWindow($contract);
 
         $lineItems = $builder->buildForContract($contract);
         $subTotal = array_sum(array_map(fn ($l) => (float) ($l['amount'] ?? 0), $lineItems));
@@ -253,5 +272,51 @@ class InvoiceController extends Controller
     {
         $invoice->delete();
         return response()->noContent();
+    }
+
+    /**
+     * Reject if today is outside the latest estimation_version's team_structure
+     * window. The window spans [start_date, start_date + visible_months) — same
+     * coordinate system InvoiceLineItemBuilder uses to pick monthly_allocation
+     * values. Outside this window we have no per-member allocation to invoice,
+     * so we refuse instead of emitting a 0 invoice that the user could
+     * accidentally send.
+     *
+     * No estimation version → also a hard 422 (saving a version is the prereq).
+     */
+    private function assertWithinTeamStructureWindow(Contract $contract): void
+    {
+        $contract->loadMissing('deal');
+        $deal = $contract->deal;
+        if (! $deal) {
+            throw new HttpException(422, 'Contract has no linked deal.');
+        }
+
+        $version = EstimationVersion::query()
+            ->where('deal_id', $deal->id)
+            ->orderByDesc('version_number')
+            ->first();
+
+        if (! $version || ! is_array($version->sheet_team_structure)) {
+            throw new HttpException(422, 'No saved estimation for this deal. Save a version before invoicing.');
+        }
+
+        $snapshot = $version->sheet_team_structure;
+        $startDate = isset($snapshot['start_date'])
+            ? Carbon::parse($snapshot['start_date'])->startOfMonth()
+            : null;
+        $visibleMonths = (int) ($snapshot['visible_months'] ?? 0);
+
+        if (! $startDate || $visibleMonths < 1) {
+            throw new HttpException(422, 'Estimation team structure is incomplete. Save a version with team allocation before invoicing.');
+        }
+
+        $endExclusive = $startDate->copy()->addMonths($visibleMonths);
+        $today = now()->startOfMonth();
+
+        if ($today->lt($startDate) || $today->gte($endExclusive)) {
+            $windowLabel = $startDate->format('M Y').' – '.$endExclusive->copy()->subMonth()->format('M Y');
+            throw new HttpException(422, "Today is outside the project window ({$windowLabel}). Invoices can only be issued during the project's active months.");
+        }
     }
 }
