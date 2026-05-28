@@ -445,6 +445,7 @@ class DealController extends Controller
                     'tenant_id' => $tenantId,
                     'name' => $overhead['name'] ?? null,
                     'cost' => $overhead['cost'] ?? 0,
+                    'months' => max(1, (int) ($overhead['months'] ?? 1)),
                 ]);
             }
         }

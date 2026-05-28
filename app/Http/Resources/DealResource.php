@@ -101,6 +101,7 @@ class DealResource extends JsonResource
                 'id' => $oh->id,
                 'name' => $oh->name,
                 'cost' => $oh->cost,
+                'months' => $oh->months ?? 1,
             ])
             ),
         ];
