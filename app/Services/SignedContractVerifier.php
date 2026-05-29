@@ -117,12 +117,15 @@ class SignedContractVerifier
         $model = config('services.anthropic.model', self::CLAUDE_MODEL_DEFAULT);
         $baseUrl = config('services.anthropic.base_url', self::CLAUDE_BASE_URL_DEFAULT);
 
+        // OpenCode Zen Go's proxy translates Anthropic Messages → underlying
+        // provider (DeepSeek, etc.) and rejects the plain-string `content`
+        // shorthand. Send the canonical multipart form.
         $payload = [
             'model' => $model,
             'max_tokens' => 400,
             'system' => $this->systemPrompt(),
             'messages' => [
-                ['role' => 'user', 'content' => $this->userPrompt($originalText, $signedText)],
+                ['role' => 'user', 'content' => [['type' => 'text', 'text' => $this->userPrompt($originalText, $signedText)]]],
             ],
         ];
 
