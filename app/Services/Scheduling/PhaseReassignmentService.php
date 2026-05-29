@@ -110,6 +110,7 @@ class PhaseReassignmentService
             ->where('planned_start', '>=', $afterDate->toDateString())
             ->orderBy('planned_start')
             ->limit(100)
+            ->lockForUpdate()
             ->get();
 
         $shifted = [];
@@ -147,10 +148,21 @@ class PhaseReassignmentService
                 ];
 
                 if (! $dryRun) {
-                    $phase->update([
+                    // start_day_hours sized the *original* first day. If the
+                    // shifted window still has the same working-day length,
+                    // the partial-day carve still makes sense. If the length
+                    // changed, null it out so VarianceCalculator falls back
+                    // to even-distribution rather than misreading the plan.
+                    $oldDuration = $this->calendar->workingDaysBetween($currentStart, $currentEnd, $assigneeId);
+                    $newDuration = $this->calendar->workingDaysBetween($newStart, $newEnd, $assigneeId);
+                    $updates = [
                         'planned_start' => $newStart->toDateString(),
                         'planned_end' => $newEnd->toDateString(),
-                    ]);
+                    ];
+                    if ($oldDuration !== $newDuration) {
+                        $updates['start_day_hours'] = null;
+                    }
+                    $phase->update($updates);
                 }
 
                 $prevEnd = $newEnd->copy();
