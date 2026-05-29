@@ -37,6 +37,17 @@ use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
 class AiAutoAssignController extends Controller
 {
+    /**
+     * OpenCode Zen Go's proxy translates Anthropic Messages → underlying provider
+     * (DeepSeek, etc.) and rejects the plain-string `content` shorthand even
+     * though the real Anthropic API accepts it. Always send the canonical
+     * multipart form for message content.
+     */
+    private function asText(string $text): array
+    {
+        return [['type' => 'text', 'text' => $text]];
+    }
+
     public function autoAssign(Request $request, Project $project)
     {
         $tenantId = app('tenant_id');
@@ -90,7 +101,7 @@ class AiAutoAssignController extends Controller
                 'max_tokens' => 2048,
                 'system' => 'You are an HR staffing assistant. Return ONLY a JSON array of employee IDs with allocated hours. No markdown, no explanation.',
                 'messages' => [
-                    ['role' => 'user', 'content' => $prompt],
+                    ['role' => 'user', 'content' => $this->asText($prompt)],
                 ],
             ]);
 
@@ -1187,7 +1198,7 @@ PROMPT;
         $model = config('services.anthropic.model') ?: 'claude-3-5-sonnet-latest';
 
         $messages = [
-            ['role' => 'user', 'content' => $prompt],
+            ['role' => 'user', 'content' => $this->asText($prompt)],
         ];
 
         $retries = (int) (config('services.anthropic.schedule_retries') ?? 1);
@@ -1225,8 +1236,8 @@ PROMPT;
                 if ($attempt === $retries) {
                     return null;
                 }
-                $messages[] = ['role' => 'assistant', 'content' => $text];
-                $messages[] = ['role' => 'user', 'content' => 'Your last reply was not valid JSON matching the schema. Return ONLY the JSON object now.'];
+                $messages[] = ['role' => 'assistant', 'content' => $this->asText($text)];
+                $messages[] = ['role' => 'user', 'content' => $this->asText('Your last reply was not valid JSON matching the schema. Return ONLY the JSON object now.')];
 
                 continue;
             }
@@ -1250,8 +1261,8 @@ PROMPT;
                 return null;
             }
 
-            $messages[] = ['role' => 'assistant', 'content' => $text];
-            $messages[] = ['role' => 'user', 'content' => 'Your previous response failed validation: '.$this->jsonEncode($violations).' Re-emit the JSON object correcting these issues.'];
+            $messages[] = ['role' => 'assistant', 'content' => $this->asText($text)];
+            $messages[] = ['role' => 'user', 'content' => $this->asText('Your previous response failed validation: '.$this->jsonEncode($violations).' Re-emit the JSON object correcting these issues.')];
         }
 
         return null;
@@ -1632,7 +1643,7 @@ PROMPT;
         $baseUrl = rtrim(config('services.anthropic.base_url') ?: 'https://api.anthropic.com', '/');
         $requestTimeout = (int) (config('services.anthropic.request_timeout') ?? 120);
         $connectTimeout = (int) (config('services.anthropic.connect_timeout') ?? 15);
-        $conversation = [['role' => 'user', 'content' => $prompt]];
+        $conversation = [['role' => 'user', 'content' => $this->asText($prompt)]];
 
         try {
             while (true) {
@@ -1824,8 +1835,8 @@ PROMPT;
                 // acceptable and don't need correction. Including them would
                 // waste tokens and possibly confuse the AI into making the
                 // hard situation worse.
-                $conversation[] = ['role' => 'assistant', 'content' => $text];
-                $conversation[] = ['role' => 'user', 'content' => $this->buildRetryPrompt($hardViolations)];
+                $conversation[] = ['role' => 'assistant', 'content' => $this->asText($text)];
+                $conversation[] = ['role' => 'user', 'content' => $this->asText($this->buildRetryPrompt($hardViolations))];
                 $retriesLeft--;
             }
         } catch (\Exception $e) {
