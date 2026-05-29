@@ -4,17 +4,18 @@ namespace Tests\Feature;
 
 use App\Models\Employee;
 use App\Models\ProjectTeamAssignment;
+use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
 /**
- * Covers the new "idle full-time" employee pool used by:
- *   - Employee::scopeIdleAndFullTime
+ * Covers the time-bounded "idle" employee pool used by:
+ *   - Employee::scopeIdleForRange
  *   - AiAutoAssignController::availableEmployees (GET /projects/{p}/available-employees)
- *   - AiAutoAssignController::planTeamPreview (pool query tightened to the same scope)
- *   - AiAutoAssignController::confirmTeamPlan (race-guard rejects poached picks)
+ *   - AiAutoAssignController::planTeamPreview (same scope, with kept-employee exclusion)
+ *   - AiAutoAssignController::confirmTeamPlan (race guard mirrors the same overlap rule)
  *
  * We skip building the full Deal → Contract → Project graph: the scope only
  * needs `employees` + `project_team_assignments` rows. Foreign keys are
@@ -33,6 +34,10 @@ class IdleEmployeePoolTest extends TestCase
 
     private string $fakeProjectB;
 
+    private Carbon $windowStart;
+
+    private Carbon $windowEnd;
+
     /** @var array<string, string> tenant_id => delivery-eligible dept_id */
     private array $deliveryDeptByTenant = [];
 
@@ -48,13 +53,18 @@ class IdleEmployeePoolTest extends TestCase
         $this->fakeProjectA = (string) Str::uuid();
         $this->fakeProjectB = (string) Str::uuid();
 
+        // Default query window used by tests that don't care about dates.
+        // Anchored on a fixed calendar date so timing flakes don't bite.
+        $this->windowStart = Carbon::parse('2026-09-01');
+        $this->windowEnd = Carbon::parse('2026-12-31');
+
         DB::table('tenants')->insert([
             ['id' => $this->tenantA, 'name' => 'Tenant A', 'slug' => 'tenant-a', 'plan' => 'free', 'is_active' => true, 'created_at' => now(), 'updated_at' => now()],
             ['id' => $this->tenantB, 'name' => 'Tenant B', 'slug' => 'tenant-b', 'plan' => 'free', 'is_active' => true, 'created_at' => now(), 'updated_at' => now()],
         ]);
 
         // Two departments per tenant: one delivery-eligible (IT) and one
-        // not (Sales). The new scope's `is_delivery_eligible` filter would
+        // not (Sales). The scope's `is_delivery_eligible` filter would
         // exclude employees in the latter even if they're otherwise idle.
         foreach ([$this->tenantA, $this->tenantB] as $tid) {
             $itId = (string) Str::uuid();
@@ -67,14 +77,9 @@ class IdleEmployeePoolTest extends TestCase
             $this->nonDeliveryDeptByTenant[$tid] = $salesId;
         }
 
-        // Project graph in tenant A — raw inserts to satisfy FKs without
-        // tripping any of the model boot hooks (e.g. the Employee saving
-        // hook that would otherwise force-compute monthly_salary). Tenant B
-        // gets its own project for the cross-tenant assignment test.
         $this->seedProjectGraph($this->tenantA, $this->fakeProjectA);
         $this->seedProjectGraph($this->tenantB, $this->fakeProjectB);
 
-        // Bind tenant A for BelongsToTenant defaulting and scoping.
         app()->instance('tenant_id', $this->tenantA);
     }
 
@@ -101,8 +106,6 @@ class IdleEmployeePoolTest extends TestCase
 
     private function makeEmployee(string $tenantId, array $attrs = []): Employee
     {
-        // Default to the tenant's delivery-eligible department. Tests that
-        // care about the non-delivery case pass `department_id` explicitly.
         $defaultDept = $this->deliveryDeptByTenant[$tenantId] ?? null;
 
         return Employee::withoutEvents(fn () => Employee::create(array_merge([
@@ -117,6 +120,14 @@ class IdleEmployeePoolTest extends TestCase
         ], $attrs)));
     }
 
+    private function idlePool(?Carbon $start = null, ?Carbon $end = null): array
+    {
+        return Employee::idleForRange(
+            $start ?? $this->windowStart,
+            $end ?? $this->windowEnd,
+        )->pluck('id')->all();
+    }
+
     public function test_scope_returns_active_full_time_with_no_team_assignments(): void
     {
         $idle = $this->makeEmployee($this->tenantA, ['name' => 'Idle Ichiro']);
@@ -129,38 +140,37 @@ class IdleEmployeePoolTest extends TestCase
             'project_id' => $this->fakeProjectA,
             'employee_id' => $assigned->id,
             'allocated_hours' => 160,
+            // No team_start_date / team_end_date — treated as "active forever",
+            // so this employee should be excluded for every window.
             'assignment_source' => 'manual',
         ]);
 
-        $ids = Employee::idleAndFullTime()->pluck('id')->all();
+        $ids = $this->idlePool();
 
         $this->assertContains($idle->id, $ids, 'idle full-time employee should be in the pool');
         $this->assertNotContains($partTime->id, $ids, 'part-time should be excluded');
         $this->assertNotContains($inactive->id, $ids, 'non-Active should be excluded');
-        $this->assertNotContains($assigned->id, $ids, 'employee with a team assignment should be excluded');
+        $this->assertNotContains($assigned->id, $ids, 'employee with an open-ended team assignment should be excluded');
     }
 
     public function test_scope_is_tenant_scoped(): void
     {
         $idleA = $this->makeEmployee($this->tenantA, ['name' => 'A-Idle']);
 
-        // Switch context to tenant B and create an idle employee there.
         app()->instance('tenant_id', $this->tenantB);
         $idleB = $this->makeEmployee($this->tenantB, ['name' => 'B-Idle']);
 
-        // Still in tenant B context: the pool sees only tenant B's idle pool.
-        $idsB = Employee::idleAndFullTime()->pluck('id')->all();
+        $idsB = $this->idlePool();
         $this->assertContains($idleB->id, $idsB);
         $this->assertNotContains($idleA->id, $idsB, 'tenant scope must hide other tenants\' employees');
 
-        // Flip back to tenant A and confirm symmetry.
         app()->instance('tenant_id', $this->tenantA);
-        $idsA = Employee::idleAndFullTime()->pluck('id')->all();
+        $idsA = $this->idlePool();
         $this->assertContains($idleA->id, $idsA);
         $this->assertNotContains($idleB->id, $idsA);
     }
 
-    public function test_employee_with_any_project_assignment_is_excluded_even_if_zero_allocated_hours(): void
+    public function test_open_ended_assignment_excludes_employee_regardless_of_window(): void
     {
         $emp = $this->makeEmployee($this->tenantA, ['name' => 'Stub Stan']);
         ProjectTeamAssignment::create([
@@ -168,46 +178,38 @@ class IdleEmployeePoolTest extends TestCase
             'tenant_id' => $this->tenantA,
             'project_id' => $this->fakeProjectA,
             'employee_id' => $emp->id,
-            'allocated_hours' => 0, // edge: "unmatched kept member" pattern
+            'allocated_hours' => 0,
             'assignment_source' => 'ai',
         ]);
 
-        $ids = Employee::idleAndFullTime()->pluck('id')->all();
-        $this->assertNotContains($emp->id, $ids,
-            'even allocated_hours=0 assignments count as "on a project"');
+        $this->assertNotContains($emp->id, $this->idlePool(),
+            'an assignment with NULL team_end_date should conflict with any window (defensive)');
     }
 
     public function test_employee_in_non_delivery_department_is_excluded(): void
     {
-        // An otherwise-perfect candidate: Active, full-time, no project
-        // assignments. But sits in a department flagged is_delivery_eligible
-        // = false (Sales / HR / Finance pattern). The scope must filter
-        // them out so the AI Team Builder never surfaces them as pickable.
         $deliveryEmp = $this->makeEmployee($this->tenantA, ['name' => 'IT Iku']);
         $salesEmp = $this->makeEmployee($this->tenantA, [
             'name' => 'Sales Sora',
             'department_id' => $this->nonDeliveryDeptByTenant[$this->tenantA],
         ]);
 
-        $ids = Employee::idleAndFullTime()->pluck('id')->all();
+        $ids = $this->idlePool();
 
         $this->assertContains($deliveryEmp->id, $ids, 'IT employee must remain in the idle pool');
         $this->assertNotContains($salesEmp->id, $ids,
-            'employee in non-delivery-eligible department must be filtered out — even when otherwise idle');
+            'employee in non-delivery-eligible department must be filtered out');
     }
 
     public function test_employee_with_null_department_is_excluded(): void
     {
-        // Defensive: an employee with no department_id at all should not
-        // appear in the pool. The whereHas() returns false for missing
-        // relations, so the rule is "explicit eligibility, not implicit".
         $orphan = $this->makeEmployee($this->tenantA, [
             'name' => 'Orphan Ora',
             'department_id' => null,
         ]);
 
-        $this->assertNotContains($orphan->id, Employee::idleAndFullTime()->pluck('id')->all(),
-            'employee without a department should be excluded from the idle pool');
+        $this->assertNotContains($orphan->id, $this->idlePool(),
+            'employee without a department should be excluded');
     }
 
     public function test_freshly_freed_employee_re_enters_pool(): void
@@ -222,11 +224,80 @@ class IdleEmployeePoolTest extends TestCase
             'assignment_source' => 'manual',
         ]);
 
-        $this->assertNotContains($emp->id, Employee::idleAndFullTime()->pluck('id')->all());
+        $this->assertNotContains($emp->id, $this->idlePool());
 
         $assignment->delete();
 
-        $this->assertContains($emp->id, Employee::idleAndFullTime()->pluck('id')->all(),
+        $this->assertContains($emp->id, $this->idlePool(),
             'removing the assignment should re-admit the employee to the idle pool');
+    }
+
+    // ── New overlap-semantics tests ───────────────────────────────────────────
+
+    public function test_employee_on_finished_project_is_idle_for_future_window(): void
+    {
+        // The original bug scenario: engineer on Project A (Jan 20 – May 30)
+        // should be available for Project C starting Aug 20.
+        $emp = $this->makeEmployee($this->tenantA, ['name' => 'FreedUp Fumi']);
+        ProjectTeamAssignment::create([
+            'id' => (string) Str::uuid(),
+            'tenant_id' => $this->tenantA,
+            'project_id' => $this->fakeProjectA,
+            'employee_id' => $emp->id,
+            'allocated_hours' => 704,
+            'team_start_date' => '2026-01-20',
+            'team_end_date' => '2026-05-30',
+            'assignment_source' => 'ai',
+        ]);
+
+        $futureStart = Carbon::parse('2026-08-20');
+        $futureEnd = Carbon::parse('2026-12-20');
+
+        $this->assertContains($emp->id, $this->idlePool($futureStart, $futureEnd),
+            'a finished engagement (ends May 30) must not block staffing in Aug-Dec');
+    }
+
+    public function test_employee_on_overlapping_project_is_not_idle(): void
+    {
+        // Project B-ish engagement Mar 1 – Jul 29; query window Jul 15 – Nov 15
+        // overlaps on Jul 15-29, so this engineer must be excluded.
+        $emp = $this->makeEmployee($this->tenantA, ['name' => 'Busy Brenda']);
+        ProjectTeamAssignment::create([
+            'id' => (string) Str::uuid(),
+            'tenant_id' => $this->tenantA,
+            'project_id' => $this->fakeProjectA,
+            'employee_id' => $emp->id,
+            'allocated_hours' => 704,
+            'team_start_date' => '2026-03-01',
+            'team_end_date' => '2026-07-29',
+            'assignment_source' => 'ai',
+        ]);
+
+        $queryStart = Carbon::parse('2026-07-15');
+        $queryEnd = Carbon::parse('2026-11-15');
+
+        $this->assertNotContains($emp->id, $this->idlePool($queryStart, $queryEnd),
+            'engagement ending Jul 29 must block a window starting Jul 15');
+    }
+
+    public function test_assignment_touching_window_edges_blocks_employee(): void
+    {
+        // Edge case: engagement ends exactly on the query start date. Per
+        // overlap rule (a <= d AND c <= b), this counts as an overlap and
+        // the employee is blocked. Better safe than double-booked.
+        $emp = $this->makeEmployee($this->tenantA, ['name' => 'Edgy Eiji']);
+        ProjectTeamAssignment::create([
+            'id' => (string) Str::uuid(),
+            'tenant_id' => $this->tenantA,
+            'project_id' => $this->fakeProjectA,
+            'employee_id' => $emp->id,
+            'allocated_hours' => 160,
+            'team_start_date' => '2026-06-01',
+            'team_end_date' => '2026-09-01', // exactly on $windowStart
+            'assignment_source' => 'ai',
+        ]);
+
+        $this->assertNotContains($emp->id, $this->idlePool(),
+            'engagement ending exactly on the query start must still block (inclusive overlap)');
     }
 }

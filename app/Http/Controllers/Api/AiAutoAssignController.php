@@ -25,6 +25,7 @@ use App\Services\Scheduling\AiScheduleValidator;
 use App\Services\Scheduling\CalendarFactory;
 use App\Services\Scheduling\PhaseReassignmentService;
 use App\Services\Scheduling\WorkingDayCalendar;
+use App\Support\EngagementWindow;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -117,7 +118,9 @@ class AiAutoAssignController extends Controller
                 return $this->demoAutoAssign($project, $deal, $employees, $tenantId);
             }
 
-            DB::transaction(function () use ($assignments, $project, $tenantId) {
+            $teamEndDate = EngagementWindow::computeEndDate(null, null, $project->loadMissing('contract.deal'));
+
+            DB::transaction(function () use ($assignments, $project, $tenantId, $teamEndDate) {
                 ProjectTeamAssignment::where('project_id', $project->id)->delete();
 
                 foreach ($assignments as $item) {
@@ -130,6 +133,7 @@ class AiAutoAssignController extends Controller
                         'project_id' => $project->id,
                         'employee_id' => $item['employee_id'],
                         'allocated_hours' => $item['allocated_hours'],
+                        'team_end_date' => $teamEndDate?->toDateString(),
                         'assignment_source' => 'ai',
                     ]);
                 }
@@ -212,7 +216,9 @@ class AiAutoAssignController extends Controller
             }
         }
 
-        DB::transaction(function () use ($assignments, $project, $tenantId) {
+        $teamEndDate = EngagementWindow::computeEndDate(null, null, $project->loadMissing('contract.deal'));
+
+        DB::transaction(function () use ($assignments, $project, $tenantId, $teamEndDate) {
             ProjectTeamAssignment::where('project_id', $project->id)->delete();
 
             foreach ($assignments as $item) {
@@ -221,6 +227,7 @@ class AiAutoAssignController extends Controller
                     'project_id' => $project->id,
                     'employee_id' => $item['employee_id'],
                     'allocated_hours' => $item['allocated_hours'],
+                    'team_end_date' => $teamEndDate?->toDateString(),
                     'assignment_source' => 'ai',
                 ]);
             }
@@ -255,11 +262,14 @@ class AiAutoAssignController extends Controller
             return response()->json(['error' => 'Employee already assigned to this project'], 409);
         }
 
+        $teamEndDate = EngagementWindow::computeEndDate(null, null, $project->loadMissing('contract.deal'));
+
         $assignment = ProjectTeamAssignment::create([
             'tenant_id' => $tenantId,
             'project_id' => $project->id,
             'employee_id' => $request->input('employee_id'),
             'allocated_hours' => $request->input('allocated_hours'),
+            'team_end_date' => $teamEndDate?->toDateString(),
             'assignment_source' => 'manual',
         ]);
 
@@ -289,8 +299,18 @@ class AiAutoAssignController extends Controller
      */
     public function availableEmployees(Project $project)
     {
+        $project->loadMissing('contract.deal');
+
+        // Mirror planTeamPreview's window source: explicit team_start_date
+        // from the latest estimation version's sheet_team_structure wins if
+        // present, otherwise fall back to the project's own dates.
+        $deal = $project->contract?->deal;
+        $teamStructure = $deal ? $this->resolveSheetTeamStructure($deal) : null;
+        $explicitStart = $teamStructure['start_date'] ?? null;
+        [$start, $end] = EngagementWindow::windowFor($project, $explicitStart);
+
         $employees = Employee::with(['rank', 'capacityRole'])
-            ->idleAndFullTime()
+            ->idleForRange($start, $end)
             ->orderBy('name')
             ->get();
 
@@ -367,6 +387,64 @@ PROMPT;
     private function jsonEncode(array $data): string
     {
         return json_encode($data, JSON_PRETTY_PRINT);
+    }
+
+    /**
+     * Number of distinct calendar months touched by [start, end], inclusive.
+     * Used to size monthly_allocation arrays to a project window.
+     * Example: 2026-06-15 to 2026-08-03 → 3 (Jun, Jul, Aug).
+     */
+    private function monthsBetweenInclusive(Carbon $start, Carbon $end): int
+    {
+        if ($end->lessThan($start)) {
+            return 0;
+        }
+        $startIndex = $start->year * 12 + ($start->month - 1);
+        $endIndex = $end->year * 12 + ($end->month - 1);
+
+        return $endIndex - $startIndex + 1;
+    }
+
+    /**
+     * Working-day count per calendar month for the inclusive range [start, end].
+     * Returns map of "YYYY-MM" => working-day count, considering weekends and
+     * tenant holidays via the supplied WorkingDayCalendar. Mirrors the
+     * validator's helper so the deterministic fallback apportions hours the
+     * same way the validator measures them.
+     *
+     * @return array<string, int>
+     */
+    private function workingDaysPerMonth(
+        WorkingDayCalendar $calendar,
+        Carbon $start,
+        Carbon $end,
+        string $assigneeId
+    ): array {
+        $perMonth = [];
+        $cursor = $start->copy();
+        while ($cursor->lessThanOrEqualTo($end)) {
+            if ($calendar->isWorkingDay($cursor, $assigneeId)) {
+                $key = $cursor->format('Y-m');
+                $perMonth[$key] = ($perMonth[$key] ?? 0) + 1;
+            }
+            $cursor->addDay();
+        }
+
+        return $perMonth;
+    }
+
+    /**
+     * Translate "YYYY-MM" into its index in a monthly_allocation array
+     * anchored at $teamStart. Negative = before the engagement, ≥ length =
+     * after the engagement; both treated by the caller as "zero allocation".
+     */
+    private function monthIndexForKey(Carbon $teamStart, string $monthKey): int
+    {
+        [$year, $month] = array_map('intval', explode('-', $monthKey));
+        $startIndex = $teamStart->year * 12 + ($teamStart->month - 1);
+        $targetIndex = $year * 12 + ($month - 1);
+
+        return $targetIndex - $startIndex;
     }
 
     // ── Team build preview + confirm (new business flow) ──────────────────────
@@ -485,8 +563,10 @@ PROMPT;
             ]);
         }
 
+        [$windowStart, $windowEnd] = EngagementWindow::windowFor($project, $teamStartDate);
+
         $eligible = Employee::with(['rank', 'capacityRole'])
-            ->idleAndFullTime()
+            ->idleForRange($windowStart, $windowEnd)
             ->whereNotIn('id', $keptEmployeeIds)
             ->get();
 
@@ -846,17 +926,43 @@ PROMPT;
         // the kept rows need slot pairing.
         $project->load(['contract.deal.ghost_roles', 'teamAssignments.employee']);
 
+        // Resolve the target project's engagement window up front — both the
+        // race guard below AND the idle-pool scope at preview time use the
+        // same window, so they stay consistent: an employee blocked here is
+        // an employee the preview hid.
+        $raceGuardDeal = $project->contract?->deal;
+        $raceGuardStructure = $raceGuardDeal ? $this->resolveSheetTeamStructure($raceGuardDeal) : null;
+        $raceGuardExplicitStart = $validated['team_start_date']
+            ?? ($raceGuardStructure['start_date'] ?? null);
+        [$raceStart, $raceEnd] = EngagementWindow::windowFor($project, $raceGuardExplicitStart);
+
         // Race guard — between preview render and confirm submit, another
         // tab or user could have staffed one of the picked employees on a
-        // different project. The dialog is otherwise unaware. Reject with
-        // 422 listing the conflicting names so the user knows what changed.
-        // Employees already on *this* project's team are exempt (they're
-        // the "kept" set whose allocated_hours we rewrite, not new picks).
+        // different project whose window OVERLAPS ours. The dialog is
+        // otherwise unaware. Reject with 422 listing the conflicting names
+        // so the user knows what changed. Employees already on *this*
+        // project's team are exempt (they're the "kept" set whose
+        // allocated_hours we rewrite, not new picks).
         $pickedIds = collect($validated['picks'])->pluck('employee_id')->unique();
         $keptIds = $project->teamAssignments->pluck('employee_id');
+        $raceStartStr = $raceStart->toDateString();
+        $raceEndStr = $raceEnd->toDateString();
         $conflicts = Employee::whereIn('id', $pickedIds)
             ->whereNotIn('id', $keptIds)
-            ->whereHas('teamAssignments')
+            ->whereHas('teamAssignments', function ($q) use ($raceStartStr, $raceEndStr, $project) {
+                // Mirror scopeIdleForRange's overlap clause, but exclude any
+                // assignment to THIS project — those are stale rows from a
+                // prior confirm in the same project's lifecycle and would
+                // false-positive against themselves.
+                $q->where('project_id', '!=', $project->id)
+                    ->where(function ($qq) use ($raceEndStr) {
+                        $qq->whereNull('team_start_date')
+                            ->orWhere('team_start_date', '<=', $raceEndStr);
+                    })->where(function ($qq) use ($raceStartStr) {
+                        $qq->whereNull('team_end_date')
+                            ->orWhere('team_end_date', '>=', $raceStartStr);
+                    });
+            })
             ->pluck('name', 'id');
         if ($conflicts->isNotEmpty()) {
             return response()->json([
@@ -984,6 +1090,12 @@ PROMPT;
                             ? $this->engagementAvailableHours($emp, $project, $months)
                             : ($emp ? (float) ($emp->workable_hours ?? 160) : 160)));
 
+                $teamEndDate = EngagementWindow::computeEndDate(
+                    $confirmStartDate ? Carbon::parse($confirmStartDate)->startOfDay() : null,
+                    $monthlyAlloc,
+                    $project,
+                );
+
                 ProjectTeamAssignment::create([
                     'tenant_id' => $tenantId,
                     'project_id' => $project->id,
@@ -991,6 +1103,7 @@ PROMPT;
                     'allocated_hours' => $allocated,
                     'monthly_allocation' => $monthlyAlloc,
                     'team_start_date' => $confirmStartDate,
+                    'team_end_date' => $teamEndDate?->toDateString(),
                     'assignment_source' => 'ai',
                 ]);
                 $inserted++;
@@ -1028,6 +1141,11 @@ PROMPT;
                     $row->allocated_hours = $newAllocated;
                     $row->monthly_allocation = $monthlyAlloc;
                     $row->team_start_date = $confirmStartDate;
+                    $row->team_end_date = EngagementWindow::computeEndDate(
+                        $confirmStartDate ? Carbon::parse($confirmStartDate)->startOfDay() : null,
+                        $monthlyAlloc,
+                        $project,
+                    )?->toDateString();
                     $row->save();
                     $updated++;
                 }
@@ -1391,10 +1509,34 @@ PROMPT;
             return $this->demoAssignTasks($project, $tasks, $activePhases, $teamAssignments, $tenantId, $windowStart, $effectiveEnd, $fallbackCalendar);
         }
 
-        $teamMembers = $teamAssignments->map(function ($a) {
+        $teamMembers = $teamAssignments->map(function ($a) use ($windowStart, $effectiveEnd) {
             $workable = (float) (optional($a->employee)->workable_hours ?? 160);
             $allocated = (float) $a->allocated_hours;
             $monthlyAlloc = $a->monthly_allocation;
+
+            // Pad / truncate monthly_allocation to the project's month span
+            // counted from team_start_date (or windowStart if missing). Short
+            // arrays get 0.0 entries appended — making "absent" months explicit
+            // so the AI's HARD zero-month rule and the validator have something
+            // to bite on. Longer arrays are clipped with a warning.
+            $teamStart = $a->team_start_date
+                ? Carbon::parse($a->team_start_date)->startOfDay()
+                : $windowStart->copy();
+            $expectedMonths = $this->monthsBetweenInclusive($teamStart, $effectiveEnd);
+
+            if (is_array($monthlyAlloc) && $expectedMonths > 0) {
+                if (count($monthlyAlloc) < $expectedMonths) {
+                    $monthlyAlloc = array_pad($monthlyAlloc, $expectedMonths, 0.0);
+                } elseif (count($monthlyAlloc) > $expectedMonths) {
+                    Log::warning('AI Schedule: truncating overlong monthly_allocation', [
+                        'employee_id' => $a->employee_id,
+                        'received' => count($monthlyAlloc),
+                        'expected' => $expectedMonths,
+                    ]);
+                    $monthlyAlloc = array_slice($monthlyAlloc, 0, $expectedMonths);
+                }
+                $monthlyAlloc = array_map('floatval', $monthlyAlloc);
+            }
 
             // When monthly_allocation is present, engagement_months = count of
             // non-zero months (the calendar span). Without it, derive from hours.
@@ -1452,6 +1594,34 @@ PROMPT;
                 $a->employee_id => (int) (optional(optional($a->employee)->rank)->level ?? 20),
             ])
             ->all();
+
+        // Monthly-allocation inputs for the new HARD validator rules
+        // (zero-month + monthly hour budget). Mirror the padding done above
+        // for $teamMembers so prompt and validator see the same arrays.
+        $monthlyAllocationByAssignee = [];
+        $teamStartByAssignee = [];
+        $workableHoursByAssignee = [];
+        foreach ($teamAssignments as $a) {
+            $alloc = $a->monthly_allocation;
+            if (! is_array($alloc) || empty($alloc)) {
+                continue;
+            }
+            $teamStart = $a->team_start_date
+                ? Carbon::parse($a->team_start_date)->startOfDay()
+                : $windowStart->copy();
+            $expectedMonths = $this->monthsBetweenInclusive($teamStart, $effectiveEnd);
+            if ($expectedMonths > 0) {
+                if (count($alloc) < $expectedMonths) {
+                    $alloc = array_pad($alloc, $expectedMonths, 0.0);
+                } elseif (count($alloc) > $expectedMonths) {
+                    $alloc = array_slice($alloc, 0, $expectedMonths);
+                }
+            }
+            $monthlyAllocationByAssignee[$a->employee_id] = array_map('floatval', $alloc);
+            $teamStartByAssignee[$a->employee_id] = $teamStart->toDateString();
+            $workableHoursByAssignee[$a->employee_id] =
+                (float) (optional($a->employee)->workable_hours ?? 160);
+        }
 
         $dbHolidays = $this->dbHolidaysForPrompt($tenantId, $windowStart, $effectiveEnd);
         $prompt = $this->buildAssignTasksPrompt($project, $tasks, $activePhases, $teamMembers, $windowStart, $effectiveEnd, $dbHolidays, $rawSheet);
@@ -1549,6 +1719,9 @@ PROMPT;
                     $engagementMonthsByAssignee,
                     $capacityRoleByAssignee,
                     $rankLevelByAssignee,
+                    $monthlyAllocationByAssignee,
+                    $teamStartByAssignee,
+                    $workableHoursByAssignee,
                 );
 
                 if (empty($violations)) {
@@ -2019,8 +2192,6 @@ PROMPT;
         $result = [];
         /** @var array<string, array{date: Carbon, hours_used: float}> */
         $assigneeCursors = [];
-        $epsilon = 0.001;
-        $workdayHours = (float) self::WORKDAY_HOURS;
 
         foreach ($orderedTasks as $t) {
             $phases = $t['phases'];
@@ -2035,98 +2206,129 @@ PROMPT;
                 }
 
                 $hours = max(0.0, (float) $phase['hours']);
-
                 $assigneeCursor = $assigneeCursors[$assigneeId] ?? [
                     'date' => $windowStart->copy(),
                     'hours_used' => 0.0,
                 ];
 
-                $rawDate = $taskCursorDate->greaterThan($assigneeCursor['date'])
-                    ? $taskCursorDate->copy()
-                    : $assigneeCursor['date']->copy();
-                $candidate = $calendar->nextWorkingDay($rawDate, $assigneeId);
-                if ($candidate->greaterThan($effectiveEnd)) {
-                    $candidate = $effectiveEnd->copy();
-                }
-
-                // Skip past days the assignee has fully booked (cursor parked
-                // on a day with hours_used == 8 after a previous placement).
-                $safety = 0;
-                while ($safety++ < 365) {
-                    $assigneeUsedToday = $candidate->equalTo($assigneeCursor['date'])
-                        ? $assigneeCursor['hours_used']
-                        : 0.0;
-                    if ($workdayHours - $assigneeUsedToday > $epsilon) {
-                        break;
-                    }
-                    $next = $calendar->nextWorkingDay($candidate->copy()->addDay(), $assigneeId);
-                    if ($next->greaterThan($effectiveEnd)) {
-                        $candidate = $effectiveEnd->copy();
-                        break;
-                    }
-                    $candidate = $next;
-                }
-
-                $assigneeUsedToday = $candidate->equalTo($assigneeCursor['date'])
-                    ? $assigneeCursor['hours_used']
-                    : 0.0;
-                $remainingToday = max(0.0, $workdayHours - $assigneeUsedToday);
-
-                if ($hours <= $remainingToday + $epsilon || $hours <= $epsilon) {
-                    // Atomic same-day placement — fits in today's budget.
-                    $start = $candidate->copy();
-                    $end = $candidate->copy();
-                    $startDayHours = $hours;
-                    $newAssigneeHoursUsed = $assigneeUsedToday + $hours;
-                } else {
-                    // Split across days. Day 1 gets today's remainder; the rest
-                    // spills across full 8h middle days plus a remainder on
-                    // the last day.
-                    $start = $candidate->copy();
-                    $startDayHours = $remainingToday;
-
-                    $leftover = $hours - $remainingToday;
-                    $fullMiddleDays = (int) floor(($leftover + $epsilon) / $workdayHours);
-                    $lastDayHours = $leftover - ($fullMiddleDays * $workdayHours);
-                    if ($lastDayHours <= $epsilon) {
-                        $lastDayHours = 0.0;
-                    }
-
-                    $extraDays = $fullMiddleDays + ($lastDayHours > 0 ? 1 : 0);
-                    $end = $extraDays > 0
-                        ? $calendar->addWorkingDays($start, $extraDays, $assigneeId)
-                        : $start->copy();
-
-                    if ($end->greaterThan($effectiveEnd)) {
-                        $end = $effectiveEnd->copy();
-                    }
-
-                    // If the last day is a "full" day (remainder absorbed into
-                    // middle days), mark cursor as fully used so the next phase
-                    // rolls to the day after.
-                    $newAssigneeHoursUsed = $lastDayHours > 0 ? $lastDayHours : $workdayHours;
-                }
-
-                if ($end->lessThan($start)) {
-                    $end = $start->copy();
-                }
+                $p = $this->placePhaseForAssignee(
+                    $assigneeId, $taskCursorDate, $assigneeCursor, $hours,
+                    $windowStart, $effectiveEnd, $calendar,
+                );
 
                 $result[$t['row_no']][$phase['code']] = [
                     'assignee_id' => $assigneeId,
-                    'planned_start' => $start->toDateString(),
-                    'planned_end' => $end->toDateString(),
-                    'start_day_hours' => round($startDayHours, 2),
+                    'planned_start' => $p['start']->toDateString(),
+                    'planned_end' => $p['end']->toDateString(),
+                    'start_day_hours' => $p['start_day_hours'],
                 ];
 
                 $assigneeCursors[$assigneeId] = [
-                    'date' => $end->copy(),
-                    'hours_used' => $newAssigneeHoursUsed,
+                    'date' => $p['end']->copy(),
+                    'hours_used' => $p['new_hours_used'],
                 ];
-                $taskCursorDate = $end->copy();
+                // Day-after handoff: the next phase in this task starts on
+                // the working day AFTER this phase ends. Models the
+                // dependency where downstream work (e.g. development) can't
+                // begin until upstream (e.g. basic_doc) is actually delivered.
+                $taskCursorDate = $calendar->nextWorkingDay($p['end']->copy()->addDay());
             }
         }
 
         return $result;
+    }
+
+    /**
+     * Pure date-placement for a single (assignee, phase) pair. Returns
+     * { start, end, start_day_hours, new_hours_used } given the current
+     * task and assignee cursors. Does NOT mutate the cursor maps —
+     * caller decides whether to commit.
+     *
+     * Used by computePlannedDates() on the AI-success path and by
+     * demoAssignTasks() on the deterministic fallback path so both
+     * paths share identical date semantics.
+     */
+    private function placePhaseForAssignee(
+        string $assigneeId,
+        Carbon $taskCursorDate,
+        array $assigneeCursor,
+        float $hours,
+        Carbon $windowStart,
+        Carbon $effectiveEnd,
+        WorkingDayCalendar $calendar
+    ): array {
+        $epsilon = 0.001;
+        $workdayHours = (float) self::WORKDAY_HOURS;
+
+        $rawDate = $taskCursorDate->greaterThan($assigneeCursor['date'])
+            ? $taskCursorDate->copy()
+            : $assigneeCursor['date']->copy();
+        $candidate = $calendar->nextWorkingDay($rawDate, $assigneeId);
+        if ($candidate->greaterThan($effectiveEnd)) {
+            $candidate = $effectiveEnd->copy();
+        }
+
+        // Skip past days the assignee has fully booked (cursor parked
+        // on a day with hours_used == 8 after a previous placement).
+        $safety = 0;
+        while ($safety++ < 365) {
+            $assigneeUsedToday = $candidate->equalTo($assigneeCursor['date'])
+                ? $assigneeCursor['hours_used']
+                : 0.0;
+            if ($workdayHours - $assigneeUsedToday > $epsilon) {
+                break;
+            }
+            $next = $calendar->nextWorkingDay($candidate->copy()->addDay(), $assigneeId);
+            if ($next->greaterThan($effectiveEnd)) {
+                $candidate = $effectiveEnd->copy();
+                break;
+            }
+            $candidate = $next;
+        }
+
+        $assigneeUsedToday = $candidate->equalTo($assigneeCursor['date'])
+            ? $assigneeCursor['hours_used']
+            : 0.0;
+        $remainingToday = max(0.0, $workdayHours - $assigneeUsedToday);
+
+        if ($hours <= $remainingToday + $epsilon || $hours <= $epsilon) {
+            $start = $candidate->copy();
+            $end = $candidate->copy();
+            $startDayHours = $hours;
+            $newHoursUsed = $assigneeUsedToday + $hours;
+        } else {
+            $start = $candidate->copy();
+            $startDayHours = $remainingToday;
+
+            $leftover = $hours - $remainingToday;
+            $fullMiddleDays = (int) floor(($leftover + $epsilon) / $workdayHours);
+            $lastDayHours = $leftover - ($fullMiddleDays * $workdayHours);
+            if ($lastDayHours <= $epsilon) {
+                $lastDayHours = 0.0;
+            }
+
+            $extraDays = $fullMiddleDays + ($lastDayHours > 0 ? 1 : 0);
+            $end = $extraDays > 0
+                ? $calendar->addWorkingDays($start, $extraDays, $assigneeId)
+                : $start->copy();
+
+            if ($end->greaterThan($effectiveEnd)) {
+                $end = $effectiveEnd->copy();
+            }
+
+            $newHoursUsed = $lastDayHours > 0 ? $lastDayHours : $workdayHours;
+        }
+
+        if ($end->lessThan($start)) {
+            $end = $start->copy();
+        }
+
+        return [
+            'start' => $start,
+            'end' => $end,
+            'start_day_hours' => round($startDayHours, 2),
+            'new_hours_used' => $newHoursUsed,
+        ];
     }
 
     public function taskAssignmentsIndex(Project $project)
@@ -2929,19 +3131,17 @@ PROMPT;
         $hasMonthlyAlloc = collect($teamMembers)->contains(fn ($m) => ! empty($m['monthly_allocation']));
         $monthlyAllocBlock = '';
         if ($hasMonthlyAlloc) {
-            $monthlyAllocBlock = "MONTHLY ALLOCATION (per-member availability by calendar month):\n".
+            $monthlyAllocBlock = "MONTHLY ALLOCATION (per-member monthly HOUR BUDGET):\n".
                 "Some team members include a `monthly_allocation` array and `team_start_date`.\n".
-                "- monthly_allocation[0] is for the month starting at team_start_date, [1] is the next month, etc.\n".
-                "- 1.0 = full capacity (8h/day), 0.8 = 6.4h/day, 0.5 = 4h/day, 0 = unavailable that month.\n".
-                "- HARD: NEVER schedule work for a member in a calendar month where their allocation = 0.\n".
-                "- SOFT: In partial-allocation months (e.g. 0.5), schedule lighter phases or review work.\n".
-                "  effective_hours_per_day = allocation_fraction × {$defaultHpd}.\n".
-                "  Phase duration in a partial month: ceil(estimated_hours / effective_hours_per_day) working days.\n".
-                "- Use the `capacity` array in your output to set reduced hours_per_day for partial-allocation months.\n".
-                "  Example: member with allocation [1, 0.5, 1] on a project starting 2026-01-01:\n".
-                "    Month 1 (Jan) = 8h/day, Month 2 (Feb) = 4h/day, Month 3 (Mar) = 8h/day.\n".
-                "    → Add a capacity entry: {\"employee_id\": \"<uuid>\", \"hours_per_day\": 4, \"reason\": \"0.5 allocation in Feb\"}\n".
-                "    OR better: schedule this member's work outside February entirely.\n\n";
+                "- monthly_allocation[i] × workable_hours is that member's TOTAL hour BUDGET for the i-th calendar month, indexed from team_start_date.\n".
+                "  Example: workable_hours=160, allocation=[0.5, 1, 1, 1, 1, 0] starting 2026-06-01 →\n".
+                "    June budget = 80h, July budget = 160h, ..., October budget = 160h, November budget = 0h (off the project).\n".
+                "- HARD: NEVER assign any phase to a member in a calendar month where their allocation = 0. That month is unavailable.\n".
+                "- HARD: For each member, the sum of estimated_hours of their assignments whose [planned_start, planned_end] overlaps a given calendar month must NOT exceed that month's budget.\n".
+                "  (For phases spanning a month boundary, apportion hours by working-day overlap with each month.)\n".
+                "- You may schedule a member at the normal {$defaultHpd}h/day pace on any working day; the MONTHLY BUDGET is what bounds them. A member with an 8h task in a 0.5 month may legitimately finish it in one working day at full pace, then idle waiting for an upstream phase to unblock the next task.\n".
+                "- Reduced-month allocation typically means the member is BLOCKED waiting on upstream work (e.g. devs waiting for the leader's docs), NOT throttled to fewer hours per workday. Phase order within a task already prevents downstream phases from starting before upstream finishes — combine that with the monthly budget to express the dependency-blocked time.\n".
+                "- The `capacity.hours_per_day` output is only for genuine daily throttling (e.g. a member shared with another project who can only spare 4h/day every day). Do NOT use it as a proxy for partial-month availability — use the monthly_allocation array for that.\n\n";
         }
 
         return "Project: {$projectName}\n".
@@ -3069,6 +3269,28 @@ PROMPT;
         ];
     }
 
+    /**
+     * Deterministic schedule producer. Runs when the AI is unreachable, the
+     * API key is missing, or AI output fails validation after retries.
+     *
+     * Walks tasks/phases in order and for each phase chooses the assignee +
+     * places the dates in a single integrated pass. Per candidate, it:
+     *   (a) computes a tentative date range via placePhaseForAssignee()
+     *   (b) checks the new monthly_allocation rules (zero-month + per-month
+     *       budget cap) the validator enforces on the AI path
+     *   (c) checks the per-assignee total cap (allocated_hours)
+     *
+     * Two-pass strategy keeps the fallback honest without leaving the
+     * operator with no schedule when the team is tight:
+     *   - Pass STRICT: a candidate that violates nothing wins.
+     *   - Pass DEGRADED: if no strict candidate fits, pick the first
+     *     eligible candidate by capacity_role/rank, log a structured
+     *     warning naming the rule(s) broken, and persist anyway.
+     *
+     * The result is a schedule the AiScheduleValidator would have accepted
+     * whenever the team has capacity, and a clear warning trail when it
+     * doesn't (a signal to fix the team structure, not a silent corruption).
+     */
     private function demoAssignTasks(
         Project $project,
         array $tasks,
@@ -3079,12 +3301,13 @@ PROMPT;
         Carbon $effectiveEnd,
         WorkingDayCalendar $calendar
     ) {
-        // Bucket team members by (capacity_role, rank). Members with
-        // allocated_hours = 0 are dropped — their team-structure slot doesn't
-        // include this project. Manager rank is mapped to Lead so it tops
-        // the rank preference chain.
+        // ── Per-employee state ─────────────────────────────────────────
         $allocatedHoursByEmp = [];
-        $byRoleAndRank = []; // [capacity_role][rank_code] => [employee_id, ...]
+        $monthlyAllocByEmp = [];   // padded/truncated to engagement length
+        $teamStartByEmp = [];      // Carbon, used to translate monthKey → index
+        $workableByEmp = [];       // hours/month at full pace
+        $byRoleAndRank = [];       // [capacity_role][rank_code] => [employee_id, ...]
+
         foreach ($teamAssignments as $a) {
             $cap = (float) $a->allocated_hours;
             if ($cap <= 0.0) {
@@ -3100,136 +3323,243 @@ PROMPT;
 
             $allocatedHoursByEmp[$a->employee_id] = $cap;
             $byRoleAndRank[$role][$tier][] = $a->employee_id;
+
+            $alloc = $a->monthly_allocation;
+            if (is_array($alloc) && ! empty($alloc)) {
+                $teamStart = $a->team_start_date
+                    ? Carbon::parse($a->team_start_date)->startOfDay()
+                    : $windowStart->copy();
+                $expectedMonths = $this->monthsBetweenInclusive($teamStart, $effectiveEnd);
+                if ($expectedMonths > 0) {
+                    if (count($alloc) < $expectedMonths) {
+                        $alloc = array_pad($alloc, $expectedMonths, 0.0);
+                    } elseif (count($alloc) > $expectedMonths) {
+                        $alloc = array_slice($alloc, 0, $expectedMonths);
+                    }
+                }
+                $monthlyAllocByEmp[$a->employee_id] = array_map('floatval', $alloc);
+                $teamStartByEmp[$a->employee_id] = $teamStart;
+                $workableByEmp[$a->employee_id] = (float) (optional($a->employee)->workable_hours ?? 160);
+            }
         }
 
         if (empty($allocatedHoursByEmp)) {
             return response()->json(['error' => 'No team members with allocated_hours > 0 are available.'], 422);
         }
 
-        $cursors = [];
-        $assignedHoursByEmp = [];
+        // ── Running state ──────────────────────────────────────────────
+        $assigneeCursors = [];      // [employee_id] => ['date' => Carbon, 'hours_used' => float]
+        $assignedHoursByEmp = [];   // [employee_id] => total hours assigned
+        $monthlyBucket = [];        // [employee_id][YYYY-MM] => hours apportioned
+        $poolCursors = [];          // round-robin within each (role|tier) pool
         $allocTolerance = 1.0 + AiScheduleValidator::ALLOCATION_TOLERANCE;
+        $budgetEpsilon = AiScheduleValidator::MONTHLY_BUDGET_TOLERANCE_HOURS;
 
-        // Rank fallback chain — used INSIDE each capacity_role pool.
         $rankFallback = [
             'Lead' => ['Lead', 'Senior', 'Mid', 'Junior'],
             'Senior' => ['Senior', 'Lead', 'Mid', 'Junior'],
             'Mid' => ['Mid', 'Senior', 'Junior', 'Lead'],
             'Junior' => ['Junior', 'Mid', 'Senior', 'Lead'],
         ];
+        $designPhases = ['requirement', 'system_arch', 'basic_doc', 'detail_doc'];
+        $executionTier = ['簡単' => 'Junior', '普通' => 'Mid', '難しい' => 'Senior'];
 
-        // Pick a member for $phaseCode at $preferredTier rank. Walks eligible
-        // capacity_roles (from PHASE_CAPACITY_ROLES) in preference order, and
-        // within each role walks the rank fallback chain. NEVER assigns
-        // outside the eligible capacity_role list — a pm-role member will
-        // never get a dev/test phase, a qa-role member will never get a doc
-        // phase unless qa explicitly appears in that phase's eligibility.
-        $pickFrom = function (string $phaseCode, string $preferredTier, float $phaseHours) use (
-            $byRoleAndRank, $allocatedHoursByEmp, $allocTolerance, $rankFallback,
-            &$cursors, &$assignedHoursByEmp,
+        // ── Candidate evaluator ────────────────────────────────────────
+        // Returns { violations: [strings], placement, perMonthDays, totalDays }
+        // for one candidate at a given (taskCursor, hours). Pure — does not
+        // mutate state. The caller commits the winner.
+        $evaluate = function (
+            string $candidate,
+            Carbon $taskCursor,
+            float $hours
+        ) use (
+            &$assigneeCursors, &$assignedHoursByEmp, &$monthlyBucket,
+            $monthlyAllocByEmp, $teamStartByEmp, $workableByEmp,
+            $allocatedHoursByEmp, $allocTolerance, $budgetEpsilon,
+            $windowStart, $effectiveEnd, $calendar
         ) {
-            $eligibleRoles = AiScheduleValidator::PHASE_CAPACITY_ROLES[$phaseCode] ?? [];
-            $tiers = $rankFallback[$preferredTier] ?? [$preferredTier];
+            $cursor = $assigneeCursors[$candidate] ?? [
+                'date' => $windowStart->copy(),
+                'hours_used' => 0.0,
+            ];
+            $placement = $this->placePhaseForAssignee(
+                $candidate, $taskCursor, $cursor, $hours,
+                $windowStart, $effectiveEnd, $calendar,
+            );
 
-            // Pass 1: respect capacity_role + rank + remaining capacity.
-            foreach ($eligibleRoles as $role) {
-                foreach ($tiers as $tier) {
-                    $pool = $byRoleAndRank[$role][$tier] ?? [];
-                    if (empty($pool)) {
-                        continue;
-                    }
-                    $key = "{$role}|{$tier}";
-                    $cursors[$key] = $cursors[$key] ?? 0;
-                    $n = count($pool);
-                    for ($i = 0; $i < $n; $i++) {
-                        $idx = ($cursors[$key] + $i) % $n;
-                        $id = $pool[$idx];
-                        $cap = $allocatedHoursByEmp[$id] ?? PHP_FLOAT_MAX;
-                        $used = $assignedHoursByEmp[$id] ?? 0.0;
-                        if ($used + $phaseHours <= $cap * $allocTolerance) {
-                            $cursors[$key] = $idx + 1;
-                            $assignedHoursByEmp[$id] = $used + $phaseHours;
+            $violations = [];
 
-                            return $id;
+            // monthly_allocation rules — skipped for legacy members without
+            // a per-month array (they fall back to total-cap only).
+            $perMonth = [];
+            $totalDays = 0;
+            if (isset($monthlyAllocByEmp[$candidate])) {
+                $alloc = $monthlyAllocByEmp[$candidate];
+                $teamStart = $teamStartByEmp[$candidate];
+                $workable = $workableByEmp[$candidate];
+                $perMonth = $this->workingDaysPerMonth(
+                    $calendar, $placement['start'], $placement['end'], $candidate
+                );
+                $totalDays = array_sum($perMonth);
+
+                if ($totalDays > 0) {
+                    foreach ($perMonth as $monthKey => $days) {
+                        $idx = $this->monthIndexForKey($teamStart, $monthKey);
+                        $fraction = $alloc[$idx] ?? 0.0;
+                        if ($fraction <= 0.0) {
+                            $violations[] = "zero_month_assignment ({$monthKey})";
+
+                            continue;
+                        }
+                        $apportioned = $hours * ($days / $totalDays);
+                        $used = $monthlyBucket[$candidate][$monthKey] ?? 0.0;
+                        $budget = $workable * $fraction;
+                        if ($used + $apportioned > $budget + $budgetEpsilon) {
+                            $violations[] = "monthly_budget_overrun ({$monthKey}: ".
+                                round($used + $apportioned, 1).'h > '.round($budget, 1).'h)';
                         }
                     }
                 }
             }
 
-            // Pass 2: everyone in eligible roles is at cap — round-robin
-            // within eligible roles only. Operator should fix the team
-            // structure (add headcount in this role_type).
-            foreach ($eligibleRoles as $role) {
-                foreach ($tiers as $tier) {
-                    $pool = $byRoleAndRank[$role][$tier] ?? [];
-                    if (empty($pool)) {
-                        continue;
-                    }
-                    $key = "{$role}|{$tier}";
-                    $cursors[$key] = $cursors[$key] ?? 0;
-                    $id = $pool[$cursors[$key] % count($pool)];
-                    $cursors[$key]++;
-                    $assignedHoursByEmp[$id] = ($assignedHoursByEmp[$id] ?? 0.0) + $phaseHours;
-
-                    return $id;
-                }
+            // Total-cap (allocated_hours) — soft on the AI path; mirror that
+            // here for symmetry. Overshoot logged but not hard-blocking.
+            $totalUsed = $assignedHoursByEmp[$candidate] ?? 0.0;
+            $cap = $allocatedHoursByEmp[$candidate] ?? PHP_FLOAT_MAX;
+            if ($totalUsed + $hours > $cap * $allocTolerance) {
+                $violations[] = 'over_allocation (total '.round($totalUsed + $hours, 1)
+                    .'h > '.round($cap, 1).'h cap)';
             }
 
-            return null; // No eligible team member at all.
+            return [
+                'placement' => $placement,
+                'violations' => $violations,
+                'perMonth' => $perMonth,
+                'totalDays' => $totalDays,
+            ];
         };
 
-        $designPhases = ['requirement', 'system_arch', 'basic_doc', 'detail_doc'];
-        $executionTier = [
-            '簡単' => 'Junior',
-            '普通' => 'Mid',
-            '難しい' => 'Senior',
-        ];
+        // ── Main walk ──────────────────────────────────────────────────
+        $assignments = [];
+        $warnings = [];
+        $orderedTasks = $tasks;
+        usort($orderedTasks, fn ($a, $b) => $a['row_no'] <=> $b['row_no']);
 
-        // Phase 1: pick assignees only. Phase 2: computePlannedDates() does the cursor math.
-        $assigneeByRowPhase = [];
-        foreach ($tasks as $t) {
-            foreach ($t['phases'] as $phase) {
-                $preferredTier = in_array($phase['code'], $designPhases, true)
+        foreach ($orderedTasks as $t) {
+            $phases = $t['phases'];
+            usort($phases, fn ($a, $b) => $a['order'] <=> $b['order']);
+            $taskCursor = $windowStart->copy();
+
+            foreach ($phases as $phase) {
+                $hours = max(0.0, (float) ($phase['hours'] ?? 0));
+                $phaseCode = $phase['code'];
+                $preferredTier = in_array($phaseCode, $designPhases, true)
                     ? 'Lead'
-                    : ($executionTier[$t['difficulty']] ?? 'Mid');
+                    : ($executionTier[$t['difficulty'] ?? '普通'] ?? 'Mid');
+                $eligibleRoles = AiScheduleValidator::PHASE_CAPACITY_ROLES[$phaseCode] ?? [];
+                $tiers = $rankFallback[$preferredTier] ?? [$preferredTier];
 
-                $id = $pickFrom($phase['code'], $preferredTier, (float) ($phase['hours'] ?? 0));
-                if ($id === null) {
+                $strictMatch = null;
+                $degradedMatch = null; // first eligible candidate, used if no strict fit
+
+                foreach ($eligibleRoles as $role) {
+                    if ($strictMatch !== null) {
+                        break;
+                    }
+                    foreach ($tiers as $tier) {
+                        if ($strictMatch !== null) {
+                            break;
+                        }
+                        $pool = $byRoleAndRank[$role][$tier] ?? [];
+                        if (empty($pool)) {
+                            continue;
+                        }
+                        $poolKey = "{$role}|{$tier}";
+                        $poolCursors[$poolKey] = $poolCursors[$poolKey] ?? 0;
+                        $n = count($pool);
+                        for ($i = 0; $i < $n; $i++) {
+                            $idx = ($poolCursors[$poolKey] + $i) % $n;
+                            $candidate = $pool[$idx];
+                            $eval = $evaluate($candidate, $taskCursor, $hours);
+
+                            if (empty($eval['violations'])) {
+                                $strictMatch = [
+                                    'id' => $candidate, 'eval' => $eval,
+                                    'role' => $role, 'tier' => $tier, 'idx' => $idx,
+                                ];
+                                break;
+                            }
+
+                            if ($degradedMatch === null) {
+                                $degradedMatch = [
+                                    'id' => $candidate, 'eval' => $eval,
+                                    'role' => $role, 'tier' => $tier, 'idx' => $idx,
+                                ];
+                            }
+                        }
+                    }
+                }
+
+                $chosen = $strictMatch ?? $degradedMatch;
+                if ($chosen === null) {
                     Log::warning('AI Schedule (demo): no eligible team member for phase', [
                         'project_id' => $project->id,
                         'row_no' => $t['row_no'],
-                        'phase_code' => $phase['code'],
+                        'phase_code' => $phaseCode,
                     ]);
 
                     continue;
                 }
-                $assigneeByRowPhase[$t['row_no']][$phase['code']] = $id;
+
+                // ── Commit the chosen candidate ────────────────────────
+                $assigneeId = $chosen['id'];
+                $eval = $chosen['eval'];
+                $placement = $eval['placement'];
+
+                $assignments[$t['row_no']][$phaseCode] = [
+                    'assignee_id' => $assigneeId,
+                    'planned_start' => $placement['start']->toDateString(),
+                    'planned_end' => $placement['end']->toDateString(),
+                    'start_day_hours' => $placement['start_day_hours'],
+                ];
+
+                $assigneeCursors[$assigneeId] = [
+                    'date' => $placement['end']->copy(),
+                    'hours_used' => $placement['new_hours_used'],
+                ];
+                // Day-after handoff — see computePlannedDates() for rationale.
+                $taskCursor = $calendar->nextWorkingDay($placement['end']->copy()->addDay());
+                $assignedHoursByEmp[$assigneeId] =
+                    ($assignedHoursByEmp[$assigneeId] ?? 0.0) + $hours;
+
+                if ($eval['totalDays'] > 0) {
+                    foreach ($eval['perMonth'] as $monthKey => $days) {
+                        $apportioned = $hours * ($days / $eval['totalDays']);
+                        $monthlyBucket[$assigneeId][$monthKey] =
+                            ($monthlyBucket[$assigneeId][$monthKey] ?? 0.0) + $apportioned;
+                    }
+                }
+
+                $poolCursors["{$chosen['role']}|{$chosen['tier']}"] = $chosen['idx'] + 1;
+
+                if (! empty($eval['violations'])) {
+                    $warnings[] = [
+                        'row_no' => $t['row_no'],
+                        'phase_code' => $phaseCode,
+                        'assignee_id' => $assigneeId,
+                        'violations' => $eval['violations'],
+                    ];
+                }
             }
         }
 
-        // Surface members the demo had to push past their cap so the operator
-        // sees the same signal the AI validator would have raised. Schedule
-        // still persists — the warning prompts a team-structure fix.
-        $overCap = [];
-        foreach ($assignedHoursByEmp as $id => $used) {
-            $cap = $allocatedHoursByEmp[$id] ?? null;
-            if ($cap !== null && $used > $cap * $allocTolerance) {
-                $overCap[] = [
-                    'employee_id' => $id,
-                    'assigned_hours' => $used,
-                    'allocated_hours' => $cap,
-                    'overshoot' => $used - $cap,
-                ];
-            }
-        }
-        if (! empty($overCap)) {
-            Log::warning('AI Schedule (demo): exceeded per-member allocated_hours cap', [
+        if (! empty($warnings)) {
+            Log::warning('AI Schedule (demo): persisted with degraded constraints', [
                 'project_id' => $project->id,
-                'members' => $overCap,
+                'warning_count' => count($warnings),
+                'samples' => array_slice($warnings, 0, 10),
             ]);
         }
-
-        $assignments = $this->computePlannedDates($tasks, $assigneeByRowPhase, $windowStart, $effectiveEnd, $calendar);
 
         return $this->persistTaskAssignments($project, $tasks, $assignments, $tenantId);
     }

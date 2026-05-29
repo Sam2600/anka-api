@@ -20,6 +20,7 @@ class ProjectTeamAssignment extends Model
         'allocated_hours',
         'monthly_allocation',
         'team_start_date',
+        'team_end_date',
         'assignment_source',
     ];
 
@@ -27,6 +28,7 @@ class ProjectTeamAssignment extends Model
         'allocated_hours' => 'float',
         'monthly_allocation' => 'array',
         'team_start_date' => 'date',
+        'team_end_date' => 'date',
     ];
 
     public function project()

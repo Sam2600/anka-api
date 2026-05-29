@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Traits\BelongsToTenant;
+use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -128,9 +129,14 @@ class Employee extends Model
     }
 
     /**
-     * "Available to staff a new project." Active full-timers with no current
-     * project_team_assignments row at all, AND in a department flagged as
-     * delivery-eligible (departments.is_delivery_eligible = true).
+     * "Available to staff a new project during [start, end]." Active
+     * full-timers in a delivery-eligible department whose existing
+     * project_team_assignments do NOT overlap the given window.
+     *
+     * Overlap rule: two windows [a, b] and [c, d] overlap iff a <= d AND c <= b.
+     * A row with NULL team_end_date is treated as "still engaged forever" and
+     * always conflicts — defensive default so anomalous legacy data
+     * over-blocks rather than over-staffs.
      *
      * The department filter is the canonical guard against picking non-IT
      * staff (Sales/HR/Finance) who carry a `pm` capacity_role for internal
@@ -141,13 +147,28 @@ class Employee extends Model
      * defence-in-depth re-check at write time in case the flag changed
      * mid-session or an API caller bypassed the dialog.
      */
-    public function scopeIdleAndFullTime($query)
+    public function scopeIdleForRange($query, Carbon $start, Carbon $end)
     {
+        $startStr = $start->toDateString();
+        $endStr = $end->toDateString();
+
         return $query
             ->where('status', 'Active')
             ->where('workable_hours', '>=', 160)
-            ->whereDoesntHave('teamAssignments')
-            ->whereHas('department', fn ($q) => $q->where('is_delivery_eligible', true));
+            ->whereHas('department', fn ($q) => $q->where('is_delivery_eligible', true))
+            ->whereDoesntHave('teamAssignments', function ($q) use ($startStr, $endStr) {
+                // Existing engagement overlaps [startStr, endStr] iff
+                //   team_start_date <= endStr AND (team_end_date IS NULL OR team_end_date >= startStr)
+                // We tolerate NULL team_start_date by treating it as
+                // "started forever ago" — also conflicts.
+                $q->where(function ($qq) use ($endStr) {
+                    $qq->whereNull('team_start_date')
+                        ->orWhere('team_start_date', '<=', $endStr);
+                })->where(function ($qq) use ($startStr) {
+                    $qq->whereNull('team_end_date')
+                        ->orWhere('team_end_date', '>=', $startStr);
+                });
+            });
     }
 
     public function capacityRole()

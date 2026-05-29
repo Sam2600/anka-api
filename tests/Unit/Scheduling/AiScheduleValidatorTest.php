@@ -11,6 +11,7 @@ use PHPUnit\Framework\TestCase;
 class AiScheduleValidatorTest extends TestCase
 {
     private const TEAM_A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+
     private const TEAM_B = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
     private function tasks(): array
@@ -29,8 +30,8 @@ class AiScheduleValidatorTest extends TestCase
     private function payload(array $assignments, array $calendar = [], array $capacity = []): AiSchedulePayload
     {
         $json = json_encode([
-            'calendar'    => array_merge(['skip_weekends' => true, 'recurring_holidays' => [], 'blocked_dates' => []], $calendar),
-            'capacity'    => $capacity,
+            'calendar' => array_merge(['skip_weekends' => true, 'recurring_holidays' => [], 'blocked_dates' => []], $calendar),
+            'capacity' => $capacity,
             'assignments' => $assignments,
         ]);
 
@@ -46,7 +47,7 @@ class AiScheduleValidatorTest extends TestCase
         ]);
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasks(), [self::TEAM_A, self::TEAM_B], new WorkingDayCalendar(),
+            $payload, $this->tasks(), [self::TEAM_A, self::TEAM_B], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
         );
 
@@ -60,7 +61,7 @@ class AiScheduleValidatorTest extends TestCase
         ]);
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar(),
+            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
         );
 
@@ -75,7 +76,7 @@ class AiScheduleValidatorTest extends TestCase
         ]);
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar(),
+            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
         );
 
@@ -90,7 +91,7 @@ class AiScheduleValidatorTest extends TestCase
         ]);
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar(),
+            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
         );
 
@@ -105,7 +106,7 @@ class AiScheduleValidatorTest extends TestCase
         ]);
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar(),
+            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
         );
 
@@ -121,7 +122,7 @@ class AiScheduleValidatorTest extends TestCase
         ]);
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar(),
+            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
         );
 
@@ -137,7 +138,7 @@ class AiScheduleValidatorTest extends TestCase
         ]);
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar(),
+            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
         );
 
@@ -154,7 +155,7 @@ class AiScheduleValidatorTest extends TestCase
         ]);
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasks(), [self::TEAM_A, self::TEAM_B], new WorkingDayCalendar(),
+            $payload, $this->tasks(), [self::TEAM_A, self::TEAM_B], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
         );
 
@@ -170,7 +171,7 @@ class AiScheduleValidatorTest extends TestCase
         ]);
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar(),
+            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
         );
 
@@ -200,7 +201,7 @@ class AiScheduleValidatorTest extends TestCase
         ]);
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasksWithDifficulty('普通'), [self::TEAM_A], new WorkingDayCalendar(),
+            $payload, $this->tasksWithDifficulty('普通'), [self::TEAM_A], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
             rankLevelByAssignee: [self::TEAM_A => 10], // Junior
         );
@@ -218,7 +219,7 @@ class AiScheduleValidatorTest extends TestCase
         ]);
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasksWithDifficulty('難しい'), [self::TEAM_A], new WorkingDayCalendar(),
+            $payload, $this->tasksWithDifficulty('難しい'), [self::TEAM_A], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
             rankLevelByAssignee: [self::TEAM_A => 20], // Mid
         );
@@ -240,7 +241,7 @@ class AiScheduleValidatorTest extends TestCase
         ]);
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasksWithDifficulty('簡単'), [self::TEAM_A, self::TEAM_B], new WorkingDayCalendar(),
+            $payload, $this->tasksWithDifficulty('簡単'), [self::TEAM_A, self::TEAM_B], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
             rankLevelByAssignee: [
                 self::TEAM_A => 10, // Junior — fine for 簡単 development
@@ -261,7 +262,7 @@ class AiScheduleValidatorTest extends TestCase
         ]);
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasksWithDifficulty('難しい'), [self::TEAM_A], new WorkingDayCalendar(),
+            $payload, $this->tasksWithDifficulty('難しい'), [self::TEAM_A], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
         );
 
@@ -282,10 +283,182 @@ class AiScheduleValidatorTest extends TestCase
         );
 
         $violations = (new AiScheduleValidator)->validate(
-            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar(),
+            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar,
             Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
         );
 
         $this->assertNotContains('duration_out_of_tolerance', array_column($violations, 'code'));
+    }
+
+    // ── monthly_allocation rules ──────────────────────────────────────────────
+
+    public function test_rejects_assignment_in_zero_allocation_month(): void
+    {
+        // Team A has allocation [1, 0] starting 2026-05-01 → May full, June off.
+        // AI places development (16h) on June 1-2 — must be rejected.
+        $payload = $this->payload([
+            ['row_no' => 1, 'phase_code' => 'requirement', 'assignee_id' => self::TEAM_A, 'planned_start' => '2026-05-18', 'planned_end' => '2026-05-18'],
+            ['row_no' => 1, 'phase_code' => 'development', 'assignee_id' => self::TEAM_A, 'planned_start' => '2026-06-01', 'planned_end' => '2026-06-02'],
+        ]);
+
+        $violations = (new AiScheduleValidator)->validate(
+            $payload, $this->tasks(), [self::TEAM_A], new WorkingDayCalendar,
+            Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
+            monthlyAllocationByAssignee: [self::TEAM_A => [1.0, 0.0]],
+            teamStartByAssignee: [self::TEAM_A => '2026-05-01'],
+            workableHoursByAssignee: [self::TEAM_A => 160.0],
+        );
+
+        $codes = array_column($violations, 'code');
+        $this->assertContains('zero_month_assignment', $codes,
+            'phase placed in zero-allocation month must be flagged');
+    }
+
+    public function test_rejects_monthly_budget_overrun(): void
+    {
+        // Allocation [0.5] in May → budget = 80h. The two tasks-phases sum
+        // 8 + 16 = 24h, all in May. To trigger overrun, we need >80h. Stack
+        // a bigger phase by using a single development phase of 96h.
+        $tasks = [[
+            'row_no' => 1,
+            'phases' => [
+                ['code' => 'requirement', 'hours' => 8.0, 'order' => 1],
+                ['code' => 'development', 'hours' => 96.0, 'order' => 5],
+            ],
+        ]];
+
+        // 12 working days at 8h/d = 96h. Mon 2026-05-04 → Tue 2026-05-19.
+        $payload = $this->payload([
+            ['row_no' => 1, 'phase_code' => 'requirement', 'assignee_id' => self::TEAM_A, 'planned_start' => '2026-05-01', 'planned_end' => '2026-05-01'],
+            ['row_no' => 1, 'phase_code' => 'development', 'assignee_id' => self::TEAM_A, 'planned_start' => '2026-05-04', 'planned_end' => '2026-05-19'],
+        ]);
+
+        $violations = (new AiScheduleValidator)->validate(
+            $payload, $tasks, [self::TEAM_A], new WorkingDayCalendar,
+            Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
+            monthlyAllocationByAssignee: [self::TEAM_A => [0.5]],
+            teamStartByAssignee: [self::TEAM_A => '2026-05-01'],
+            workableHoursByAssignee: [self::TEAM_A => 160.0],
+        );
+
+        $codes = array_column($violations, 'code');
+        $this->assertContains('monthly_budget_overrun', $codes,
+            'sum of apportioned hours (104h) > 80h budget must be flagged');
+    }
+
+    public function test_accepts_full_pace_burst_within_monthly_budget(): void
+    {
+        // Member at 0.5 in May, budget = 80h. A single 8h task done in one
+        // working day at full pace (2026-05-18) is fine — burst-then-idle is
+        // the intended pattern.
+        $tasks = [[
+            'row_no' => 1,
+            'phases' => [
+                ['code' => 'development', 'hours' => 8.0, 'order' => 5],
+            ],
+        ]];
+        $payload = $this->payload([
+            ['row_no' => 1, 'phase_code' => 'development', 'assignee_id' => self::TEAM_A, 'planned_start' => '2026-05-18', 'planned_end' => '2026-05-18'],
+        ]);
+
+        $violations = (new AiScheduleValidator)->validate(
+            $payload, $tasks, [self::TEAM_A], new WorkingDayCalendar,
+            Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
+            monthlyAllocationByAssignee: [self::TEAM_A => [0.5]],
+            teamStartByAssignee: [self::TEAM_A => '2026-05-01'],
+            workableHoursByAssignee: [self::TEAM_A => 160.0],
+        );
+
+        $codes = array_column($violations, 'code');
+        $this->assertNotContains('zero_month_assignment', $codes);
+        $this->assertNotContains('monthly_budget_overrun', $codes,
+            '8h burst inside 80h May budget must pass');
+    }
+
+    public function test_apportions_phase_spanning_month_boundary(): void
+    {
+        // Phase 2026-05-26 → 2026-06-04 spans both months.
+        // Working days: May 26,27,28,29 = 4. June 1,2,3,4 = 4. Total = 8.
+        // 80h estimated → 40h to May, 40h to June.
+        // May allocation 0.25 × 160 = 40h budget → exactly fits.
+        // June allocation 0.20 × 160 = 32h budget → 40h overruns.
+        $tasks = [[
+            'row_no' => 1,
+            'phases' => [
+                ['code' => 'development', 'hours' => 80.0, 'order' => 5],
+            ],
+        ]];
+        $payload = $this->payload([
+            ['row_no' => 1, 'phase_code' => 'development', 'assignee_id' => self::TEAM_A, 'planned_start' => '2026-05-26', 'planned_end' => '2026-06-04'],
+        ]);
+
+        $violations = (new AiScheduleValidator)->validate(
+            $payload, $tasks, [self::TEAM_A], new WorkingDayCalendar,
+            Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
+            monthlyAllocationByAssignee: [self::TEAM_A => [0.25, 0.20]],
+            teamStartByAssignee: [self::TEAM_A => '2026-05-01'],
+            workableHoursByAssignee: [self::TEAM_A => 160.0],
+        );
+
+        $overruns = array_values(array_filter(
+            $violations,
+            fn ($v) => $v['code'] === 'monthly_budget_overrun',
+        ));
+        $this->assertCount(1, $overruns,
+            'exactly one month (June) should overrun, May exactly fits');
+        $this->assertSame('2026-06', $overruns[0]['context']['month']);
+    }
+
+    public function test_invalid_allocation_fraction_above_one_rejected(): void
+    {
+        // Corrupt allocation: 1.5 would compute a 240h budget on a 160h member.
+        // The schedule must be rejected before the impossible budget approves
+        // any over-allocation.
+        $tasks = [[
+            'row_no' => 1,
+            'phases' => [
+                ['code' => 'development', 'hours' => 8.0, 'order' => 5],
+            ],
+        ]];
+        $payload = $this->payload([
+            ['row_no' => 1, 'phase_code' => 'development', 'assignee_id' => self::TEAM_A, 'planned_start' => '2026-05-18', 'planned_end' => '2026-05-18'],
+        ]);
+
+        $violations = (new AiScheduleValidator)->validate(
+            $payload, $tasks, [self::TEAM_A], new WorkingDayCalendar,
+            Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
+            monthlyAllocationByAssignee: [self::TEAM_A => [1.0, 1.5]],
+            teamStartByAssignee: [self::TEAM_A => '2026-05-01'],
+            workableHoursByAssignee: [self::TEAM_A => 160.0],
+        );
+
+        $codes = array_column($violations, 'code');
+        $this->assertContains('invalid_allocation_fraction', $codes,
+            'allocation entry above 1.0 must be flagged');
+    }
+
+    public function test_invalid_allocation_fraction_negative_rejected(): void
+    {
+        $tasks = [[
+            'row_no' => 1,
+            'phases' => [
+                ['code' => 'development', 'hours' => 8.0, 'order' => 5],
+            ],
+        ]];
+        $payload = $this->payload([
+            ['row_no' => 1, 'phase_code' => 'development', 'assignee_id' => self::TEAM_A, 'planned_start' => '2026-05-18', 'planned_end' => '2026-05-18'],
+        ]);
+
+        $violations = (new AiScheduleValidator)->validate(
+            $payload, $tasks, [self::TEAM_A], new WorkingDayCalendar,
+            Carbon::parse('2026-05-01'), Carbon::parse('2026-06-30'),
+            monthlyAllocationByAssignee: [self::TEAM_A => [-0.1, 1.0]],
+            teamStartByAssignee: [self::TEAM_A => '2026-05-01'],
+            workableHoursByAssignee: [self::TEAM_A => 160.0],
+        );
+
+        $codes = array_column($violations, 'code');
+        $this->assertContains('invalid_allocation_fraction', $codes,
+            'negative allocation entry must be flagged');
     }
 }

@@ -35,8 +35,8 @@ class ComputePlannedDatesTest extends TestCase
     private function invoke(array $tasks, array $assigneeByRowPhase, string $startDate, string $endDate, ?WorkingDayCalendar $calendar = null): array
     {
         $start = Carbon::parse($startDate)->startOfDay();
-        $end   = Carbon::parse($endDate)->startOfDay();
-        $cal   = $calendar ?? new WorkingDayCalendar(true);
+        $end = Carbon::parse($endDate)->startOfDay();
+        $cal = $calendar ?? new WorkingDayCalendar(true);
 
         return $this->method->invoke(
             $this->controller,
@@ -52,6 +52,10 @@ class ComputePlannedDatesTest extends TestCase
     {
         // 3 tasks, 7 phases. Alice = 'alice', Bob = 'bob'.
         // Project starts Mon 2026-06-01, effective end far enough out.
+        //
+        // Day-after handoff: each phase within a task starts on the working
+        // day AFTER the previous phase ends — downstream work can't begin
+        // until upstream is actually delivered.
         $tasks = [
             [
                 'row_no' => 1, 'difficulty' => '普通', 'total_hours' => 10.5,
@@ -88,20 +92,25 @@ class ComputePlannedDatesTest extends TestCase
 
         $r = $this->invoke($tasks, $assignees, '2026-06-01', '2026-06-30');
 
-        // T1
+        // T1 — each phase rolls one working day after the previous phase ends.
+        // Alice does the first two; Bob does the next two. Mon → Tue → Wed → Thu.
         $this->assertSame(['planned_start' => '2026-06-01', 'planned_end' => '2026-06-01', 'start_day_hours' => 3.5], $this->trim($r[1]['requirement']));
-        $this->assertSame(['planned_start' => '2026-06-01', 'planned_end' => '2026-06-01', 'start_day_hours' => 2.5], $this->trim($r[1]['detail_doc']));
-        $this->assertSame(['planned_start' => '2026-06-01', 'planned_end' => '2026-06-01', 'start_day_hours' => 4.0], $this->trim($r[1]['development']));
-        $this->assertSame(['planned_start' => '2026-06-01', 'planned_end' => '2026-06-01', 'start_day_hours' => 0.5], $this->trim($r[1]['unit_test']));
+        $this->assertSame(['planned_start' => '2026-06-02', 'planned_end' => '2026-06-02', 'start_day_hours' => 2.5], $this->trim($r[1]['detail_doc']));
+        $this->assertSame(['planned_start' => '2026-06-03', 'planned_end' => '2026-06-03', 'start_day_hours' => 4.0], $this->trim($r[1]['development']));
+        $this->assertSame(['planned_start' => '2026-06-04', 'planned_end' => '2026-06-04', 'start_day_hours' => 0.5], $this->trim($r[1]['unit_test']));
 
-        // T2 — Alice's Mon already at 6h (3.5+2.5); 4h splits Mon 2h + Tue 2h.
-        $this->assertSame(['planned_start' => '2026-06-01', 'planned_end' => '2026-06-02', 'start_day_hours' => 2.0], $this->trim($r[2]['requirement']));
-        // Bob's Mon was 4.5h used; T2 requires task to be on Tue+ (task cursor advanced to Tue from Alice's req).
-        // Bob is fresh on Tue → 6h fits same day.
-        $this->assertSame(['planned_start' => '2026-06-02', 'planned_end' => '2026-06-02', 'start_day_hours' => 6.0], $this->trim($r[2]['development']));
+        // T2 — taskCursor resets to windowStart, but Alice already has 2.5h
+        // on Jun 2 (T1 detail_doc) so her 4h req packs into that same Tue,
+        // bringing Alice's Tue total to 6.5h.
+        $this->assertSame(['planned_start' => '2026-06-02', 'planned_end' => '2026-06-02', 'start_day_hours' => 4.0], $this->trim($r[2]['requirement']));
+        // After T2 req, taskCursor = Wed Jun 3. Bob's cursor is Thu Jun 4
+        // with 0.5h used (from T1 unit_test). max(Wed, Thu) = Thu. Bob's 6h
+        // packs into Thu, total 6.5h.
+        $this->assertSame(['planned_start' => '2026-06-04', 'planned_end' => '2026-06-04', 'start_day_hours' => 6.0], $this->trim($r[2]['development']));
 
-        // T3 — Bob's Tue at 6h used. 17h splits Tue 2h + Wed 8h + Thu 7h.
-        $this->assertSame(['planned_start' => '2026-06-02', 'planned_end' => '2026-06-04', 'start_day_hours' => 2.0], $this->trim($r[3]['development']));
+        // T3 — Bob's Thu Jun 4 already at 6.5h used. 17h splits:
+        //   Thu remainder 1.5h + Fri 8h full + Mon 7.5h (Sat/Sun skipped).
+        $this->assertSame(['planned_start' => '2026-06-04', 'planned_end' => '2026-06-08', 'start_day_hours' => 1.5], $this->trim($r[3]['development']));
     }
 
     public function test_exactly_8h_phase_fills_day_and_next_rolls(): void
@@ -154,9 +163,9 @@ class ComputePlannedDatesTest extends TestCase
 
     public function test_weekend_skipping(): void
     {
-        // Project starts Fri 2026-06-05. Alice has 5h on Fri then 4h.
-        // Pattern D: Fri gets 5h, then 3h spills — but Fri only has 8 total
-        // and 5 is already used → 4h doesn't fit (3h remaining). Split: Fri 3h + Mon 1h.
+        // Project starts Fri 2026-06-05. Alice does requirement (5h) then
+        // detail_doc (4h). Under day-after handoff, detail_doc rolls to the
+        // next working day after Friday — Monday (Sat/Sun skipped).
         $tasks = [
             [
                 'row_no' => 1, 'difficulty' => '普通', 'total_hours' => 9.0,
@@ -176,10 +185,11 @@ class ComputePlannedDatesTest extends TestCase
         $this->assertSame('2026-06-05', $r[1]['requirement']['planned_end']);
         $this->assertEqualsWithDelta(5.0, $r[1]['requirement']['start_day_hours'], 0.01);
 
-        // 4h with only 3h remaining Fri → splits Fri 3h + Mon 1h (Sat/Sun skipped).
-        $this->assertSame('2026-06-05', $r[1]['detail_doc']['planned_start']); // Fri
-        $this->assertSame('2026-06-08', $r[1]['detail_doc']['planned_end']);   // Mon (skipped Sat/Sun)
-        $this->assertEqualsWithDelta(3.0, $r[1]['detail_doc']['start_day_hours'], 0.01);
+        // taskCursor advances to Mon Jun 8 (Sat/Sun skipped). Alice is fresh
+        // on Mon → 4h fits the whole day.
+        $this->assertSame('2026-06-08', $r[1]['detail_doc']['planned_start']); // Mon
+        $this->assertSame('2026-06-08', $r[1]['detail_doc']['planned_end']);
+        $this->assertEqualsWithDelta(4.0, $r[1]['detail_doc']['start_day_hours'], 0.01);
     }
 
     public function test_no_assignee_phase_is_skipped(): void
@@ -202,8 +212,8 @@ class ComputePlannedDatesTest extends TestCase
     private function trim(array $entry): array
     {
         return [
-            'planned_start'   => $entry['planned_start'],
-            'planned_end'     => $entry['planned_end'],
+            'planned_start' => $entry['planned_start'],
+            'planned_end' => $entry['planned_end'],
             'start_day_hours' => (float) $entry['start_day_hours'],
         ];
     }

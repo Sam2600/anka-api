@@ -4,11 +4,17 @@ namespace App\Services;
 
 use App\Mail\ContractDraftEmail;
 use App\Models\AiUsageLog;
+use App\Models\Contract;
 use App\Models\ContractTemplate;
 use App\Models\Deal;
 use App\Models\DealContractDraft;
+use App\Models\DealHardAssignment;
+use App\Models\Project;
+use App\Models\ProjectTeamAssignment;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Support\EngagementWindow;
+use Carbon\Carbon;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -37,6 +43,7 @@ use Throwable;
 class ContractDraftService
 {
     private const CLAUDE_MODEL_DEFAULT = 'claude-3-5-sonnet-latest';
+
     private const CLAUDE_BASE_URL_DEFAULT = 'https://api.anthropic.com';
 
     /** Default monthly support cap when the deal/wizard doesn't specify. */
@@ -46,9 +53,10 @@ class ContractDraftService
      * Validate eligibility + run AI generation + persist the draft.
      * Fires the B→A rank transition on first successful generation.
      *
-     * @param  array<string,mixed>  $wizardInputs Path C answers keyed by question key
+     * @param  array<string,mixed>  $wizardInputs  Path C answers keyed by question key
+     *
      * @throws ValidationException 422 when the deal isn't contract-eligible
-     * @throws \RuntimeException   when Claude is unreachable AND no fallback applies
+     * @throws \RuntimeException when Claude is unreachable AND no fallback applies
      */
     public function generateDraft(
         Deal $deal,
@@ -387,6 +395,7 @@ class ContractDraftService
                 $hits[] = $section['key'] ?? 'unknown';
             }
         }
+
         return $hits;
     }
 
@@ -395,7 +404,7 @@ class ContractDraftService
      * signed, and fire A → S via the existing win_deal() stored procedure
      * (with PHP fallback for SQLite tests).
      *
-     * @return array{document: DealContractDraft, auto_won: bool, contract: ?\App\Models\Contract}
+     * @return array{document: DealContractDraft, auto_won: bool, contract: ?Contract}
      */
     public function markSigned(
         DealContractDraft $draft,
@@ -430,7 +439,7 @@ class ContractDraftService
             if ($deal && $deal->canTransitionTo('won')) {
                 $this->fireWinDeal($deal);
                 $autoWon = true;
-                $contract = \App\Models\Contract::where('deal_id', $deal->id)->first();
+                $contract = Contract::where('deal_id', $deal->id)->first();
             }
 
             return [
@@ -470,7 +479,7 @@ class ContractDraftService
             throw ValidationException::withMessages([
                 'estimation' => [
                     'Estimation handoff is incomplete. Missing: '.implode(', ', $missing)
-                    . '. The Estimation menu must populate these before drafting.',
+                    .'. The Estimation menu must populate these before drafting.',
                 ],
             ]);
         }
@@ -516,6 +525,7 @@ class ContractDraftService
             // Dev fallback: stub each AI section with a TODO marker so the
             // wizard renders something the operator can replace.
             Log::warning('ContractDraftService: ANTHROPIC_API_KEY missing, returning TODO stubs');
+
             return collect($aiSections)
                 ->mapWithKeys(fn ($s) => [$s['key'] => '{{TODO: Claude unavailable in this environment — fill manually}}'])
                 ->all();
@@ -545,6 +555,7 @@ class ContractDraftService
                 ]);
         } catch (Throwable $e) {
             Log::error('ContractDraftService: Claude call failed', ['error' => $e->getMessage()]);
+
             // Same fallback as missing key — TODO stubs so the wizard still works.
             return collect($aiSections)
                 ->mapWithKeys(fn ($s) => [$s['key'] => '{{TODO: AI generation failed — '.$this->shortErrorMessage($e).'}}'])
@@ -556,6 +567,7 @@ class ContractDraftService
                 'status' => $response->status(),
                 'body' => substr($response->body(), 0, 300),
             ]);
+
             return collect($aiSections)
                 ->mapWithKeys(fn ($s) => [$s['key'] => '{{TODO: AI returned HTTP '.$response->status().' — fill manually}}'])
                 ->all();
@@ -576,6 +588,7 @@ class ContractDraftService
         $parsed = json_decode($raw, true);
         if (! is_array($parsed)) {
             Log::error('ContractDraftService: Claude returned non-JSON', ['raw' => substr($raw, 0, 300)]);
+
             return collect($aiSections)
                 ->mapWithKeys(fn ($s) => [$s['key'] => '{{TODO: AI returned malformed output — fill manually}}'])
                 ->all();
@@ -816,6 +829,7 @@ TXT;
                 }
             }
         }
+
         return $map;
     }
 
@@ -823,27 +837,23 @@ TXT;
     private function templateVariantContext(ContractTemplate $template): string
     {
         return match ($template->slug) {
-            'cloud_backup' =>
-                'Cloud Backup Service — Provider remotely manages a cloud-based backup solution '
-                . "for the customer's on-premises or cloud servers. Commercial scope: one-time "
-                . 'installation and setup; recurring monthly fee covering cloud storage and '
-                . 'monitoring; defined support hours. Key risk areas: data sovereignty, retention '
-                . 'policy, restore-time SLA, and access controls.',
-            'managed_hosting' =>
-                'Managed Hosting / Cloud Operations — Provider operates and monitors the '
-                . "customer's cloud infrastructure 24/7 against an agreed SLA. Commercial scope: "
-                . 'onboarding fee; monthly retainer for SLA-backed service; cloud-platform costs '
-                . 'passed through at cost. Key risk areas: SLA definitions, incident-response '
-                . 'times, change-management authority, and liability caps.',
-            'engineer_dispatch' =>
-                'Engineer Dispatch (SES) — Provider assigns specialist engineers to the '
-                . "customer's project at a fixed monthly capacity. Commercial scope: monthly "
-                . 'retainer per engineer; overtime / out-of-scope billing per OT policy. '
-                . 'Key risk areas: IP ownership of work product, scope creep, substitute '
-                . 'engineers, and confidentiality of customer systems.',
-            default =>
-                'SES-umbrella service agreement — use DEAL CONTEXT and REQUIREMENT DESCRIPTION '
-                . 'to infer the service type and obligations.',
+            'cloud_backup' => 'Cloud Backup Service — Provider remotely manages a cloud-based backup solution '
+                ."for the customer's on-premises or cloud servers. Commercial scope: one-time "
+                .'installation and setup; recurring monthly fee covering cloud storage and '
+                .'monitoring; defined support hours. Key risk areas: data sovereignty, retention '
+                .'policy, restore-time SLA, and access controls.',
+            'managed_hosting' => 'Managed Hosting / Cloud Operations — Provider operates and monitors the '
+                ."customer's cloud infrastructure 24/7 against an agreed SLA. Commercial scope: "
+                .'onboarding fee; monthly retainer for SLA-backed service; cloud-platform costs '
+                .'passed through at cost. Key risk areas: SLA definitions, incident-response '
+                .'times, change-management authority, and liability caps.',
+            'engineer_dispatch' => 'Engineer Dispatch (SES) — Provider assigns specialist engineers to the '
+                ."customer's project at a fixed monthly capacity. Commercial scope: monthly "
+                .'retainer per engineer; overtime / out-of-scope billing per OT policy. '
+                .'Key risk areas: IP ownership of work product, scope creep, substitute '
+                .'engineers, and confidentiality of customer systems.',
+            default => 'SES-umbrella service agreement — use DEAL CONTEXT and REQUIREMENT DESCRIPTION '
+                .'to infer the service type and obligations.',
         };
     }
 
@@ -920,6 +930,7 @@ TXT;
                 if ($value === null || $value === '') {
                     return '{{TODO: '.$key.'}}';
                 }
+
                 return (string) $value;
             },
             $text,
@@ -934,6 +945,7 @@ TXT;
             if ($value === null) {
                 return null;
             }
+
             return $currency.' '.number_format((float) $value, 2);
         };
 
@@ -962,9 +974,11 @@ TXT;
 
     private function computeEndDate(?string $start, ?int $months): ?string
     {
-        if (! $start || ! $months) return null;
+        if (! $start || ! $months) {
+            return null;
+        }
         try {
-            return \Carbon\Carbon::parse($start)->addMonths($months)->toDateString();
+            return Carbon::parse($start)->addMonths($months)->toDateString();
         } catch (Throwable) {
             return null;
         }
@@ -983,6 +997,7 @@ TXT;
     {
         if (DB::getDriverName() === 'pgsql') {
             DB::select('SELECT win_deal(?, ?)', [$deal->id, $deal->tenant_id]);
+
             return;
         }
 
@@ -991,14 +1006,14 @@ TXT;
         // Mirrors the latest win_deal() Postgres stored procedure so local
         // SQLite runs behave the same as production.
         DB::transaction(function () use ($deal) {
-            $contract = \App\Models\Contract::where('deal_id', $deal->id)->first();
+            $contract = Contract::where('deal_id', $deal->id)->first();
             if (! $contract) {
-                $lastNumber = (int) (\App\Models\Contract::withoutGlobalScope('tenant')->max(
+                $lastNumber = (int) (Contract::withoutGlobalScope('tenant')->max(
                     DB::raw('CAST(SUBSTR(contract_number, 5) AS INTEGER)')
                 ) ?? 0);
                 $nextNumber = 'CON-'.str_pad((string) ($lastNumber + 1), 4, '0', STR_PAD_LEFT);
 
-                $contract = \App\Models\Contract::create([
+                $contract = Contract::create([
                     'id' => Str::orderedUuid(),
                     'tenant_id' => $deal->tenant_id,
                     'deal_id' => $deal->id,
@@ -1012,9 +1027,9 @@ TXT;
                 ]);
             }
 
-            $project = \App\Models\Project::where('contract_id', $contract->id)->first();
+            $project = Project::where('contract_id', $contract->id)->first();
             if (! $project) {
-                $project = \App\Models\Project::create([
+                $project = Project::create([
                     'id' => Str::orderedUuid(),
                     'tenant_id' => $deal->tenant_id,
                     'contract_id' => $contract->id,
@@ -1022,20 +1037,28 @@ TXT;
                     'client' => $deal->client ?? '',
                     'budget_hours' => (float) ($deal->workload_hours ?? 0),
                     'consumed_hours' => 0,
-                    'status' => \App\Models\Project::STATUS_NOT_STARTED,
+                    'status' => Project::STATUS_NOT_STARTED,
                     'start_date' => now()->toDateString(),
                 ]);
 
-                $hardAssignments = \App\Models\DealHardAssignment::query()
+                $hardAssignments = DealHardAssignment::query()
                     ->where('deal_id', $deal->id)
                     ->get();
+
+                // Pre-wire relations so effectiveEndDate() can compute its
+                // fallback (start_date + deal.timeline_months) without an
+                // extra DB round-trip.
+                $project->setRelation('contract', $contract->setRelation('deal', $deal));
+                $teamEndDate = EngagementWindow::computeEndDate(null, null, $project);
+
                 foreach ($hardAssignments as $hard) {
-                    \App\Models\ProjectTeamAssignment::create([
+                    ProjectTeamAssignment::create([
                         'id' => Str::orderedUuid(),
                         'tenant_id' => $deal->tenant_id,
                         'project_id' => $project->id,
                         'employee_id' => $hard->employee_id,
                         'allocated_hours' => $hard->allocated_hours,
+                        'team_end_date' => $teamEndDate?->toDateString(),
                         'assignment_source' => 'deal_transfer',
                     ]);
                 }
@@ -1076,5 +1099,4 @@ TXT;
             Log::warning('ContractDraftService: failed to log AI usage', ['error' => $e->getMessage()]);
         }
     }
-
 }

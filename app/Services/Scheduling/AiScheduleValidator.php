@@ -98,6 +98,7 @@ class AiScheduleValidator
      * not as retry triggers that would block honest schedules.
      */
     public const MIN_RANK_LEVEL_FOR_DESIGN = 30;
+
     public const MIN_RANK_LEVEL_FOR_EXECUTION = [
         '簡単' => 10,
         '普通' => 20,
@@ -120,12 +121,23 @@ class AiScheduleValidator
     }
 
     /**
+     * Slop allowed when comparing summed assigned hours against the
+     * monthly_allocation budget. Apportionment by working-day overlap is
+     * approximate; 0.5h tolerance absorbs rounding without letting real
+     * over-allocation slip past.
+     */
+    public const MONTHLY_BUDGET_TOLERANCE_HOURS = 0.5;
+
+    /**
      * @param  array<int, array{row_no:int, phases:array<int, array{code:string, hours:float}>}>  $tasks
      * @param  array<int, string>  $teamIds
      * @param  array<string, float>  $allocatedHoursByAssignee  employee_id => capacity ceiling. Empty/omitted skips the check.
      * @param  array<string, float>  $engagementMonthsByAssignee  employee_id => contracted months. Empty/omitted skips the engagement-window check.
      * @param  array<string, string>  $capacityRoleByAssignee  employee_id => capacity_role code (backend, frontend, pm, qa, design). Empty/omitted skips the role-mismatch check.
      * @param  array<string, int>  $rankLevelByAssignee  employee_id => ranks.level (Junior 10, Mid 20, Senior 30, Lead 40). Empty/omitted skips the rank-mismatch check.
+     * @param  array<string, array<int, float>>  $monthlyAllocationByAssignee  employee_id => allocation array, indexed from team_start_date. Empty/omitted skips zero-month + monthly-budget checks.
+     * @param  array<string, string>  $teamStartByAssignee  employee_id => team_start_date (YYYY-MM-DD). Required when monthlyAllocationByAssignee is supplied.
+     * @param  array<string, float>  $workableHoursByAssignee  employee_id => workable_hours/month. Required when monthlyAllocationByAssignee is supplied (used to compute the budget).
      * @return array<int, array{code:string, message:string, context:array<string,mixed>}>
      */
     public function validate(
@@ -139,6 +151,9 @@ class AiScheduleValidator
         array $engagementMonthsByAssignee = [],
         array $capacityRoleByAssignee = [],
         array $rankLevelByAssignee = [],
+        array $monthlyAllocationByAssignee = [],
+        array $teamStartByAssignee = [],
+        array $workableHoursByAssignee = [],
     ): array {
         $violations = [];
         $teamSet = array_flip($teamIds);
@@ -257,7 +272,7 @@ class AiScheduleValidator
                                 'code' => 'rank_mismatch',
                                 'message' => "Assignee {$assigneeId} is {$actual} but {$phaseLabel} (row {$rowNo}) "
                                     ."should go to {$required} or higher. Reassign to a higher-ranked teammate, "
-                                    ."or accept the quality risk if the senior pool is saturated.",
+                                    .'or accept the quality risk if the senior pool is saturated.',
                                 'context' => [
                                     'row_no' => $rowNo,
                                     'phase_code' => $phaseCode,
@@ -435,7 +450,148 @@ class AiScheduleValidator
             }
         }
 
-        // 6. Double-booking.
+        // 6. monthly_allocation enforcement — two HARD rules.
+        //    Rule A: never assign anything in a calendar month where the
+        //            member's monthly_allocation is 0 (off the project).
+        //    Rule B: per (assignee, calendar month), sum of phase hours
+        //            apportioned by working-day overlap must be ≤ the
+        //            month's budget (workable_hours × allocation_fraction).
+        //
+        //    Both fire only when monthlyAllocationByAssignee is non-empty —
+        //    legacy assignments without per-month allocation skip these.
+        if (! empty($monthlyAllocationByAssignee)) {
+            // Defensive: reject corrupt allocation arrays before they can
+            // compute impossible budgets (e.g. an entry of 1.5 would yield
+            // a 240h "budget" on a 160h-workable member and silently approve
+            // over-allocation). Each entry must lie in [0.0, 1.0].
+            foreach ($monthlyAllocationByAssignee as $assigneeIdCheck => $allocCheck) {
+                if (! is_array($allocCheck)) {
+                    continue;
+                }
+                foreach ($allocCheck as $i => $fraction) {
+                    if ($fraction < 0.0 || $fraction > 1.0) {
+                        $violations[] = [
+                            'code' => 'invalid_allocation_fraction',
+                            'message' => "Member {$assigneeIdCheck} has invalid monthly_allocation[{$i}] = {$fraction}. "
+                                .'Must be between 0.0 and 1.0. Fix the project_team_assignments row before re-running.',
+                            'context' => [
+                                'assignee_id' => $assigneeIdCheck,
+                                'index' => $i,
+                                'value' => $fraction,
+                            ],
+                        ];
+                    }
+                }
+            }
+
+            // Build (assignee, year_month_bucket) → apportioned hours, plus
+            // a reverse index of the source assignments so we can name the
+            // offending row/phase in error messages.
+            $bucketHours = [];
+            $bucketSources = [];
+
+            foreach ($payload->assignmentsByRowPhase as $rowNo => $byPhase) {
+                $task = $tasksByRow[$rowNo] ?? null;
+                if ($task === null) {
+                    continue; // unknown_row already flagged above
+                }
+                $phasesByCode = [];
+                foreach ($task['phases'] as $p) {
+                    $phasesByCode[$p['code']] = $p;
+                }
+                foreach ($byPhase as $phaseCode => $entry) {
+                    $assigneeId = $entry['assignee_id'];
+                    $alloc = $monthlyAllocationByAssignee[$assigneeId] ?? null;
+                    if (! is_array($alloc) || empty($alloc)) {
+                        continue;
+                    }
+                    $teamStart = isset($teamStartByAssignee[$assigneeId])
+                        ? Carbon::parse($teamStartByAssignee[$assigneeId])->startOfDay()
+                        : $windowStart->copy();
+                    $hours = (float) ($phasesByCode[$phaseCode]['hours'] ?? 0);
+                    $start = Carbon::parse($entry['planned_start'])->startOfDay();
+                    $end = Carbon::parse($entry['planned_end'])->startOfDay();
+                    if ($end->lessThan($start) || $hours <= 0) {
+                        continue;
+                    }
+
+                    // Working-day count per calendar month touched by the range.
+                    $perMonthDays = $this->workingDaysPerMonth($calendar, $start, $end, $assigneeId);
+                    $totalDays = array_sum($perMonthDays);
+                    if ($totalDays === 0) {
+                        continue; // non_working_start/end already flagged
+                    }
+
+                    foreach ($perMonthDays as $monthKey => $daysInMonth) {
+                        $monthIndex = $this->monthIndexFrom($teamStart, $monthKey);
+                        $fraction = $alloc[$monthIndex] ?? 0.0;
+                        $apportioned = $hours * ($daysInMonth / $totalDays);
+
+                        // Rule A — zero-month assignment.
+                        if ($fraction <= 0.0) {
+                            $violations[] = [
+                                'code' => 'zero_month_assignment',
+                                'message' => "Member {$assigneeId} cannot take phase {$phaseCode} of row {$rowNo}: "
+                                    ."their monthly_allocation for {$monthKey} is 0 (off the project that month). "
+                                    .'Reassign to a teammate who has capacity in that month, or move the phase to a month where this member is available.',
+                                'context' => [
+                                    'row_no' => $rowNo,
+                                    'phase_code' => $phaseCode,
+                                    'assignee_id' => $assigneeId,
+                                    'month' => $monthKey,
+                                    'month_index' => $monthIndex,
+                                ],
+                            ];
+
+                            continue; // don't double-count zero-month into the budget bucket
+                        }
+
+                        $bucketKey = $assigneeId.'|'.$monthKey;
+                        $bucketHours[$bucketKey] = ($bucketHours[$bucketKey] ?? 0.0) + $apportioned;
+                        $bucketSources[$bucketKey][] = [
+                            'row_no' => $rowNo,
+                            'phase_code' => $phaseCode,
+                            'apportioned_hours' => $apportioned,
+                        ];
+                    }
+                }
+            }
+
+            // Rule B — compare each bucket against its monthly budget.
+            foreach ($bucketHours as $bucketKey => $assignedHours) {
+                [$assigneeId, $monthKey] = explode('|', $bucketKey, 2);
+                $alloc = $monthlyAllocationByAssignee[$assigneeId] ?? [];
+                $teamStart = isset($teamStartByAssignee[$assigneeId])
+                    ? Carbon::parse($teamStartByAssignee[$assigneeId])->startOfDay()
+                    : $windowStart->copy();
+                $monthIndex = $this->monthIndexFrom($teamStart, $monthKey);
+                $fraction = $alloc[$monthIndex] ?? 0.0;
+                $workable = $workableHoursByAssignee[$assigneeId] ?? 160.0;
+                $budget = $workable * $fraction;
+
+                if ($assignedHours > $budget + self::MONTHLY_BUDGET_TOLERANCE_HOURS) {
+                    $violations[] = [
+                        'code' => 'monthly_budget_overrun',
+                        'message' => "Member {$assigneeId} over-allocated in {$monthKey}: "
+                            .number_format($assignedHours, 1).'h assigned vs '
+                            .number_format($budget, 1).'h budget (allocation='
+                            .number_format($fraction, 2).' × workable_hours='
+                            .number_format($workable, 0).'h). Move some hours to another month where this member has capacity, or reassign the overshoot to another teammate.',
+                        'context' => [
+                            'assignee_id' => $assigneeId,
+                            'month' => $monthKey,
+                            'assigned_hours' => $assignedHours,
+                            'budget_hours' => $budget,
+                            'allocation_fraction' => $fraction,
+                            'workable_hours' => $workable,
+                            'sources' => $bucketSources[$bucketKey] ?? [],
+                        ],
+                    ];
+                }
+            }
+        }
+
+        // 7. Double-booking.
         foreach ($intervals as $assigneeId => $list) {
             usort($list, fn ($a, $b) => $a['start']->timestamp <=> $b['start']->timestamp);
             for ($i = 1; $i < count($list); $i++) {
@@ -456,5 +612,43 @@ class AiScheduleValidator
         }
 
         return $violations;
+    }
+
+    /**
+     * Count working days per calendar month for the range [start, end],
+     * inclusive of both ends. Returns map of "YYYY-MM" => working-day count.
+     * Phase spanning month boundary → entries for each month it touches.
+     */
+    private function workingDaysPerMonth(
+        WorkingDayCalendar $calendar,
+        Carbon $start,
+        Carbon $end,
+        string $assigneeId,
+    ): array {
+        $perMonth = [];
+        $cursor = $start->copy();
+        while ($cursor->lessThanOrEqualTo($end)) {
+            if ($calendar->isWorkingDay($cursor, $assigneeId)) {
+                $key = $cursor->format('Y-m');
+                $perMonth[$key] = ($perMonth[$key] ?? 0) + 1;
+            }
+            $cursor->addDay();
+        }
+
+        return $perMonth;
+    }
+
+    /**
+     * Translate a "YYYY-MM" key into its index in a monthly_allocation
+     * array anchored at $teamStart. Returns negative on out-of-range
+     * (caller treats negative index → fraction = 0 = zero-month rule).
+     */
+    private function monthIndexFrom(Carbon $teamStart, string $monthKey): int
+    {
+        [$year, $month] = array_map('intval', explode('-', $monthKey));
+        $startIndex = $teamStart->year * 12 + ($teamStart->month - 1);
+        $targetIndex = $year * 12 + ($month - 1);
+
+        return $targetIndex - $startIndex;
     }
 }
